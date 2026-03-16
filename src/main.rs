@@ -1,0 +1,122 @@
+mod agent;
+mod auth;
+mod events;
+mod store;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+use events::{event_channel, AgentEvent};
+use store::Store;
+
+#[derive(Debug, Parser)]
+#[command(name = "kley")]
+#[command(about = "Minimal coding agent — learning-focused, stripped to the basics")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Authenticate with a provider
+    Login {
+        #[command(subcommand)]
+        provider: LoginProvider,
+    },
+    /// Start an interactive chat session
+    Chat {
+        /// Model to use (e.g. "gpt-4.1" or "glm-4.7")
+        #[arg(long, short)]
+        model: Option<String>,
+
+        /// Resume the most recent session
+        #[arg(long)]
+        last: bool,
+
+        /// Resume a specific session by ID
+        #[arg(long)]
+        resume: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LoginProvider {
+    /// Login via OpenAI ChatGPT Plus/Pro subscription (OAuth)
+    Openai,
+    /// Store a ZAI (ZhipuAI) API key
+    Zai,
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("error: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Login { provider } => match provider {
+            LoginProvider::Openai => auth::openai::login_interactive().await?,
+            LoginProvider::Zai => auth::zai::login_interactive()?,
+        },
+        Command::Chat {
+            model,
+            last,
+            resume,
+        } => {
+            let store = Store::open()?;
+            let (emitter, receiver) = event_channel();
+
+            // Spawn a thread to print events as they arrive.
+            let event_thread = std::thread::spawn(move || {
+                while let Ok(event) = receiver.recv_blocking() {
+                    print_event(&event);
+                }
+            });
+
+            // Determine which session to use
+            let session_id = if let Some(id) = resume {
+                Some(id)
+            } else if last {
+                store::Session::get_latest(&store)?.map(|s| s.id)
+            } else {
+                None
+            };
+
+            agent::chat_loop(model.as_deref(), session_id.as_deref(), &store, emitter).await?;
+
+            let _ = event_thread.join();
+        }
+    }
+
+    Ok(())
+}
+
+/// Render an event to stderr with visual emphasis appropriate to its severity.
+fn print_event(event: &AgentEvent) {
+    match event {
+        AgentEvent::TransportFallback { .. } | AgentEvent::TurnError { .. } => {
+            // High-visibility: box the message
+            let msg = event.to_string();
+            let width = msg.len() + 4;
+            eprintln!();
+            eprintln!("┌{}┐", "─".repeat(width));
+            eprintln!("│  {}  │", msg);
+            eprintln!("└{}┘", "─".repeat(width));
+            eprintln!();
+        }
+        AgentEvent::TokenRefreshed { .. } => {
+            eprintln!("  ↻ {event}");
+        }
+        AgentEvent::TransportSelected { .. }
+        | AgentEvent::TurnStart { .. }
+        | AgentEvent::TurnComplete { .. } => {
+            eprintln!("  {event}");
+        }
+    }
+}
