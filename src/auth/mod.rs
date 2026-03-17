@@ -46,6 +46,7 @@ pub trait SecretBackend: Send + Sync {
 // ── Vault backend ───────────────────────────────────────────────────────────
 
 /// HashiCorp Vault KV v2 backend. Reads `VAULT_ADDR` and `VAULT_TOKEN` from environment.
+#[derive(Debug)]
 pub struct VaultBackend {
     addr: String,
     token: String,
@@ -204,36 +205,48 @@ pub struct CredentialStore {
     backend_name: String,
 }
 
+enum CredentialBackendSelection {
+    Vault(VaultBackend),
+    AgeFile { path: PathBuf, prompt: &'static str },
+}
+
+fn select_backend() -> Result<CredentialBackendSelection> {
+    if let Some(vault) = VaultBackend::from_env() {
+        return Ok(CredentialBackendSelection::Vault(vault));
+    }
+
+    let config_dir = dirs::config_dir()
+        .context("could not determine config directory")?
+        .join("kley");
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("failed to create {}", config_dir.display()))?;
+    let path = config_dir.join("credentials.age");
+
+    let prompt = if path.exists() {
+        "Passphrase: "
+    } else {
+        "Choose passphrase for credentials: "
+    };
+
+    Ok(CredentialBackendSelection::AgeFile { path, prompt })
+}
+
 impl CredentialStore {
     /// Open the credential store, auto-selecting the best available backend.
     pub fn open() -> Result<Self> {
-        // Try Vault first
-        if let Some(vault) = VaultBackend::from_env() {
-            return Ok(Self {
+        match select_backend()? {
+            CredentialBackendSelection::Vault(vault) => Ok(Self {
                 backend: Box::new(vault),
                 backend_name: "vault".into(),
-            });
+            }),
+            CredentialBackendSelection::AgeFile { path, prompt } => {
+                let backend = AgeFileBackend::open_interactive(path, prompt)?;
+                Ok(Self {
+                    backend: Box::new(backend),
+                    backend_name: "age-file".into(),
+                })
+            }
         }
-
-        // Fall back to age-encrypted file
-        let config_dir = dirs::config_dir()
-            .context("could not determine config directory")?
-            .join("kley");
-        std::fs::create_dir_all(&config_dir)
-            .with_context(|| format!("failed to create {}", config_dir.display()))?;
-        let path = config_dir.join("credentials.age");
-
-        let prompt = if path.exists() {
-            "Passphrase: "
-        } else {
-            "Choose passphrase for credentials: "
-        };
-        let backend = AgeFileBackend::open_interactive(path, prompt)?;
-
-        Ok(Self {
-            backend: Box::new(backend),
-            backend_name: "age-file".into(),
-        })
     }
 
     /// Which backend is active.

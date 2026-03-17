@@ -27,9 +27,9 @@ const RESPONSES_WS_BETA_HEADER: &str = "responses_websockets=2026-02-06";
 // ── Shared message types ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Message {
-    role: String,
-    content: String,
+pub(crate) struct Message {
+    pub(crate) role: String,
+    pub(crate) content: String,
 }
 
 // ── OpenAI Responses API types (shared by WS and SSE) ───────────────────────
@@ -106,13 +106,7 @@ pub async fn chat_loop(
 
     // Load existing history (for resumed sessions) or start fresh
     let existing_turns = Turn::list_for_session(store, &session.id)?;
-    let mut history: Vec<Message> = existing_turns
-        .iter()
-        .map(|t| Message {
-            role: t.role.clone(),
-            content: t.content.clone(),
-        })
-        .collect();
+    let mut history = history_from_turns(&existing_turns);
 
     if !existing_turns.is_empty() {
         eprintln!("Loaded {} previous turns", existing_turns.len());
@@ -249,6 +243,16 @@ fn build_input_items(messages: &[Message]) -> Vec<serde_json::Value> {
                 "role": m.role,
                 "content": m.content,
             })
+        })
+        .collect()
+}
+
+pub(crate) fn history_from_turns(turns: &[Turn]) -> Vec<Message> {
+    turns
+        .iter()
+        .map(|t| Message {
+            role: t.role.clone(),
+            content: t.content.clone(),
         })
         .collect()
 }
@@ -415,51 +419,64 @@ async fn send_openai_sse(auth: &ResolvedAuth, model: &str, messages: &[Message])
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         // Process complete double-newline-delimited SSE blocks
-        while let Some(block_end) = buffer.find("\n\n") {
-            let block = buffer[..block_end].to_string();
-            buffer = buffer[block_end + 2..].to_string();
+            let mut done = false;
+            while let Some(block_end) = buffer.find("\n\n") {
+                let block = buffer[..block_end].to_string();
+                buffer = buffer[block_end + 2..].to_string();
 
-            let mut event_type = String::new();
-            let mut data = String::new();
-            for line in block.lines() {
-                if let Some(t) = line.strip_prefix("event: ") {
-                    event_type = t.to_string();
-                } else if let Some(d) = line.strip_prefix("data: ") {
-                    data = d.to_string();
+                if process_openai_sse_block(&block, &mut full_response)? {
+                    done = true;
+                    break;
                 }
             }
 
-            if data.is_empty() {
-                continue;
+            if done {
+                break;
             }
+        }
 
-            match event_type.as_str() {
-                "response.output_text.delta" => {
-                    if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                        if let Some(delta) = event.delta {
-                            print!("{delta}");
-                            io::stdout().flush().ok();
-                            full_response.push_str(&delta);
-                        }
-                    }
-                }
-                "response.completed" => break,
-                "error" => {
-                    let err_value: serde_json::Value =
-                        serde_json::from_str(&data).unwrap_or_default();
-                    let err_msg = err_value
-                        .get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown error");
-                    anyhow::bail!("OpenAI SSE error: {err_msg}");
-                }
-                _ => {}
-            }
+        Ok(full_response)
+    }
+
+pub(crate) fn process_openai_sse_block(block: &str, full_response: &mut String) -> Result<bool> {
+    let mut event_type = String::new();
+    let mut data = String::new();
+    for line in block.lines() {
+        if let Some(t) = line.strip_prefix("event: ") {
+            event_type = t.to_string();
+        } else if let Some(d) = line.strip_prefix("data: ") {
+            data = d.to_string();
         }
     }
 
-    Ok(full_response)
+    if data.is_empty() {
+        return Ok(false);
+    }
+
+    match event_type.as_str() {
+        "response.output_text.delta" => {
+            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
+                if let Some(delta) = event.delta {
+                    print!("{delta}");
+                    io::stdout().flush().ok();
+                    full_response.push_str(&delta);
+                }
+            }
+        }
+        "response.completed" => return Ok(true),
+        "error" => {
+            let err_value: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+            let err_msg = err_value
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("OpenAI SSE error: {err_msg}");
+        }
+        _ => {}
+    }
+
+    Ok(false)
 }
 
 // ── ZAI SSE (chat/completions, different API format) ────────────────────────
@@ -496,29 +513,43 @@ async fn send_zai_sse(auth: &ResolvedAuth, model: &str, messages: &[Message]) ->
         let chunk = chunk.context("stream error")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
+        let mut done = false;
         while let Some(line_end) = buffer.find('\n') {
             let line = buffer[..line_end].trim().to_string();
             buffer = buffer[line_end + 1..].to_string();
 
-            if line.is_empty() || line.starts_with(':') {
-                continue;
+            if process_zai_sse_line(&line, &mut full_response)? {
+                done = true;
+                break;
             }
+        }
 
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                    break;
-                }
+        if done {
+            break;
+        }
+    }
 
-                if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
-                    if let Some(choices) = chunk.choices {
-                        for choice in choices {
-                            if let Some(delta) = choice.delta {
-                                if let Some(content) = delta.content {
-                                    print!("{content}");
-                                    io::stdout().flush().ok();
-                                    full_response.push_str(&content);
-                                }
-                            }
+    Ok(full_response)
+}
+
+pub(crate) fn process_zai_sse_line(line: &str, full_response: &mut String) -> Result<bool> {
+    if line.is_empty() || line.starts_with(':') {
+        return Ok(false);
+    }
+
+    if let Some(data) = line.strip_prefix("data: ") {
+        if data == "[DONE]" {
+            return Ok(true);
+        }
+
+        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
+            if let Some(choices) = chunk.choices {
+                for choice in choices {
+                    if let Some(delta) = choice.delta {
+                        if let Some(content) = delta.content {
+                            print!("{content}");
+                            io::stdout().flush().ok();
+                            full_response.push_str(&content);
                         }
                     }
                 }
@@ -526,5 +557,5 @@ async fn send_zai_sse(auth: &ResolvedAuth, model: &str, messages: &[Message]) ->
         }
     }
 
-    Ok(full_response)
+    Ok(false)
 }
