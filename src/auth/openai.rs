@@ -332,9 +332,9 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
 
     // Run the server in the background, shut down once we get the code
     let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("callback server error");
+        if let Err(err) = axum::serve(listener, app).await {
+            eprintln!("callback server error: {err:#}");
+        }
     });
 
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
@@ -451,7 +451,8 @@ mod tests {
         let sig_b64 = URL_SAFE_NO_PAD.encode(b"sig");
         let token = format!("{header_b64}.{payload_b64}.{sig_b64}");
 
-        let account_id = extract_account_id(&token).unwrap();
+        let account_id = extract_account_id(&token)
+            .expect("extract_account_id should parse generated test token");
         assert_eq!(account_id, "acct-test-123");
     }
 
