@@ -322,9 +322,9 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
         }),
     );
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", CALLBACK_PORT))
         .await
-        .context("failed to bind callback server on 127.0.0.1:1455")?;
+        .context("failed to bind callback server on 0.0.0.0:1455")?;
 
     // Run the server in the background, shut down once we get the code
     let server = tokio::spawn(async move {
@@ -333,11 +333,34 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
             .expect("callback server error");
     });
 
-    // Wait for the code (with a 60s timeout)
-    let code = tokio::time::timeout(std::time::Duration::from_secs(60), rx)
-        .await
-        .context("timed out waiting for OAuth callback (60s)")?
-        .context("callback channel dropped")?;
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    use tokio::io::AsyncBufReadExt;
+    let mut line = String::new();
+
+    let code = tokio::select! {
+        res = tokio::time::timeout(std::time::Duration::from_secs(120), rx) => {
+            res.context("timed out waiting for OAuth callback (120s)")?.context("callback channel dropped")?
+        }
+        res = stdin.read_line(&mut line) => {
+            res.context("failed to read from stdin")?;
+            let trimmed = line.trim();
+            if trimmed.starts_with("http") {
+                // Try to extract the code from the URL query params
+                let url = reqwest::Url::parse(trimmed).context("invalid redirect URL pasted")?;
+                let mut code = None;
+                for (k, v) in url.query_pairs() {
+                    if k == "code" {
+                        code = Some(v.into_owned());
+                        break;
+                    }
+                }
+                code.context("Could not find 'code' parameter in the pasted URL")?
+            } else {
+                // Assume they just pasted the code directly
+                trimmed.to_string()
+            }
+        }
+    };
 
     server.abort();
     Ok(code)
@@ -352,12 +375,14 @@ pub async fn login_interactive() -> Result<()> {
     let url = build_authorize_url(&challenge, &state);
 
     eprintln!("Opening browser for OpenAI login...");
-    eprintln!("If the browser doesn't open, visit:\n  {url}\n");
+    eprintln!("If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n");
 
     // Try to open the browser (non-fatal if it fails)
     let _ = open::that(&url);
 
-    eprintln!("Waiting for callback on http://127.0.0.1:{CALLBACK_PORT}/auth/callback ...");
+    eprintln!("Waiting for callback on http://localhost:{CALLBACK_PORT}/auth/callback...");
+    eprintln!("(If the browser cannot redirect back to this terminal, copy the final URL from your browser's address bar and paste it here)");
+    eprintln!("Paste URL or code > ");
     let code = wait_for_callback(&state).await?;
 
     eprintln!("Exchanging authorization code for tokens...");

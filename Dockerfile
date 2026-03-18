@@ -19,9 +19,9 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 WORKDIR /app
 
-# Install CA certificates for HTTPS/WSS connections
+# Install runtime dependencies: CA certs, git, curl, ssh (for git+ssh remotes)
 RUN apt-get update && \
-    apt-get install -y ca-certificates && \
+    apt-get install -y ca-certificates git curl openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary
