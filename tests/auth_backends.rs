@@ -15,6 +15,8 @@ fn sample_creds() -> Credentials {
             refresh_token: "rt-refresh-me".into(),
             expires_at_ms: u64::MAX,
             account_id: "acct-integration-test".into(),
+            id_token: None,
+            api_key: None,
         }),
         zai: Some(ZaiCredentials {
             api_key: "zai-integration-key".into(),

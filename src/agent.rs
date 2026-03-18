@@ -20,7 +20,7 @@ use crate::store::{NewSession, NewTurn, Session, SessionStatus, Store, Turn};
 use crate::tools::ToolRegistry;
 
 /// Default models per provider.
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4.1";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
 const DEFAULT_ZAI_MODEL: &str = "glm-4.7";
 
 const RESPONSES_WS_BETA_HEADER: &str = "responses_websockets=2026-02-06";
@@ -50,6 +50,20 @@ pub enum TurnResult {
     Text(String),
     /// The model wants to call one or more tools.
     ToolCalls(Vec<ToolCall>),
+}
+
+/// Controls whether the agent loop runs interactively or autonomously.
+#[derive(Debug, Clone)]
+pub enum RunMode {
+    /// Normal interactive mode — wait for user input between turns.
+    Interactive,
+    /// Autonomous mode — the agent works continuously, checking in via
+    /// `report_status`. After each text response, a nudge is injected so
+    /// the model keeps going. Stops after `max_turns` turns.
+    Autonomous {
+        initial_prompt: String,
+        max_turns: usize,
+    },
 }
 
 // ── OpenAI Responses API types (shared by WS and SSE) ───────────────────────
@@ -113,6 +127,7 @@ pub async fn chat_loop(
     resume_session_id: Option<&str>,
     store: &Store,
     events: EventEmitter,
+    run_mode: RunMode,
 ) -> Result<()> {
     let cred_store = CredentialStore::open()?;
     let resolved = auth::resolve_auth(&cred_store, &events).await?;
@@ -124,8 +139,15 @@ pub async fn chat_loop(
     // Session-scoped WS fallback flag (same pattern as codex-rs `disable_websockets`)
     let ws_disabled = AtomicBool::new(false);
 
-    // Build the tool registry
-    let registry = crate::tools::default_registry();
+    // Discover skills and rules, build system prompt
+    let project_dir = std::env::current_dir().unwrap_or_default();
+
+    // Build the tool registry (needs project_dir for read_skill)
+    let registry = crate::tools::default_registry(project_dir.clone());
+
+    let rules = crate::skills::discover_rules(&project_dir);
+    let skills = crate::skills::discover_skills(&project_dir);
+    let instructions = crate::skills::build_system_prompt(&rules, &skills);
 
     // Resolve or create the session
     let session = match resume_session_id {
@@ -161,23 +183,39 @@ pub async fn chat_loop(
     let stdin = io::stdin();
     let mut turn_number: usize = existing_turns.len();
 
+    // Autonomous mode state
+    let (is_autonomous, mut remaining_turns) = match &run_mode {
+        RunMode::Interactive => (false, usize::MAX),
+        RunMode::Autonomous { max_turns, .. } => (true, *max_turns),
+    };
+    // In autonomous mode, the first prompt comes from the CLI
+    let mut pending_input: Option<String> = match &run_mode {
+        RunMode::Autonomous { initial_prompt, .. } => Some(initial_prompt.clone()),
+        RunMode::Interactive => None,
+    };
+    let mut consecutive_errors: usize = 0;
+
     loop {
-        eprint!("> ");
-        io::stderr().flush().ok();
+        // Get the next input — either from pending (autonomous) or stdin
+        let input = if let Some(queued) = pending_input.take() {
+            queued
+        } else {
+            eprint!("> ");
+            io::stderr().flush().ok();
 
-        let mut input = String::new();
-        let bytes_read = stdin.lock().read_line(&mut input)?;
-        if bytes_read == 0 {
-            // Mark session as completed on clean exit
-            Session::update_status(store, &session.id, SessionStatus::Completed)?;
-            eprintln!("\nGoodbye.");
-            break;
-        }
-
-        let input = input.trim();
-        if input.is_empty() {
-            continue;
-        }
+            let mut line = String::new();
+            let bytes_read = stdin.lock().read_line(&mut line)?;
+            if bytes_read == 0 {
+                Session::update_status(store, &session.id, SessionStatus::Completed)?;
+                eprintln!("\nGoodbye.");
+                break;
+            }
+            let trimmed = line.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            trimmed
+        };
 
         turn_number += 1;
 
@@ -198,7 +236,7 @@ pub async fn chat_loop(
         history.push(serde_json::json!({
             "type": "message",
             "role": "user",
-            "content": input,
+            "content": &input,
         }));
 
         events.emit(AgentEvent::TurnStart {
@@ -215,6 +253,7 @@ pub async fn chat_loop(
                         &model,
                         &history,
                         &registry,
+                        &instructions,
                         &ws_disabled,
                         &events,
                     )
@@ -310,8 +349,12 @@ pub async fn chat_loop(
             }
         };
 
+        // Track whether this turn succeeded (for autonomous error handling)
+        let turn_ok;
+
         match final_text {
             Ok(response) => {
+                turn_ok = true;
                 events.emit(AgentEvent::TurnComplete {
                     model: model.clone(),
                     turn_number,
@@ -345,6 +388,7 @@ pub async fn chat_loop(
                 }));
             }
             Err(err) => {
+                turn_ok = false;
                 events.emit(AgentEvent::TurnError {
                     model: model.clone(),
                     turn_number,
@@ -355,6 +399,33 @@ pub async fn chat_loop(
         }
 
         println!(); // blank line after response
+
+        // ── Autonomous re-injection ──────────────────────────────────────
+        if is_autonomous {
+            if turn_ok {
+                consecutive_errors = 0;
+            } else {
+                consecutive_errors += 1;
+                if consecutive_errors >= 3 {
+                    eprintln!(
+                        "\n🛑 Autonomous mode: {} consecutive errors. Stopping.",
+                        consecutive_errors
+                    );
+                    Session::update_status(store, &session.id, SessionStatus::Completed)?;
+                    break;
+                }
+            }
+
+            remaining_turns = remaining_turns.saturating_sub(1);
+            if remaining_turns == 0 {
+                eprintln!("\n🛑 Autonomous mode: max turns reached. Stopping.");
+                Session::update_status(store, &session.id, SessionStatus::Completed)?;
+                break;
+            }
+            // Inject a synthetic nudge so the model continues
+            let nudge = "Acknowledged. Continue to the next improvement.".to_string();
+            pending_input = Some(nudge);
+        }
     }
 
     Ok(())
@@ -364,7 +435,7 @@ fn default_model(provider: &str) -> String {
     match provider {
         "openai" => DEFAULT_OPENAI_MODEL.to_string(),
         "zai" => DEFAULT_ZAI_MODEL.to_string(),
-        _ => "gpt-4.1".to_string(),
+        _ => "gpt-5.3-codex-spark".to_string(),
     }
 }
 
@@ -474,6 +545,7 @@ async fn send_openai(
     model: &str,
     history: &[serde_json::Value],
     registry: &ToolRegistry,
+    instructions: &str,
     ws_disabled: &AtomicBool,
     events: &EventEmitter,
 ) -> Result<TurnResult> {
@@ -483,7 +555,7 @@ async fn send_openai(
             provider: "openai".into(),
             transport: Transport::Sse,
         });
-        return send_openai_sse(auth, model, history, registry).await;
+        return send_openai_sse(auth, model, history, registry, instructions).await;
     }
 
     // Try WebSocket first
@@ -492,7 +564,7 @@ async fn send_openai(
         transport: Transport::WebSocket,
     });
 
-    match send_openai_ws(auth, model, history, registry).await {
+    match send_openai_ws(auth, model, history, registry, instructions).await {
         Ok(response) => Ok(response),
         Err(err) => {
             let reason = format!("{err:#}");
@@ -503,7 +575,7 @@ async fn send_openai(
                 to: Transport::Sse,
                 reason,
             });
-            send_openai_sse(auth, model, history, registry).await
+            send_openai_sse(auth, model, history, registry, instructions).await
         }
     }
 }
@@ -515,22 +587,38 @@ async fn send_openai_ws(
     model: &str,
     history: &[serde_json::Value],
     registry: &ToolRegistry,
+    instructions: &str,
 ) -> Result<TurnResult> {
-    let ws_url = format!(
-        "wss://api.openai.com/v1/responses?model={}",
-        urlencoding::encode(model)
-    );
+    let ws_url = if let Some(stripped) = auth.base_url.strip_prefix("http://") {
+        format!("ws://{stripped}/responses")
+    } else if let Some(stripped) = auth.base_url.strip_prefix("https://") {
+        format!("wss://{stripped}/responses")
+    } else {
+        format!("{}/responses", auth.base_url)
+    };
 
-    let request = tungstenite::http::Request::builder()
-        .uri(&ws_url)
-        .header("Authorization", format!("Bearer {}", auth.api_key))
-        .header("OpenAI-Beta", RESPONSES_WS_BETA_HEADER)
-        .header(
-            "openai-organization",
-            auth.account_id.as_deref().unwrap_or(""),
-        )
-        .body(())
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = ws_url
+        .into_client_request()
         .context("failed to build WebSocket request")?;
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", auth.api_key)
+            .parse()
+            .context("invalid auth header value")?,
+    );
+    if let Some(account_id) = &auth.account_id {
+        request.headers_mut().insert(
+            "ChatGPT-Account-ID",
+            account_id.parse().context("invalid account id header")?,
+        );
+    }
+    request.headers_mut().insert(
+        "OpenAI-Beta",
+        RESPONSES_WS_BETA_HEADER
+            .parse()
+            .context("invalid beta header value")?,
+    );
 
     let (mut ws, _response) = tokio_tungstenite::connect_async(request)
         .await
@@ -539,18 +627,19 @@ async fn send_openai_ws(
     // Build tools array
     let tools = registry.to_api_tools();
 
-    // Send response.create
+    // Send response.create — fields must be at the top level alongside "type",
+    // matching codex-rs's #[serde(tag = "type")] serialization.
     let mut create_payload = serde_json::json!({
         "type": "response.create",
-        "response": {
-            "model": model,
-            "instructions": "You are a helpful coding assistant.",
-            "input": build_input_items(history),
-            "stream": true
-        }
+        "model": model,
+        "instructions": instructions,
+        "input": build_input_items(history),
+        "stream": true,
+        "store": false,
+        "tool_choice": "auto"
     });
     if !tools.is_empty() {
-        create_payload["response"]["tools"] = serde_json::json!(tools);
+        create_payload["tools"] = serde_json::json!(tools);
     }
 
     ws.send(tungstenite::Message::Text(create_payload.to_string()))
@@ -652,15 +741,18 @@ async fn send_openai_sse(
     model: &str,
     history: &[serde_json::Value],
     registry: &ToolRegistry,
+    instructions: &str,
 ) -> Result<TurnResult> {
     let url = format!("{}/responses", auth.base_url);
 
     let tools = registry.to_api_tools();
     let mut body = serde_json::json!({
         "model": model,
-        "instructions": "You are a helpful coding assistant.",
+        "instructions": instructions,
         "input": build_input_items(history),
-        "stream": true
+        "stream": true,
+        "store": false,
+        "tool_choice": "auto"
     });
     if !tools.is_empty() {
         body["tools"] = serde_json::json!(tools);
@@ -671,9 +763,8 @@ async fn send_openai_sse(
         .post(&url)
         .header("Authorization", format!("Bearer {}", auth.api_key))
         .header("Content-Type", "application/json");
-
-    if let Some(ref account_id) = auth.account_id {
-        req = req.header("openai-organization", account_id);
+    if let Some(account_id) = &auth.account_id {
+        req = req.header("ChatGPT-Account-ID", account_id);
     }
 
     let resp = req.json(&body).send().await.context("SSE request failed")?;

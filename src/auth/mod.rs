@@ -28,6 +28,12 @@ pub struct OpenAiCredentials {
     /// Milliseconds since epoch when the access token expires
     pub expires_at_ms: u64,
     pub account_id: String,
+    /// ID token from the OAuth flow (needed for token exchange / refresh)
+    #[serde(default)]
+    pub id_token: Option<String>,
+    /// API key obtained via token exchange (this is what we actually use for API calls)
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,12 +283,29 @@ pub struct ResolvedAuth {
 }
 
 /// Resolve the current auth, refreshing tokens if necessary.
+///
+/// For OpenAI, checks `OPENAI_API_KEY` env var first (platform API keys).
+/// Falls back to stored OAuth credentials if the env var is not set.
 pub async fn resolve_auth(store: &CredentialStore, events: &EventEmitter) -> Result<ResolvedAuth> {
+    // Check for OPENAI_API_KEY env var first — this is the simplest path
+    // and avoids the ChatGPT OAuth scope limitations.
+    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
+        if !api_key.is_empty() {
+            return Ok(ResolvedAuth {
+                provider: "openai".into(),
+                api_key,
+                base_url: std::env::var("OPENAI_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+                account_id: None,
+            });
+        }
+    }
+
     let mut creds = store.load()?;
     let provider = creds
         .active_provider
         .as_deref()
-        .context("no active provider — run `kley login openai` or `kley login zai` first")?;
+        .context("no active provider — run `kley login openai` or `kley login zai` first, or set OPENAI_API_KEY")?;
 
     match provider {
         "openai" => {
@@ -307,10 +330,21 @@ pub async fn resolve_auth(store: &CredentialStore, events: &EventEmitter) -> Res
             }
 
             let oa = creds.openai.as_ref().unwrap();
+            // If we have an exchanged API key, use the standard API endpoint.
+            // Otherwise fall back to the ChatGPT backend (access_token auth),
+            // matching codex-rs's behavior.
+            let (key, base_url) = if let Some(ref api_key) = oa.api_key {
+                (api_key.clone(), "https://api.openai.com/v1".to_string())
+            } else {
+                (
+                    oa.access_token.clone(),
+                    "https://chatgpt.com/backend-api/codex".to_string(),
+                )
+            };
             Ok(ResolvedAuth {
                 provider: "openai".into(),
-                api_key: oa.access_token.clone(),
-                base_url: "https://api.openai.com/v1".into(),
+                api_key: key,
+                base_url,
                 account_id: Some(oa.account_id.clone()),
             })
         }
@@ -365,6 +399,8 @@ mod tests {
                 refresh_token: "rt-test-refresh".into(),
                 expires_at_ms: u64::MAX, // far future
                 account_id: "acct-abc".into(),
+                id_token: None,
+                api_key: None,
             }),
             zai: None,
         }
@@ -419,6 +455,8 @@ mod tests {
                 refresh_token: "ref".into(),
                 expires_at_ms: 1000,
                 account_id: "acct".into(),
+                id_token: None,
+                api_key: None,
             }),
             zai: Some(ZaiCredentials {
                 api_key: "key".into(),
@@ -523,9 +561,40 @@ mod tests {
 
         let auth = resolve_auth(&store, &emitter).await.unwrap();
         assert_eq!(auth.provider, "openai");
+        // No API key → uses access_token with ChatGPT backend
         assert_eq!(auth.api_key, "sk-test-token");
-        assert_eq!(auth.base_url, "https://api.openai.com/v1");
+        assert_eq!(auth.base_url, "https://chatgpt.com/backend-api/codex");
         assert_eq!(auth.account_id.as_deref(), Some("acct-abc"));
+    }
+
+    #[tokio::test]
+    async fn resolve_auth_openai_with_api_key() {
+        let backend = InMemoryBackend::new();
+        backend
+            .save(&Credentials {
+                active_provider: Some("openai".into()),
+                openai: Some(OpenAiCredentials {
+                    access_token: "raw-token".into(),
+                    refresh_token: "rt".into(),
+                    expires_at_ms: u64::MAX,
+                    account_id: "acct-xyz".into(),
+                    id_token: None,
+                    api_key: Some("sk-real-api-key".into()),
+                }),
+                zai: None,
+            })
+            .unwrap();
+        let store = CredentialStore {
+            backend: Box::new(backend),
+            backend_name: "test".into(),
+        };
+        let (emitter, _receiver) = crate::events::event_channel();
+
+        let auth = resolve_auth(&store, &emitter).await.unwrap();
+        assert_eq!(auth.provider, "openai");
+        // Has exchanged API key → uses it with standard API URL
+        assert_eq!(auth.api_key, "sk-real-api-key");
+        assert_eq!(auth.base_url, "https://api.openai.com/v1");
     }
 
     #[tokio::test]

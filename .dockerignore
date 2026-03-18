@@ -1,0 +1,8 @@
+target/
+.git/
+.codex-ref/
+.idea/
+.vscode/
+venv/
+test_ws.py
+*.log

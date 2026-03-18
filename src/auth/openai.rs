@@ -69,6 +69,8 @@ struct TokenResponse {
     access_token: Option<String>,
     refresh_token: Option<String>,
     expires_in: Option<u64>,
+    /// id_token is returned on initial auth (not always on refresh)
+    id_token: Option<String>,
 }
 
 async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> {
@@ -100,8 +102,22 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> 
     let access = token.access_token.context("missing access_token")?;
     let refresh = token.refresh_token.context("missing refresh_token")?;
     let expires_in = token.expires_in.context("missing expires_in")?;
+    let id_token_str = token.id_token.clone();
 
     let account_id = extract_account_id(&access)?;
+
+    // Exchange the id_token for a real API key (like codex-rs does)
+    let api_key = if let Some(ref id_tok) = id_token_str {
+        match exchange_for_api_key(id_tok).await {
+            Ok(key) => Some(key),
+            Err(e) => {
+                eprintln!("⚠ API key exchange failed (will use access_token): {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -113,6 +129,8 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> 
         refresh_token: refresh,
         expires_at_ms: now_ms + expires_in * 1000,
         account_id,
+        id_token: id_token_str,
+        api_key,
     })
 }
 
@@ -144,8 +162,22 @@ pub async fn refresh_token(refresh_tok: &str) -> Result<OpenAiCredentials> {
     let access = token.access_token.context("missing access_token")?;
     let refresh = token.refresh_token.context("missing refresh_token")?;
     let expires_in = token.expires_in.context("missing expires_in")?;
+    let id_token_str = token.id_token.clone();
 
     let account_id = extract_account_id(&access)?;
+
+    // Re-exchange for API key on refresh too
+    let api_key = if let Some(ref id_tok) = id_token_str {
+        match exchange_for_api_key(id_tok).await {
+            Ok(key) => Some(key),
+            Err(e) => {
+                eprintln!("⚠ API key exchange failed on refresh: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -157,7 +189,53 @@ pub async fn refresh_token(refresh_tok: &str) -> Result<OpenAiCredentials> {
         refresh_token: refresh,
         expires_at_ms: now_ms + expires_in * 1000,
         account_id,
+        id_token: id_token_str,
+        api_key,
     })
+}
+
+// ── Token exchange: id_token → API key (RFC 8693, matching codex-rs) ────────
+
+/// Exchange an OAuth id_token for a real OpenAI API key.
+/// This is the same token exchange that codex-rs performs in `obtain_api_key()`.
+async fn exchange_for_api_key(id_token: &str) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct ExchangeResp {
+        access_token: String,
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("client_id", CLIENT_ID),
+            ("requested_token", "openai-api-key"),
+            ("subject_token", id_token),
+            (
+                "subject_token_type",
+                "urn:ietf:params:oauth:token-type:id_token",
+            ),
+        ])
+        .send()
+        .await
+        .context("API key exchange request failed")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("API key exchange failed: {status} {body}");
+    }
+
+    let body: ExchangeResp = resp
+        .json()
+        .await
+        .context("failed to parse API key exchange response")?;
+    Ok(body.access_token)
 }
 
 // ── JWT decode ──────────────────────────────────────────────────────────────

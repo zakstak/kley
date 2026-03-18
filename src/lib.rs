@@ -7,5 +7,6 @@
 pub mod agent;
 pub mod auth;
 pub mod events;
+pub mod skills;
 pub mod store;
 pub mod tools;

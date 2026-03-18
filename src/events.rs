@@ -34,6 +34,8 @@ pub enum AgentEvent {
         turn_number: usize,
         error: String,
     },
+    /// The agent reported a status update (heartbeat) during autonomous mode.
+    StatusReport { summary: String, turn_number: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,12 @@ impl fmt::Display for AgentEvent {
                 turn_number, error, ..
             } => {
                 write!(f, "turn {turn_number} ✗ {error}")
+            }
+            AgentEvent::StatusReport {
+                summary,
+                turn_number,
+            } => {
+                write!(f, "turn {turn_number} 📋 {summary}")
             }
         }
     }

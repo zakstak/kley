@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use kley::agent::RunMode;
 use kley::events::{event_channel, AgentEvent};
 use kley::store::Store;
 
@@ -36,6 +37,19 @@ enum Command {
         /// Auto-approve all tool executions without confirmation
         #[arg(long)]
         yolo: bool,
+
+        /// Run autonomously — the agent works continuously, checking in
+        /// via report_status, without waiting for user input between turns.
+        #[arg(long)]
+        autonomous: bool,
+
+        /// Maximum number of autonomous turns before stopping (safety valve).
+        #[arg(long, default_value = "50")]
+        max_turns: usize,
+
+        /// Initial prompt (required for --autonomous mode).
+        #[arg(long)]
+        prompt: Option<String>,
     },
 }
 
@@ -68,7 +82,24 @@ async fn run() -> Result<()> {
             last,
             resume,
             yolo: _yolo,
+            autonomous,
+            max_turns,
+            prompt,
         } => {
+            // Resolve run mode
+            let run_mode = if autonomous {
+                let initial_prompt = prompt.unwrap_or_else(|| {
+                    eprintln!("error: --autonomous requires --prompt \"<your prompt>\"");
+                    std::process::exit(1);
+                });
+                RunMode::Autonomous {
+                    initial_prompt,
+                    max_turns,
+                }
+            } else {
+                RunMode::Interactive
+            };
+
             let store = Store::open()?;
             let (emitter, receiver) = event_channel();
 
@@ -88,8 +119,14 @@ async fn run() -> Result<()> {
                 None
             };
 
-            kley::agent::chat_loop(model.as_deref(), session_id.as_deref(), &store, emitter)
-                .await?;
+            kley::agent::chat_loop(
+                model.as_deref(),
+                session_id.as_deref(),
+                &store,
+                emitter,
+                run_mode,
+            )
+            .await?;
 
             let _ = event_thread.join();
         }
@@ -117,6 +154,9 @@ fn print_event(event: &AgentEvent) {
         AgentEvent::TransportSelected { .. }
         | AgentEvent::TurnStart { .. }
         | AgentEvent::TurnComplete { .. } => {
+            eprintln!("  {event}");
+        }
+        AgentEvent::StatusReport { .. } => {
             eprintln!("  {event}");
         }
     }

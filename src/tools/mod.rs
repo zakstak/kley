@@ -6,6 +6,8 @@
 
 pub mod patch;
 pub mod read_file;
+pub mod read_skill;
+pub mod report_status;
 pub mod shell;
 
 use anyhow::Result;
@@ -81,11 +83,13 @@ impl ToolRegistry {
 }
 
 /// Create a registry with all built-in tools.
-pub fn default_registry() -> ToolRegistry {
+pub fn default_registry(project_dir: std::path::PathBuf) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     reg.register(Box::new(shell::ShellTool::new()));
     reg.register(Box::new(read_file::ReadFileTool));
     reg.register(Box::new(patch::PatchTool));
+    reg.register(Box::new(read_skill::ReadSkillTool::new(project_dir)));
+    reg.register(Box::new(report_status::ReportStatusTool));
     reg
 }
 
@@ -135,9 +139,11 @@ mod tests {
 
     #[test]
     fn default_registry_has_builtins() {
-        let reg = default_registry();
+        let reg = default_registry(std::env::temp_dir());
         assert!(reg.get("shell").is_some());
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("patch").is_some());
+        assert!(reg.get("read_skill").is_some());
+        assert!(reg.get("report_status").is_some());
     }
 }
