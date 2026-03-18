@@ -46,8 +46,9 @@ fn generate_state() -> String {
 
 // ── Authorize URL ───────────────────────────────────────────────────────────
 
-fn build_authorize_url(challenge: &str, state: &str) -> String {
-    let mut url = reqwest::Url::parse(AUTHORIZE_URL).unwrap();
+fn build_authorize_url(challenge: &str, state: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(AUTHORIZE_URL)
+        .context("invalid authorize URL constant")?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", CLIENT_ID)
@@ -59,7 +60,7 @@ fn build_authorize_url(challenge: &str, state: &str) -> String {
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("originator", "kley");
-    url.to_string()
+    Ok(url.to_string())
 }
 
 // ── Token exchange ──────────────────────────────────────────────────────────
@@ -372,7 +373,7 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
 pub async fn login_interactive() -> Result<()> {
     let (verifier, challenge) = generate_pkce();
     let state = generate_state();
-    let url = build_authorize_url(&challenge, &state);
+    let url = build_authorize_url(&challenge, &state)?;
 
     eprintln!("Opening browser for OpenAI login...");
     eprintln!("If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n");
@@ -420,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_build_authorize_url() {
-        let url = build_authorize_url("test_challenge", "test_state");
+        let url = build_authorize_url("test_challenge", "test_state").unwrap();
         assert!(url.starts_with(AUTHORIZE_URL));
         assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
         assert!(url.contains("code_challenge=test_challenge"));
