@@ -46,7 +46,7 @@ impl Store {
     }
 
     /// Open an in-memory database (for tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "on")?;

@@ -3,6 +3,10 @@ name = "kley"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "kley"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kley"
 path = "src/main.rs"
@@ -32,5 +36,10 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+[features]
+testing = []
+
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+kley = { path = ".", features = ["testing"] }

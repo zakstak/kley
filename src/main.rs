@@ -1,13 +1,8 @@
-mod agent;
-mod auth;
-mod events;
-mod store;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use events::{event_channel, AgentEvent};
-use store::Store;
+use kley::events::{event_channel, AgentEvent};
+use kley::store::Store;
 
 #[derive(Debug, Parser)]
 #[command(name = "kley")]
@@ -37,6 +32,10 @@ enum Command {
         /// Resume a specific session by ID
         #[arg(long)]
         resume: Option<String>,
+
+        /// Auto-approve all tool executions without confirmation
+        #[arg(long)]
+        yolo: bool,
     },
 }
 
@@ -61,13 +60,14 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Command::Login { provider } => match provider {
-            LoginProvider::Openai => auth::openai::login_interactive().await?,
-            LoginProvider::Zai => auth::zai::login_interactive()?,
+            LoginProvider::Openai => kley::auth::openai::login_interactive().await?,
+            LoginProvider::Zai => kley::auth::zai::login_interactive()?,
         },
         Command::Chat {
             model,
             last,
             resume,
+            yolo: _yolo,
         } => {
             let store = Store::open()?;
             let (emitter, receiver) = event_channel();
@@ -83,12 +83,13 @@ async fn run() -> Result<()> {
             let session_id = if let Some(id) = resume {
                 Some(id)
             } else if last {
-                store::Session::get_latest(&store)?.map(|s| s.id)
+                kley::store::Session::get_latest(&store)?.map(|s| s.id)
             } else {
                 None
             };
 
-            agent::chat_loop(model.as_deref(), session_id.as_deref(), &store, emitter).await?;
+            kley::agent::chat_loop(model.as_deref(), session_id.as_deref(), &store, emitter)
+                .await?;
 
             let _ = event_thread.join();
         }
