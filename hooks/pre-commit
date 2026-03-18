@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Pre-commit hook: scan staged changes for secrets with gitleaks.
+# Blocks the commit if any leaks are found.
+
+if ! command -v gitleaks &>/dev/null; then
+  echo "⚠ gitleaks not found — skipping secret scan"
+  exit 0
+fi
+
+echo "🔍 Scanning for secrets..."
+gitleaks protect --staged --verbose
+
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "❌ gitleaks found potential secrets. Commit blocked."
+  echo "   Fix the issues above or use --no-verify to bypass (not recommended)."
+  exit 1
+fi

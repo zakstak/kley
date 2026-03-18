@@ -1,19 +1,23 @@
 services:
   kley:
-    build: .
+    build:
+      context: .
+      network: host
     stdin_open: true
     tty: true
-    ports:
-      - "1455:1455"
+    network_mode: host
     volumes:
-      # Mount the current directory as the workspace
+      # Mount the agent's working copy as the workspace
       - .:/workspace
-      # Mount SSH keys for git access
-      - ~/.ssh/id_ed25519_saga_agent:/home/kleyuser/.ssh/id_ed25519:ro
-      - ~/.ssh/id_ed25519_saga_agent.pub:/home/kleyuser/.ssh/id_ed25519.pub:ro
-      # Persist OAuth credentials across container restarts
-      - kley-config:/home/kleyuser/.config/kley
+      # Mount the saga-agent SSH key for git push/fetch
+      - ${HOME}/.ssh/id_ed25519_saga_agent:/root/.ssh/id_ed25519:ro
+      - ${HOME}/.ssh/id_ed25519_saga_agent.pub:/root/.ssh/id_ed25519.pub:ro
+      # Persist kley OAuth credentials
+      - kley-config:/root/.config/kley
+      # Persist saga-agent's gh CLI auth (writable — NOT the host's gh config)
+      - gh-config:/root/.config/gh
     working_dir: /workspace
 
 volumes:
   kley-config:
+  gh-config:
