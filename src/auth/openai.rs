@@ -310,7 +310,11 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
                             );
                         }
                     };
-                    if let Some(tx) = tx.lock().unwrap().take() {
+                    let mut tx = match tx.lock() {
+                        Ok(tx) => tx,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    if let Some(tx) = tx.take() {
                         let _ = tx.send(code);
                     }
                     (
@@ -375,7 +379,9 @@ pub async fn login_interactive() -> Result<()> {
     let url = build_authorize_url(&challenge, &state);
 
     eprintln!("Opening browser for OpenAI login...");
-    eprintln!("If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n");
+    eprintln!(
+        "If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n"
+    );
 
     // Try to open the browser (non-fatal if it fails)
     let _ = open::that(&url);
