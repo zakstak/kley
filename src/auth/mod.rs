@@ -246,7 +246,11 @@ impl CredentialStore {
                 backend_name: "vault".into(),
             }),
             CredentialBackendSelection::AgeFile { path, prompt } => {
-                let backend = AgeFileBackend::open_interactive(path, prompt)?;
+                let backend = if let Ok(pp) = std::env::var("KLEY_PASSPHRASE") {
+                    AgeFileBackend::new(path, SecretString::from(pp))
+                } else {
+                    AgeFileBackend::open_interactive(path, prompt)?
+                };
                 Ok(Self {
                     backend: Box::new(backend),
                     backend_name: "age-file".into(),
