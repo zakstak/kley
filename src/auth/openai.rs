@@ -47,8 +47,7 @@ fn generate_state() -> String {
 // ── Authorize URL ───────────────────────────────────────────────────────────
 
 fn build_authorize_url(challenge: &str, state: &str) -> Result<String> {
-    let mut url = reqwest::Url::parse(AUTHORIZE_URL)
-        .context("invalid authorize URL constant")?;
+    let mut url = reqwest::Url::parse(AUTHORIZE_URL).context("invalid authorize URL constant")?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", CLIENT_ID)
@@ -122,7 +121,7 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> 
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .context("system clock before unix epoch")?
         .as_millis() as u64;
 
     Ok(OpenAiCredentials {
@@ -182,7 +181,7 @@ pub async fn refresh_token(refresh_tok: &str) -> Result<OpenAiCredentials> {
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .context("system clock before unix epoch")?
         .as_millis() as u64;
 
     Ok(OpenAiCredentials {
@@ -311,7 +310,11 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
                             );
                         }
                     };
-                    if let Some(tx) = tx.lock().unwrap().take() {
+                    let mut tx = match tx.lock() {
+                        Ok(tx) => tx,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    if let Some(tx) = tx.take() {
                         let _ = tx.send(code);
                     }
                     (
@@ -376,7 +379,9 @@ pub async fn login_interactive() -> Result<()> {
     let url = build_authorize_url(&challenge, &state)?;
 
     eprintln!("Opening browser for OpenAI login...");
-    eprintln!("If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n");
+    eprintln!(
+        "If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n"
+    );
 
     // Try to open the browser (non-fatal if it fails)
     let _ = open::that(&url);
@@ -421,7 +426,9 @@ mod tests {
 
     #[test]
     fn test_build_authorize_url() {
-        let url = build_authorize_url("test_challenge", "test_state").unwrap();
+        let Ok(url) = build_authorize_url("test_challenge", "test_state") else {
+            panic!("failed to build authorize URL for test input");
+        };
         assert!(url.starts_with(AUTHORIZE_URL));
         assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
         assert!(url.contains("code_challenge=test_challenge"));
