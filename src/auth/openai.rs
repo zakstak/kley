@@ -451,8 +451,10 @@ mod tests {
         let sig_b64 = URL_SAFE_NO_PAD.encode(b"sig");
         let token = format!("{header_b64}.{payload_b64}.{sig_b64}");
 
-        let account_id = extract_account_id(&token)
-            .expect("extract_account_id should parse generated test token");
+        let account_id = match extract_account_id(&token) {
+            Ok(account_id) => account_id,
+            Err(err) => panic!("extract_account_id should parse generated test token: {err}"),
+        };
         assert_eq!(account_id, "acct-test-123");
     }
 
