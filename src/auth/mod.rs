@@ -293,16 +293,16 @@ pub struct ResolvedAuth {
 pub async fn resolve_auth(store: &CredentialStore, events: &EventEmitter) -> Result<ResolvedAuth> {
     // Check for OPENAI_API_KEY env var first — this is the simplest path
     // and avoids the ChatGPT OAuth scope limitations.
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        if !api_key.is_empty() {
-            return Ok(ResolvedAuth {
-                provider: "openai".into(),
-                api_key,
-                base_url: std::env::var("OPENAI_BASE_URL")
-                    .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-                account_id: None,
-            });
-        }
+    if let Ok(api_key) = std::env::var("OPENAI_API_KEY")
+        && !api_key.is_empty()
+    {
+        return Ok(ResolvedAuth {
+            provider: "openai".into(),
+            api_key,
+            base_url: std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+            account_id: None,
+        });
     }
 
     let mut creds = store.load()?;

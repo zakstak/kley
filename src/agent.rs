@@ -250,7 +250,11 @@ pub async fn chat_loop(
         let final_text = loop {
             // Compact history if it has grown too large for the context window
             crate::compact::maybe_compact(
-                &resolved, &model, &mut history, &compact_config, &events,
+                &resolved,
+                &model,
+                &mut history,
+                &compact_config,
+                &events,
             )
             .await
             .ok(); // log but don't fail the turn on compaction errors
@@ -682,12 +686,12 @@ async fn send_openai_ws(
                     }
                     "response.output_item.added" => {
                         // A new output item — could be text or function_call
-                        if let Some(item) = &event.item {
-                            if item.r#type.as_deref() == Some("function_call") {
-                                current_call_id = item.call_id.clone().unwrap_or_default();
-                                current_call_name = item.name.clone().unwrap_or_default();
-                                current_call_args.clear();
-                            }
+                        if let Some(item) = &event.item
+                            && item.r#type.as_deref() == Some("function_call")
+                        {
+                            current_call_id = item.call_id.clone().unwrap_or_default();
+                            current_call_name = item.name.clone().unwrap_or_default();
+                            current_call_args.clear();
                         }
                     }
                     "response.function_call_arguments.delta" => {
@@ -852,30 +856,29 @@ fn process_openai_sse_block_with_tools(
 
     match event_type.as_str() {
         "response.output_text.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                if let Some(delta) = event.delta {
-                    print!("{delta}");
-                    io::stdout().flush().ok();
-                    full_response.push_str(&delta);
-                }
+            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
+                && let Some(delta) = event.delta
+            {
+                print!("{delta}");
+                io::stdout().flush().ok();
+                full_response.push_str(&delta);
             }
         }
         "response.output_item.added" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                if let Some(item) = &event.item {
-                    if item.r#type.as_deref() == Some("function_call") {
-                        *current_call_id = item.call_id.clone().unwrap_or_default();
-                        *current_call_name = item.name.clone().unwrap_or_default();
-                        current_call_args.clear();
-                    }
-                }
+            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
+                && let Some(item) = &event.item
+                && item.r#type.as_deref() == Some("function_call")
+            {
+                *current_call_id = item.call_id.clone().unwrap_or_default();
+                *current_call_name = item.name.clone().unwrap_or_default();
+                current_call_args.clear();
             }
         }
         "response.function_call_arguments.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                if let Some(delta) = event.delta {
-                    current_call_args.push_str(&delta);
-                }
+            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
+                && let Some(delta) = event.delta
+            {
+                current_call_args.push_str(&delta);
             }
         }
         "response.function_call_arguments.done" => {
@@ -987,16 +990,16 @@ pub fn process_zai_sse_line(line: &str, full_response: &mut String) -> Result<bo
             return Ok(true);
         }
 
-        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
-            if let Some(choices) = chunk.choices {
-                for choice in choices {
-                    if let Some(delta) = choice.delta {
-                        if let Some(content) = delta.content {
-                            print!("{content}");
-                            io::stdout().flush().ok();
-                            full_response.push_str(&content);
-                        }
-                    }
+        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data)
+            && let Some(choices) = chunk.choices
+        {
+            for choice in choices {
+                if let Some(delta) = choice.delta
+                    && let Some(content) = delta.content
+                {
+                    print!("{content}");
+                    io::stdout().flush().ok();
+                    full_response.push_str(&content);
                 }
             }
         }
