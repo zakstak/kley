@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use kley::agent::RunMode;
+use kley::compact::CompactConfig;
 use kley::events::{event_channel, AgentEvent};
 use kley::store::Store;
 
@@ -50,6 +51,12 @@ enum Command {
         /// Initial prompt (required for --autonomous mode).
         #[arg(long)]
         prompt: Option<String>,
+
+        /// Character budget for context-window compaction. When history
+        /// exceeds this, older items are summarized. (~4 chars/token,
+        /// so 800000 ≈ 200k tokens.)
+        #[arg(long, default_value = "800000")]
+        compact_threshold: usize,
     },
 }
 
@@ -85,6 +92,7 @@ async fn run() -> Result<()> {
             autonomous,
             max_turns,
             prompt,
+            compact_threshold,
         } => {
             // Resolve run mode
             let run_mode = if autonomous {
@@ -119,12 +127,18 @@ async fn run() -> Result<()> {
                 None
             };
 
+            let compact_config = CompactConfig {
+                threshold_chars: compact_threshold,
+                ..CompactConfig::default()
+            };
+
             kley::agent::chat_loop(
                 model.as_deref(),
                 session_id.as_deref(),
                 &store,
                 emitter,
                 run_mode,
+                compact_config,
             )
             .await?;
 
@@ -157,6 +171,9 @@ fn print_event(event: &AgentEvent) {
             eprintln!("  {event}");
         }
         AgentEvent::StatusReport { .. } => {
+            eprintln!("  {event}");
+        }
+        AgentEvent::HistoryCompacted { .. } => {
             eprintln!("  {event}");
         }
     }

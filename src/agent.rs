@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite;
 
 use crate::auth::{self, CredentialStore, ResolvedAuth};
+use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter, Transport};
 use crate::store::{NewSession, NewTurn, Session, SessionStatus, Store, Turn};
 use crate::tools::ToolRegistry;
@@ -128,6 +129,7 @@ pub async fn chat_loop(
     store: &Store,
     events: EventEmitter,
     run_mode: RunMode,
+    compact_config: CompactConfig,
 ) -> Result<()> {
     let cred_store = CredentialStore::open()?;
     let resolved = auth::resolve_auth(&cred_store, &events).await?;
@@ -246,6 +248,13 @@ pub async fn chat_loop(
 
         // ── Tool-call loop: keep going until the model returns text ──
         let final_text = loop {
+            // Compact history if it has grown too large for the context window
+            crate::compact::maybe_compact(
+                &resolved, &model, &mut history, &compact_config, &events,
+            )
+            .await
+            .ok(); // log but don't fail the turn on compaction errors
+
             let result = match resolved.provider.as_str() {
                 "openai" => {
                     send_openai(

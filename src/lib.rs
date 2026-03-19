@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod compact;
 pub mod events;
 pub mod skills;
 pub mod store;

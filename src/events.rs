@@ -36,6 +36,8 @@ pub enum AgentEvent {
     },
     /// The agent reported a status update (heartbeat) during autonomous mode.
     StatusReport { summary: String, turn_number: usize },
+    /// History was compacted to stay within context-window limits.
+    HistoryCompacted { old_items: usize, new_chars: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,15 @@ impl fmt::Display for AgentEvent {
                 turn_number,
             } => {
                 write!(f, "turn {turn_number} 📋 {summary}")
+            }
+            AgentEvent::HistoryCompacted {
+                old_items,
+                new_chars,
+            } => {
+                write!(
+                    f,
+                    "📦 compacted history: {old_items} items → {new_chars} char summary"
+                )
             }
         }
     }
