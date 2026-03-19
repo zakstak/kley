@@ -46,8 +46,8 @@ fn generate_state() -> String {
 
 // ── Authorize URL ───────────────────────────────────────────────────────────
 
-fn build_authorize_url(challenge: &str, state: &str) -> String {
-    let mut url = reqwest::Url::parse(AUTHORIZE_URL).unwrap();
+fn build_authorize_url(challenge: &str, state: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(AUTHORIZE_URL).context("invalid authorize URL constant")?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", CLIENT_ID)
@@ -59,7 +59,7 @@ fn build_authorize_url(challenge: &str, state: &str) -> String {
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("originator", "kley");
-    url.to_string()
+    Ok(url.to_string())
 }
 
 // ── Token exchange ──────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> 
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .context("system clock before unix epoch")?
         .as_millis() as u64;
 
     Ok(OpenAiCredentials {
@@ -181,7 +181,7 @@ pub async fn refresh_token(refresh_tok: &str) -> Result<OpenAiCredentials> {
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .context("system clock before unix epoch")?
         .as_millis() as u64;
 
     Ok(OpenAiCredentials {
@@ -310,7 +310,11 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
                             );
                         }
                     };
-                    if let Some(tx) = tx.lock().unwrap().take() {
+                    let mut tx = match tx.lock() {
+                        Ok(tx) => tx,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    if let Some(tx) = tx.take() {
                         let _ = tx.send(code);
                     }
                     (
@@ -328,9 +332,9 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
 
     // Run the server in the background, shut down once we get the code
     let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("callback server error");
+        if let Err(err) = axum::serve(listener, app).await {
+            eprintln!("callback server error: {err:#}");
+        }
     });
 
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
@@ -372,10 +376,12 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
 pub async fn login_interactive() -> Result<()> {
     let (verifier, challenge) = generate_pkce();
     let state = generate_state();
-    let url = build_authorize_url(&challenge, &state);
+    let url = build_authorize_url(&challenge, &state)?;
 
     eprintln!("Opening browser for OpenAI login...");
-    eprintln!("If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n");
+    eprintln!(
+        "If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n"
+    );
 
     // Try to open the browser (non-fatal if it fails)
     let _ = open::that(&url);
@@ -420,7 +426,9 @@ mod tests {
 
     #[test]
     fn test_build_authorize_url() {
-        let url = build_authorize_url("test_challenge", "test_state");
+        let Ok(url) = build_authorize_url("test_challenge", "test_state") else {
+            panic!("failed to build authorize URL for test input");
+        };
         assert!(url.starts_with(AUTHORIZE_URL));
         assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
         assert!(url.contains("code_challenge=test_challenge"));
@@ -443,7 +451,10 @@ mod tests {
         let sig_b64 = URL_SAFE_NO_PAD.encode(b"sig");
         let token = format!("{header_b64}.{payload_b64}.{sig_b64}");
 
-        let account_id = extract_account_id(&token).unwrap();
+        let account_id = match extract_account_id(&token) {
+            Ok(account_id) => account_id,
+            Err(err) => panic!("extract_account_id should parse generated test token: {err}"),
+        };
         assert_eq!(account_id, "acct-test-123");
     }
 
