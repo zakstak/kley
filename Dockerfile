@@ -80,7 +80,9 @@ RUN apt-get update && \
       python3 python3-pip python3-venv \
       shellcheck sqlite3 tree bat \
       wget unzip patch procps && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/fdfind /usr/local/bin/fd && \
+    ln -sf /usr/bin/batcat /usr/local/bin/bat
 
 # Git config: identity, workspace trust, SSH for auth
 RUN git config --global safe.directory /workspace && \
