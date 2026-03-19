@@ -1,18 +1,26 @@
 ---
 name: git
-description: Use when committing, branching, rebasing, searching history, or opening PRs. Kley operates via fork-and-submit-PR with its own Git creds. Do not use for code editing, testing, or build tasks.
+description: Use when committing, branching, rebasing, searching history, or opening PRs. Kley operates via branch-and-submit-PR with its own Git creds. Do not use for code editing, testing, or build tasks.
 ---
 
-Kley owns a fork (`origin`) and submits PRs against `upstream`. Never push to upstream directly.
+## Repository layout
+
+- **origin** (SSH): `git@github.com:zakstak/kley.git` — push target (requires saga-agent SSH key)
+- **upstream** (HTTPS): `https://github.com/zakstak/kley.git` — read-only fallback for fetch/pull
+- Default branch: `main`
+- Git identity: `saga <saga@zakstak.dev>`
+- GitHub CLI user: `saga-agent`
+
+Kley pushes feature branches to `origin` and opens PRs against `main` on `zakstak/kley`. Never push directly to `main`.
 
 ## Commit procedure
 
 1. Gather context: `git status -s`, `git diff --stat`, `git log -20 --oneline`.
 2. Detect the repo's commit style from recent history. Default to `type(scope): subject`.
 3. Plan atomic commits. Split by module, concern, and independent revertability. Pair implementation with its tests.
-4. Branch from fresh upstream: `git checkout -b <type>/<name> upstream/main`.
+4. Branch from fresh main: `git switch -c <type>/<name>` from an up-to-date `main`.
 5. Stage and commit each group separately. Verify staging with `git diff --cached --stat`.
-6. Push to fork and open PR: `git push origin <branch>`, then `gh pr create`.
+6. Push to origin and open PR: `git push -u origin HEAD`, then `gh pr create --repo zakstak/kley --base main --head <branch>`.
 
 ## Commit split rules
 
@@ -20,6 +28,14 @@ Kley owns a fork (`origin`) and submits PRs against `upstream`. Never push to up
 - Different concerns (logic / test / config / docs) → separate commits.
 - 3+ files → at least 2 commits. 5+ files → at least 3 commits.
 - Only combine when splitting would break compilation AND both files serve the same atomic unit.
+
+## Self-improvement workflow
+
+The self-improvement harness (`self-improve.sh`) runs a RALF-style loop:
+- Each cycle is a fresh `kley chat` invocation with a clean context window.
+- Branches follow the `improve/<short-slug>` naming convention.
+- PRs are opened non-interactively with structured bodies (Problem/Before/After/Tests/Validation).
+- The loop auto-stops on `blocked` or after 3 consecutive `no-safe-change` results.
 
 ## Rebase procedure
 
@@ -38,14 +54,16 @@ Kley owns a fork (`origin`) and submits PRs against `upstream`. Never push to up
 
 ## Never
 
-- push directly to upstream
-- make one giant commit from multiple unrelated changes
-- rebase without checking if force-push is safe
-- commit without running the project's pre-commit checks first
+- Push directly to `main`
+- Make one giant commit from multiple unrelated changes
+- Rebase without checking if force-push is safe
+- Commit without running the project's pre-commit checks first
+- Force-push or rewrite history on `main`
+- Merge `main` into a feature branch (rebase instead)
 
-## Done
+## Done checklist
 
-- branch created from fresh `upstream/main`
-- commits are atomic and style-matched
-- PR opened against upstream
-- pre-commit checks passed before every commit
+- Branch created from up-to-date `main`
+- Commits are atomic and style-matched
+- PR opened against `zakstak/kley` `main`
+- Pre-commit checks passed before every commit
