@@ -102,8 +102,10 @@ impl Tool for ShellTool {
                 // Truncate if too large
                 let output_text = if combined.len() > MAX_OUTPUT_BYTES {
                     let half = MAX_OUTPUT_BYTES / 2;
-                    let head = &combined[..half];
-                    let tail = &combined[combined.len() - half..];
+                    let head_end = prev_char_boundary(&combined, half);
+                    let tail_start = next_char_boundary(&combined, combined.len() - half);
+                    let head = &combined[..head_end];
+                    let tail = &combined[tail_start..];
                     format!(
                         "{head}\n\n... ({} bytes truncated) ...\n\n{tail}",
                         combined.len() - MAX_OUTPUT_BYTES
@@ -120,6 +122,42 @@ impl Tool for ShellTool {
             Err(e) => Ok(format!("Error: failed to execute command: {e}")),
         }
     }
+}
+
+fn prev_char_boundary(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+
+    if s.is_char_boundary(max_bytes) {
+        return max_bytes;
+    }
+
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn next_char_boundary(s: &str, min_bytes: usize) -> usize {
+    if min_bytes == 0 {
+        return 0;
+    }
+
+    if min_bytes >= s.len() {
+        return s.len();
+    }
+
+    if s.is_char_boundary(min_bytes) {
+        return min_bytes;
+    }
+
+    let mut idx = min_bytes;
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx.min(s.len())
 }
 
 #[cfg(test)]
@@ -169,5 +207,22 @@ mod tests {
             .execute(serde_json::json!({"command": "true"}))
             .unwrap();
         assert!(result.contains("Duration:"));
+    }
+
+    #[test]
+    fn shell_large_multibyte_output_truncates_without_panic() {
+        let tool = ShellTool::new();
+        let cmd = "awk 'BEGIN { for (i = 0; i < 40000; i++ ) printf \"你\" }'";
+
+        let result = tool.execute(serde_json::json!({"command": cmd}));
+        assert!(
+            result.is_ok(),
+            "tool should not panic on multibyte truncation"
+        );
+
+        let result = result.unwrap();
+        assert!(result.contains("Output:"));
+        assert!(result.contains("... ("));
+        assert!(result.contains("bytes truncated"));
     }
 }
