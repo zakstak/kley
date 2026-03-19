@@ -19,9 +19,11 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 WORKDIR /app
 
-# Install runtime dependencies
+# Install core runtime deps + C/C++ build toolchain
 RUN apt-get update && \
-    apt-get install -y ca-certificates git curl openssh-client && \
+    apt-get install -y \
+      ca-certificates git curl openssh-client \
+      build-essential cmake pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
@@ -37,9 +39,48 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
       | tar xz -C /usr/local/bin gitleaks
 
-# Install Rust toolchain (needed for cargo fmt/clippy/test/build during self-improvement)
+# Install Rust toolchain + rust-analyzer LSP
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+RUN /root/.cargo/bin/rustup component add rust-analyzer
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install Node.js 20 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.26.1
+RUN curl -fsSL https://go.dev/dl/go1.26.1.linux-amd64.tar.gz \
+      | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+
+# Go tools: LSP + linter
+RUN go install golang.org/x/tools/gopls@latest && \
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# npm global tools: LSPs, tsgo, linters, formatters
+RUN npm install -g \
+      @typescript/native-preview \
+      typescript \
+      typescript-language-server \
+      bash-language-server \
+      yaml-language-server \
+      vscode-langservers-extracted \
+      prettier \
+      markdownlint-cli \
+      eslint
+
+# Cargo tools
+RUN cargo install cargo-nextest --locked
+
+# Extra dev utilities
+RUN apt-get update && \
+    apt-get install -y \
+      jq ripgrep fd-find \
+      python3 python3-pip python3-venv \
+      shellcheck sqlite3 tree bat \
+      wget unzip patch procps && \
+    rm -rf /var/lib/apt/lists/*
 
 # Git config: identity, workspace trust, SSH for auth
 RUN git config --global safe.directory /workspace && \

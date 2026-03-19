@@ -44,6 +44,36 @@ check "cargo clippy available"    cargo clippy --version
 check "kley binary works"        kley --help
 
 echo ""
+echo "── Dev toolchain checks ──"
+check "gcc is installed"           gcc --version
+check "make is installed"          make --version
+check "cmake is installed"         cmake --version
+check "node is installed"          node --version
+check "npm is installed"           npm --version
+check "go is installed"            go version
+check "python3 is installed"       python3 --version
+check "sqlite3 is installed"       sqlite3 --version
+check "shellcheck is installed"    shellcheck --version
+check "tree is installed"          tree --version
+check "jq is installed"            jq --version
+
+echo ""
+echo "── LSPs ──"
+check "rust-analyzer"              rust-analyzer --version
+check "gopls"                      gopls version
+check "typescript-language-server" typescript-language-server --version
+check "bash-language-server"       bash-language-server --version
+check "yaml-language-server"       yaml-language-server --version
+
+echo ""
+echo "── Linters & Formatters ──"
+check "golangci-lint"              golangci-lint --version
+check "prettier"                   prettier --version
+check "gitleaks"                   gitleaks version
+check "tsgo"                       tsgo --version
+check "cargo-nextest"              cargo nextest --version
+
+echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Passed: $PASS  Failed: $FAIL"
 echo "━━━━━━━━━━━━━━━━━━━━━━"
