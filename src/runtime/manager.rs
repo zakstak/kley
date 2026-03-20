@@ -159,10 +159,6 @@ impl RuntimeWorker {
                 .build()
                 .context("failed to build runtime worker tokio runtime")?;
 
-            let store_guard = shared_store
-                .lock()
-                .map_err(|e| anyhow::anyhow!("store mutex poisoned: {e}"))?;
-
             let (events, receiver) = event_channel();
             let forward_tx = stream_tx.clone();
             let forwarder = std::thread::spawn(move || {
@@ -175,8 +171,8 @@ impl RuntimeWorker {
 
             let resolved_auth = worker.resolved_auth(&runtime_rt, &events)?;
             let registry = crate::tools::default_registry(worker.project_dir.clone());
-            let mut runtime = SessionRuntime::new_with_abort_signal(
-                &store_guard,
+            let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
+                shared_store,
                 resolved_auth,
                 Some(&worker.model),
                 Some(&worker.session_id),
@@ -207,7 +203,6 @@ impl RuntimeWorker {
 struct ActivePrompt {
     turn_id: String,
     abort_signal: Arc<AtomicBool>,
-    keep_replay_on_completion: bool,
 }
 
 #[derive(Debug)]
@@ -342,7 +337,6 @@ impl RuntimeManager {
         self: &Arc<Self>,
         shared_store: SharedStore,
         session_id: &str,
-        keep_replay_on_completion: bool,
         prompt: String,
     ) -> std::result::Result<SubmitPromptOutcome, SubmitPromptError> {
         let (worker, active_turn, abort_signal) = {
@@ -368,7 +362,6 @@ impl RuntimeManager {
             entry.active_prompt = Some(ActivePrompt {
                 turn_id: active_turn.turn_id.clone(),
                 abort_signal: abort_signal.clone(),
-                keep_replay_on_completion,
             });
 
             (entry.runtime.clone(), active_turn, abort_signal)
@@ -467,14 +460,7 @@ impl RuntimeManager {
 
         match event {
             AgentEvent::TurnCompleted { .. } => {
-                let keep_replay = entry
-                    .active_prompt
-                    .as_ref()
-                    .map(|prompt| prompt.keep_replay_on_completion)
-                    .unwrap_or(false);
-                if !keep_replay {
-                    entry.active_turn = None;
-                }
+                entry.active_turn = None;
             }
             AgentEvent::TurnFailed { .. } => {
                 entry.active_turn = None;
@@ -512,21 +498,15 @@ impl RuntimeManager {
             return;
         }
 
-        let keep_replay = entry
-            .active_prompt
-            .as_ref()
-            .map(|prompt| prompt.keep_replay_on_completion)
-            .unwrap_or(false);
         entry.active_prompt = None;
 
         match result.unwrap() {
             SubmitResult::Completed { .. } => {
-                if !keep_replay
-                    && entry
-                        .active_turn
-                        .as_ref()
-                        .map(|active| active.turn_id == turn_id)
-                        .unwrap_or(false)
+                if entry
+                    .active_turn
+                    .as_ref()
+                    .map(|active| active.turn_id == turn_id)
+                    .unwrap_or(false)
                 {
                     entry.active_turn = None;
                 }

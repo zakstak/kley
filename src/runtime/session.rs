@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter, Transport};
-use crate::store::{NewSession, NewTurn, Session, SessionStatus, Store, Turn};
+use crate::store::{NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
 use crate::tools::ToolRegistry;
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
@@ -98,8 +98,13 @@ pub struct TurnCorrelation {
     pub message_id: String,
 }
 
+enum RuntimeStore<'a> {
+    Borrowed(&'a Store),
+    Shared(SharedStore),
+}
+
 pub struct SessionRuntime<'a> {
-    store: &'a Store,
+    store: RuntimeStore<'a>,
     events: EventEmitter,
     compact_config: CompactConfig,
     resolved: ResolvedAuth,
@@ -217,7 +222,7 @@ impl<'a> SessionRuntime<'a> {
         }
 
         Ok(Self {
-            store,
+            store: RuntimeStore::Borrowed(store),
             events,
             compact_config,
             resolved,
@@ -232,6 +237,99 @@ impl<'a> SessionRuntime<'a> {
             hooks,
             active_turn: false,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_shared_store_and_abort_signal(
+        shared_store: SharedStore,
+        resolved: ResolvedAuth,
+        model_override: Option<&str>,
+        resume_session_id: Option<&str>,
+        events: EventEmitter,
+        compact_config: CompactConfig,
+        registry: ToolRegistry,
+        instructions: String,
+        hooks: RuntimeHooks,
+        abort_signal: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        let model = model_override
+            .map(String::from)
+            .unwrap_or_else(|| Self::default_model(&resolved.provider));
+
+        let store_guard = shared_store
+            .lock()
+            .map_err(|e| anyhow::anyhow!("store mutex poisoned: {e}"))?;
+
+        let session = match resume_session_id {
+            Some(id) => {
+                let s = Session::get(&store_guard, id)?;
+                if let Some(hook) = &hooks.on_event {
+                    hook(RuntimeEvent::SessionResumed {
+                        session_id: s.id.clone(),
+                    });
+                }
+                s
+            }
+            None => {
+                let s = Session::create(
+                    &store_guard,
+                    NewSession {
+                        model: model.clone(),
+                        provider: resolved.provider.clone(),
+                    },
+                )?;
+                if let Some(hook) = &hooks.on_event {
+                    hook(RuntimeEvent::SessionCreated {
+                        session_id: s.id.clone(),
+                    });
+                }
+                s
+            }
+        };
+
+        let existing_turns = Turn::list_for_session(&store_guard, &session.id)?;
+        drop(store_guard);
+
+        let history = history_items_from_turns(&existing_turns);
+        if !existing_turns.is_empty() {
+            if let Some(hook) = &hooks.on_event {
+                hook(RuntimeEvent::HistoryLoaded {
+                    turns: existing_turns.len(),
+                });
+            }
+        }
+
+        Ok(Self {
+            store: RuntimeStore::Shared(shared_store),
+            events,
+            compact_config,
+            resolved,
+            model,
+            session,
+            history,
+            turn_number: existing_turns.len(),
+            ws_disabled: AtomicBool::new(false),
+            registry,
+            instructions,
+            abort_signal,
+            hooks,
+            active_turn: false,
+        })
+    }
+
+    fn with_store<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Store) -> Result<T>,
+    {
+        match &self.store {
+            RuntimeStore::Borrowed(store) => f(store),
+            RuntimeStore::Shared(shared) => {
+                let guard = shared
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("store mutex poisoned: {e}"))?;
+                f(&guard)
+            }
+        }
     }
 
     pub fn model(&self) -> &str {
@@ -253,7 +351,9 @@ impl<'a> SessionRuntime<'a> {
     pub fn abort_turn(&mut self) -> Result<AbortResult> {
         if self.active_turn {
             self.abort_signal.store(true, Ordering::Relaxed);
-            Session::update_status(self.store, &self.session.id, SessionStatus::Aborted)?;
+            self.with_store(|store| {
+                Session::update_status(store, &self.session.id, SessionStatus::Aborted)
+            })?;
             Ok(AbortResult::Aborted {
                 session_id: self.session.id.clone(),
             })
@@ -266,7 +366,9 @@ impl<'a> SessionRuntime<'a> {
     }
 
     pub fn mark_completed(&self) -> Result<()> {
-        Session::update_status(self.store, &self.session.id, SessionStatus::Completed)
+        self.with_store(|store| {
+            Session::update_status(store, &self.session.id, SessionStatus::Completed)
+        })
     }
 
     pub async fn submit_prompt(&mut self, input: String) -> Result<SubmitResult> {
@@ -288,20 +390,22 @@ impl<'a> SessionRuntime<'a> {
         let turn_id = correlation.turn_id;
         let message_id = correlation.message_id;
 
-        Session::update_status(self.store, &self.session.id, SessionStatus::Active)?;
-
-        Turn::append(
-            self.store,
-            NewTurn {
-                session_id: self.session.id.clone(),
-                kind: "message".into(),
-                role: "user".into(),
-                content: input.clone(),
-                model: None,
-                tokens_in: None,
-                tokens_out: None,
-            },
-        )?;
+        self.with_store(|store| {
+            Session::update_status(store, &self.session.id, SessionStatus::Active)?;
+            Turn::append(
+                store,
+                NewTurn {
+                    session_id: self.session.id.clone(),
+                    kind: "message".into(),
+                    role: "user".into(),
+                    content: input.clone(),
+                    model: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                },
+            )?;
+            Ok(())
+        })?;
 
         self.history.push(serde_json::json!({
             "type": "message",
@@ -412,23 +516,26 @@ impl<'a> SessionRuntime<'a> {
                             arguments: call.arguments.clone(),
                         });
 
-                        Turn::append(
-                            self.store,
-                            NewTurn {
-                                session_id: self.session.id.clone(),
-                                kind: "function_call".into(),
-                                role: "assistant".into(),
-                                content: serde_json::json!({
-                                    "call_id": call.call_id,
-                                    "name": call.name,
-                                    "arguments": call.arguments,
-                                })
-                                .to_string(),
-                                model: Some(self.model.clone()),
-                                tokens_in: None,
-                                tokens_out: None,
-                            },
-                        )?;
+                        self.with_store(|store| {
+                            Turn::append(
+                                store,
+                                NewTurn {
+                                    session_id: self.session.id.clone(),
+                                    kind: "function_call".into(),
+                                    role: "assistant".into(),
+                                    content: serde_json::json!({
+                                        "call_id": call.call_id,
+                                        "name": call.name,
+                                        "arguments": call.arguments,
+                                    })
+                                    .to_string(),
+                                    model: Some(self.model.clone()),
+                                    tokens_in: None,
+                                    tokens_out: None,
+                                },
+                            )?;
+                            Ok(())
+                        })?;
 
                         let (output, success) = match self.registry.get(&call.name) {
                             Some(tool) => {
@@ -457,22 +564,25 @@ impl<'a> SessionRuntime<'a> {
                             success,
                         });
 
-                        Turn::append(
-                            self.store,
-                            NewTurn {
-                                session_id: self.session.id.clone(),
-                                kind: "function_call_output".into(),
-                                role: "tool".into(),
-                                content: serde_json::json!({
-                                    "call_id": call.call_id,
-                                    "output": output.clone(),
-                                })
-                                .to_string(),
-                                model: None,
-                                tokens_in: None,
-                                tokens_out: None,
-                            },
-                        )?;
+                        self.with_store(|store| {
+                            Turn::append(
+                                store,
+                                NewTurn {
+                                    session_id: self.session.id.clone(),
+                                    kind: "function_call_output".into(),
+                                    role: "tool".into(),
+                                    content: serde_json::json!({
+                                        "call_id": call.call_id,
+                                        "output": output.clone(),
+                                    })
+                                    .to_string(),
+                                    model: None,
+                                    tokens_in: None,
+                                    tokens_out: None,
+                                },
+                            )?;
+                            Ok(())
+                        })?;
 
                         self.history.push(serde_json::json!({
                             "type": "function_call",
@@ -511,23 +621,26 @@ impl<'a> SessionRuntime<'a> {
                     message_id: message_id.clone(),
                 });
 
-                Turn::append(
-                    self.store,
-                    NewTurn {
-                        session_id: self.session.id.clone(),
-                        kind: "message".into(),
-                        role: "assistant".into(),
-                        content: response.clone(),
-                        model: Some(self.model.clone()),
-                        tokens_in: None,
-                        tokens_out: None,
-                    },
-                )?;
+                self.with_store(|store| {
+                    Turn::append(
+                        store,
+                        NewTurn {
+                            session_id: self.session.id.clone(),
+                            kind: "message".into(),
+                            role: "assistant".into(),
+                            content: response.clone(),
+                            model: Some(self.model.clone()),
+                            tokens_in: None,
+                            tokens_out: None,
+                        },
+                    )?;
+                    Ok(())
+                })?;
 
                 if turn_number == 1 {
                     let title: String = response.chars().take(80).collect();
                     let title = title.lines().next().unwrap_or(&title);
-                    Session::update_title(self.store, &self.session.id, title)?;
+                    self.with_store(|store| Session::update_title(store, &self.session.id, title))?;
                 }
 
                 self.history.push(serde_json::json!({

@@ -58,6 +58,16 @@ mod web {
         socket
     }
 
+    async fn connect_mock_ws(
+        addr: std::net::SocketAddr,
+    ) -> tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    > {
+        let url = format!("ws://{addr}/ws/mock");
+        let (socket, _) = connect_async(url).await.unwrap();
+        socket
+    }
+
     async fn recv_json(
         socket: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -418,6 +428,51 @@ mod web {
                 "message.completed",
                 "turn.completed",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_prompt_stream_emits_ordered_events() {
+        let server = spawn_server().await;
+        let mut socket = connect_mock_ws(server.addr).await;
+
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert_eq!(bootstrap["session_id"], "sess-mock-001");
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"prompt.submit","request_id":"req-mock-prompt-1","session_id":"sess-mock-001","prompt":"mock prompt"}"#.into(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        assert_eq!(ack["request_id"], "req-mock-prompt-1");
+        assert_eq!(ack["data"]["session_id"], "sess-mock-001");
+        assert!(ack["data"]["accepted"].as_bool().unwrap_or(false));
+
+        let mut event_types = Vec::new();
+        loop {
+            let frame = recv_json(&mut socket).await;
+            let event_type = frame["type"].as_str().unwrap().to_string();
+            event_types.push(event_type.clone());
+            if event_type == "turn.completed" {
+                break;
+            }
+        }
+
+        assert_eq!(
+            event_types,
+            vec![
+                "turn.started",
+                "message.started",
+                "message.delta",
+                "message.delta",
+                "message.completed",
+                "turn.completed",
+            ],
         );
     }
 
@@ -790,7 +845,7 @@ mod web {
         socket1
             .send(Message::Text(
                 format!(
-                    r#"{{"type":"prompt.submit","request_id":"req-hold-1","session_id":"{}","prompt":"hold-open: keep streaming"}}"#,
+                    r#"{{"type":"prompt.submit","request_id":"req-reconnect-1","session_id":"{}","prompt":"abortable response please stop"}}"#,
                     seeded_session.id
                 )
                 .into(),
@@ -800,6 +855,7 @@ mod web {
 
         let ack = recv_json(&mut socket1).await;
         assert_eq!(ack["type"], "response.ok");
+        let turn_id = ack["data"]["turn_id"].as_str().unwrap().to_string();
 
         let started = recv_json(&mut socket1).await;
         let msg_started = recv_json(&mut socket1).await;
@@ -824,13 +880,44 @@ mod web {
         assert!(
             transcript
                 .iter()
-                .any(|turn| turn["role"] == "user" && turn["content"] == "hold-open: keep streaming")
+                .any(|turn| turn["role"] == "user" && turn["content"] == "abortable response please stop")
         );
 
-        assert_eq!(bootstrap2["active_turn"]["request_id"], "req-hold-1");
+        assert_eq!(bootstrap2["active_turn"]["request_id"], "req-reconnect-1");
         let replayed_content = bootstrap2["active_turn"]["content"].as_str().unwrap();
         assert!(!replayed_content.is_empty());
-        assert!(replayed_content.contains("hold-open: keep streaming"));
+
+        let completed = recv_until_type(&mut socket2, "turn.completed").await;
+        assert_eq!(completed["request_id"], "req-reconnect-1");
+
+        socket2
+            .send(Message::Text(
+                r#"{"type":"state.get","request_id":"req-reconnect-state"}"#
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        let state_after = recv_json(&mut socket2).await;
+        assert_eq!(state_after["type"], "response.ok");
+        assert!(state_after["data"]["active_turn"].is_null());
+
+        socket2
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"turn.abort","request_id":"req-reconnect-abort","session_id":"{}","turn_id":"{}"}}"#,
+                    seeded_session.id, turn_id
+                )
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let abort_after_completion = recv_json(&mut socket2).await;
+        assert_eq!(abort_after_completion["type"], "response.error");
+        assert_eq!(abort_after_completion["request_id"], "req-reconnect-abort");
+        assert_eq!(abort_after_completion["error"]["code"], "turn_not_found");
     }
 
     #[tokio::test]

@@ -321,12 +321,9 @@ async fn handle_socket(mut socket: WebSocket, state: WebAppState) {
                             }
                         }
 
-                        let keep_replay_on_completion = prompt.to_lowercase().contains("hold-open");
-
                         match state.runtime_manager.submit_prompt(
                             state.store.clone(),
                             &active_session.id,
-                            keep_replay_on_completion,
                             prompt,
                         ) {
                             Ok(SubmitPromptOutcome::Accepted {

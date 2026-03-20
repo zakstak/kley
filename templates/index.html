@@ -556,6 +556,13 @@
         });
       }
 
+      function resetHydratedInspectorState() {
+        state.toolOrder = [];
+        state.toolsByCallId.clear();
+        clearChildren(dom.inspectorEvents);
+        renderToolCards();
+      }
+
       function upsertToolStart(frame) {
         if (!state.toolsByCallId.has(frame.tool_call_id)) {
           state.toolOrder.unshift(frame.tool_call_id);
@@ -636,6 +643,8 @@
             `protocol mismatch: expected ${expectedProtocolVersion}, got ${frame.protocol_version}`
           );
         }
+
+        resetHydratedInspectorState();
 
         state.selectedSessionId =
           (frame.selected_session && frame.selected_session.session_id) || frame.session_id || null;

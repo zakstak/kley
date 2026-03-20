@@ -78,6 +78,8 @@ test('core workspace parity', async ({ page }) => {
   await expect(page.getByTestId('composer-submit')).toBeEnabled();
   await expect(page.getByTestId('transcript')).toContainText('please use a tool');
   await expect(page.getByTestId('transcript')).toContainText('Test assistant reply: please use a tool');
+  await expect(page.getByTestId('tool-card').filter({ hasText: 'unknown_tool' })).toHaveCount(0);
+  await expect(page.getByTestId('tool-card').first()).toContainText('No tool events yet.');
   expect(consoleErrors).toEqual([]);
 });
 
@@ -130,5 +132,10 @@ test('reconnect recovery', async ({ page }) => {
     .poll(async () => ((await recoveredMessage.textContent()) || '').trim())
     .toContain(partialReply);
   await expect(page.getByTestId('transcript')).toContainText(finalReply, { timeout: 20_000 });
+  await expect(page.getByTestId('composer-submit')).toBeEnabled();
+  await expect(page.getByTestId('abort-button')).toBeDisabled();
+  await expect
+    .poll(async () => (await page.getByTestId('status-pill').textContent()) || '')
+    .not.toMatch(/streaming|running/i);
   expect(consoleErrors).toEqual([]);
 });
