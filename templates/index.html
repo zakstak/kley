@@ -690,6 +690,13 @@
         if (frame.type === 'response.error') {
           const message =
             frame.error && frame.error.message ? frame.error.message : 'request failed';
+          if (frame.request_id === 'attach' && frame.error && frame.error.code === 'session_busy') {
+            if (state.selectedSessionId) {
+              state.selectedSessionId = null;
+              persistSelectedSession();
+              pushInspectorEvent('cleared busy session selection');
+            }
+          }
           setStatus('error', 'error');
           pushInspectorEvent(`error: ${message}`);
           if (pending && pending.type === 'prompt.submit') {
