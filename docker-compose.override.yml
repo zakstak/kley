@@ -1,6 +1,3 @@
 services:
   kley:
     entrypoint: ["bash", "/workspace/docker-entrypoint.sh"]
-    environment:
-      - LOCAL_UID=${UID:-1000}
-      - LOCAL_GID=${GID:-1000}
