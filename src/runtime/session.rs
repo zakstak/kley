@@ -503,6 +503,10 @@ impl<'a> SessionRuntime<'a> {
                 }
                 Ok(TurnResult::ToolCalls(calls)) => {
                     for call in &calls {
+                        if self.abort_signal.load(Ordering::Relaxed) {
+                            return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
+                        }
+
                         self.emit_runtime_event(RuntimeEvent::ToolCallStarted {
                             call_id: call.call_id.clone(),
                             name: call.name.clone(),
@@ -540,6 +544,9 @@ impl<'a> SessionRuntime<'a> {
 
                         let (output, success) = match self.registry.get(&call.name) {
                             Some(tool) => {
+                                if self.abort_signal.load(Ordering::Relaxed) {
+                                    return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
+                                }
                                 let args: serde_json::Value =
                                     serde_json::from_str(&call.arguments).unwrap_or_default();
                                 match tool.execute(args) {

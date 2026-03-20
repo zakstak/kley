@@ -14,9 +14,40 @@ use kley::compact::CompactConfig;
 use kley::events::{AgentEvent, Transport, event_channel};
 use kley::runtime::{AbortResult, RuntimeHooks, SessionRuntime, SubmitResult};
 use kley::store::{Session, SessionStatus, SharedStore, Store, Turn};
+use kley::tools::{Tool, ToolRegistry};
+use serde_json::Value;
 
 mod runtime {
     use super::*;
+
+    struct SlowTool {
+        executed: Arc<AtomicBool>,
+    }
+
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "unknown_tool"
+        }
+
+        fn description(&self) -> &str {
+            "slow test tool"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            })
+        }
+
+        fn execute(&self, _args: Value) -> anyhow::Result<String> {
+            self.executed.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(200));
+            Ok("slow tool result".to_string())
+        }
+    }
 
     struct TestServer {
         addr: std::net::SocketAddr,
@@ -328,5 +359,48 @@ mod runtime {
         }));
 
         server.task.abort();
+    }
+
+    #[tokio::test]
+    async fn abort_stops_before_long_tool_execution_begins() {
+        let store = Store::open_memory().unwrap();
+        let (emitter, _receiver) = event_channel();
+        let abort_signal = Arc::new(AtomicBool::new(false));
+        let executed = Arc::new(AtomicBool::new(false));
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(SlowTool {
+            executed: executed.clone(),
+        }));
+
+        let hooks = RuntimeHooks {
+            on_event: Some(Arc::new({
+                let abort_signal = abort_signal.clone();
+                move |event| {
+                    if matches!(event, kley::runtime::RuntimeEvent::ToolCallStarted { .. }) {
+                        abort_signal.store(true, Ordering::Relaxed);
+                    }
+                }
+            })),
+            ..RuntimeHooks::default()
+        };
+
+        let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
+            Arc::new(Mutex::new(store)),
+            test_auth(),
+            Some("test-model"),
+            None,
+            emitter,
+            CompactConfig::default(),
+            registry,
+            "system".to_string(),
+            hooks,
+            abort_signal,
+        )
+        .unwrap();
+
+        let result = runtime.submit_prompt("please use a tool".to_string()).await.unwrap();
+        assert!(matches!(result, SubmitResult::Aborted { .. }));
+        assert!(!executed.load(Ordering::Relaxed));
     }
 }
