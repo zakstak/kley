@@ -114,6 +114,8 @@ pub async fn maybe_compact(
     );
 
     events.emit(AgentEvent::HistoryCompacted {
+        session_id: None,
+        turn_id: None,
         old_items: split_at,
         new_chars,
     });
@@ -217,7 +219,10 @@ async fn summarize_history(
         anyhow::bail!("compaction summary API error: {status}\n{body}");
     }
 
-    let json: serde_json::Value = resp.json().await.context("failed to parse summary response")?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse summary response")?;
 
     // The Responses API returns output as an array of output items
     let text = json
@@ -254,10 +259,7 @@ mod tests {
 
     #[test]
     fn test_estimate_history_chars() {
-        let history = vec![
-            make_history_item("hello"),
-            make_history_item("world"),
-        ];
+        let history = vec![make_history_item("hello"), make_history_item("world")];
         let chars = estimate_history_chars(&history);
         // Should be > 0 and roughly the serialized size
         assert!(chars > 0);

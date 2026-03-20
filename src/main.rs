@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::io::Write;
 
 use kley::agent::RunMode;
 use kley::compact::CompactConfig;
@@ -57,6 +58,10 @@ enum Command {
         /// so 800000 ≈ 200k tokens.)
         #[arg(long, default_value = "800000")]
         compact_threshold: usize,
+    },
+    Web {
+        #[arg(long)]
+        bind: Option<String>,
     },
 }
 
@@ -144,6 +149,10 @@ async fn run() -> Result<()> {
 
             let _ = event_thread.join();
         }
+        Command::Web { bind } => {
+            let config = kley::web::config::WebConfig::from_bind_arg(bind.as_deref())?;
+            kley::web::serve(config).await?;
+        }
     }
 
     Ok(())
@@ -152,7 +161,11 @@ async fn run() -> Result<()> {
 /// Render an event to stderr with visual emphasis appropriate to its severity.
 fn print_event(event: &AgentEvent) {
     match event {
-        AgentEvent::TransportFallback { .. } | AgentEvent::TurnError { .. } => {
+        AgentEvent::MessageDelta { delta, .. } => {
+            print!("{delta}");
+            let _ = std::io::stdout().flush();
+        }
+        AgentEvent::TransportFallback { .. } | AgentEvent::TurnFailed { .. } => {
             // High-visibility: box the message
             let msg = event.to_string();
             let width = msg.len() + 4;
@@ -166,10 +179,14 @@ fn print_event(event: &AgentEvent) {
             eprintln!("  ↻ {event}");
         }
         AgentEvent::TransportSelected { .. }
-        | AgentEvent::TurnStart { .. }
-        | AgentEvent::TurnComplete { .. } => {
+        | AgentEvent::TurnStarted { .. }
+        | AgentEvent::TurnCompleted { .. } => {
             eprintln!("  {event}");
         }
+        AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolCallCompleted { .. } => {
+            eprintln!("{event}");
+        }
+        AgentEvent::MessageStarted { .. } | AgentEvent::MessageCompleted { .. } => {}
         AgentEvent::StatusReport { .. } => {
             eprintln!("  {event}");
         }
