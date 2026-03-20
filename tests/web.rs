@@ -356,6 +356,59 @@ mod web {
     }
 
     #[tokio::test]
+    async fn ws_connect_returns_session_busy_for_requested_busy_session() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let (first_session, second_session) = store::store_run(&store, |s| {
+            let first = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &first.id, "Available Session")?;
+
+            let second = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &second.id, "Busy Requested Session")?;
+
+            Ok((first, second))
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut first_socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", second_session.id),
+        )
+        .await;
+        let first_bootstrap = recv_json(&mut first_socket).await;
+        assert_eq!(first_bootstrap["session_id"], second_session.id);
+
+        let mut second_socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", second_session.id),
+        )
+        .await;
+        let rejection = recv_json(&mut second_socket).await;
+        assert_eq!(rejection["type"], "response.error");
+        assert_eq!(rejection["request_id"], "attach");
+        assert_eq!(rejection["error"]["code"], "session_busy");
+        assert_eq!(rejection["error"]["details"]["session_id"], second_session.id);
+        assert_ne!(rejection["error"]["details"]["session_id"], first_session.id);
+    }
+
+    #[tokio::test]
     async fn ws_connect_honors_requested_session_outside_recent_window() {
         let state = test_state();
         let store = state.store.clone();

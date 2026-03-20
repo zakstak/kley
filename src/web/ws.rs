@@ -610,9 +610,13 @@ async fn attach_or_select_session(
         let session = ensure_session_settings(state, session)
             .await
             .map_err(|_| SelectSessionError::Store)?;
+        let is_requested_session = preferred_session_id == Some(session.id.as_str());
         match state.runtime_manager.attach_controller(&session, controller_id) {
             Ok(()) => return Ok(session),
             Err(err) => {
+                if is_requested_session {
+                    return Err(SelectSessionError::Busy(err));
+                }
                 busy_error = Some(err);
                 continue;
             }
