@@ -15,7 +15,112 @@ set -euo pipefail
 MAX_CYCLES="${1:-5}"
 TURNS_PER_CYCLE="${MAX_TURN_PER_CYCLE:-30}"
 LOG_DIR="$(pwd)/.self-improve-logs"
+RETROSPECTIVE_FILE="$LOG_DIR/retrospectives.jsonl"
 mkdir -p "$LOG_DIR"
+
+append_retrospective_record() {
+  local log_file="$1"
+  local cycle="$2"
+  local timestamp="$3"
+  local run_exit="$4"
+  local status="$5"
+  local output_file="$6"
+
+  python3 - "$log_file" "$cycle" "$timestamp" "$run_exit" "$status" "$output_file" <<'PY'
+import json
+import pathlib
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+cycle = int(sys.argv[2])
+timestamp = sys.argv[3]
+run_exit = int(sys.argv[4])
+status = sys.argv[5]
+output_path = pathlib.Path(sys.argv[6])
+
+lines = log_path.read_text(encoding="utf-8").splitlines()
+status_start = None
+for index, line in enumerate(lines):
+    if line.startswith("STATUS: "):
+        status_start = index
+
+if status_start is None:
+    raise SystemExit("no final status block found")
+
+block = lines[status_start:]
+scalar_values = {
+    "branch": "none",
+    "commit": "none",
+    "pr": "none",
+}
+section_names = {
+    "HELPFUL FEATURE IDEAS": "helpful_feature_ideas",
+    "STRUGGLE": "struggle_lines",
+    "PREVENTABLE": "preventable_lines",
+    "PREVENTION NOTES": "prevention_notes",
+}
+sections = {name: [] for name in section_names.values()}
+current_section = None
+
+for line in block:
+    if line.startswith("BRANCH: "):
+        scalar_values["branch"] = line.partition(": ")[2].strip()
+        current_section = None
+        continue
+    if line.startswith("COMMIT: "):
+        scalar_values["commit"] = line.partition(": ")[2].strip()
+        current_section = None
+        continue
+    if line.startswith("PR: "):
+        scalar_values["pr"] = line.partition(": ")[2].strip()
+        current_section = None
+        continue
+
+    stripped = line.strip()
+    if stripped.endswith(":"):
+        current_section = section_names.get(stripped[:-1])
+        continue
+
+    if current_section is None or not stripped:
+        continue
+
+    if stripped.startswith("- "):
+        sections[current_section].append(stripped[2:].strip())
+    elif sections[current_section]:
+        sections[current_section][-1] = f"{sections[current_section][-1]} {stripped}"
+    else:
+        sections[current_section].append(stripped)
+
+preventable_raw = " ".join(sections["preventable_lines"]).strip().lower()
+if preventable_raw == "yes":
+    preventable = True
+elif preventable_raw == "no":
+    preventable = False
+else:
+    preventable = None
+
+record = {
+    "cycle": cycle,
+    "timestamp": timestamp,
+    "status": status,
+    "run_exit": run_exit,
+    "log_file": str(log_path),
+    "branch": scalar_values["branch"],
+    "commit": scalar_values["commit"],
+    "pr": scalar_values["pr"],
+    "helpful_feature_ideas": sections["helpful_feature_ideas"],
+    "struggle": " ".join(sections["struggle_lines"]).strip(),
+    "preventable": preventable,
+    "preventable_raw": preventable_raw or None,
+    "prevention_notes": sections["prevention_notes"],
+}
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
+with output_path.open("a", encoding="utf-8") as handle:
+    json.dump(record, handle, ensure_ascii=True)
+    handle.write("\n")
+PY
+}
 
 cycle=0
 consecutive_no_change=0
@@ -69,6 +174,7 @@ Important:
 
 ## Mission
 This is a single cycle. Produce exactly one non-trivial, reviewable, evidence-backed improvement, then stop.
+Also end the cycle with a short retrospective about helpful feature ideas, real struggles, and whether a concrete addition would have prevented them.
 
 You are not rewarded for opening a PR.
 You are rewarded for making the highest-confidence meaningful improvement available.
@@ -160,6 +266,18 @@ For shell, harness, CI, or workflow changes:
 - At minimum, run deterministic local checks relevant to the change.
 - For changed shell scripts, run `bash -n` on each changed script.
 - Do not make prompt-only changes unless they are tied to a concrete observed failure and accompanied by deterministic validation of the surrounding harness/script behavior.
+
+## Required retrospective
+Every cycle must end with a short retrospective, even when reporting `blocked` or `no-safe-change`.
+
+- List up to 3 concrete feature ideas suggested by the actual cycle that would make the agent materially more helpful; if none were genuinely identified, say "none identified" and explain why.
+- Prefer helpful features, capabilities, or guardrails over generic cleanup ideas or vague aspirations.
+- Record the hardest real struggle you encountered during the cycle.
+- Decide whether adding a concrete feature, tool, workflow guardrail, memory, or check would likely have prevented or materially reduced that struggle.
+- If the answer is yes, name the addition and explain why it would have helped.
+- If the answer is no, say that explicitly and explain why no reasonable addition would have prevented it.
+
+This retrospective informs future cycles. It does not lower the quality bar for the actual improvement chosen in the current cycle.
 
 ## Cycle procedure
 1. Ensure the repo is in a safe state.
@@ -315,6 +433,21 @@ FULL VALIDATION:
 SUMMARY:
 - <one or two bullets about what changed>
 
+HELPFUL FEATURE IDEAS:
+- <feature idea suggested by this cycle> — <why it would make the agent more helpful>
+- <feature idea suggested by this cycle> — <why it would make the agent more helpful>
+- <or "none identified" only if you explain why>
+
+STRUGGLE:
+- <what you genuinely struggled with in this cycle>
+
+PREVENTABLE:
+- yes|no
+
+PREVENTION NOTES:
+- <if yes: what addition would likely have prevented or reduced the struggle, and why>
+- <if no: why the struggle would still exist even with a reasonable addition>
+
 NEXT:
 - <best next meaningful improvement>
 EOF
@@ -334,6 +467,18 @@ EOF
 
   # Parse the status from the log
   status=$(grep -oP '(?<=^STATUS: )\S+' "$log_file" | tail -1 || echo "unknown")
+
+  if append_retrospective_record \
+    "$log_file" \
+    "$cycle" \
+    "$timestamp" \
+    "$run_exit" \
+    "$status" \
+    "$RETROSPECTIVE_FILE"; then
+    echo "Retrospective record appended to $RETROSPECTIVE_FILE"
+  else
+    echo "⚠  Failed to append retrospective record for cycle $cycle" >&2
+  fi
 
   echo ""
   echo "── Cycle $cycle finished: STATUS=$status (exit=$run_exit) ──"
