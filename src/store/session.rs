@@ -121,6 +121,20 @@ impl Session {
             .context("session not found")
     }
 
+    pub fn find(store: &Store, id: &str) -> Result<Option<Session>> {
+        let mut stmt = store.conn().prepare(
+            "SELECT id, title, status, model, provider, policy, settings, created_at, updated_at
+             FROM sessions WHERE id = ?1",
+        )?;
+
+        let mut rows = stmt.query_map([id], Self::from_row)?;
+
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     /// Get the most recently created session.
     pub fn get_latest(store: &Store) -> Result<Option<Session>> {
         let mut stmt = store.conn().prepare(

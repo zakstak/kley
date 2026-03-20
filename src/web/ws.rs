@@ -1,0 +1,911 @@
+use std::future::pending;
+
+use anyhow::Result;
+use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::response::Response;
+use chrono::Utc;
+use serde_json::{Value, json};
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use crate::events::AgentEvent;
+use crate::runtime::{
+    AbortTurnError, ActiveTurnReplay, AttachControllerError, RuntimeEventEnvelope,
+    SubmitPromptError, SubmitPromptOutcome,
+};
+use crate::store::{self, NewSession, Session, Turn};
+
+use super::protocol::{
+    ActiveTurnSnapshot, ResponseError, SelectedSession, SessionSummary, StateSnapshotData,
+    TranscriptEntry, UiEvent, WebCommand, WebResponse, PROTOCOL_VERSION,
+};
+use super::state::WebAppState;
+
+const DEFAULT_WEB_MODEL: &str = "test-model";
+const DEFAULT_WEB_PROVIDER: &str = "test";
+
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<WebAppState>) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: WebAppState) {
+    let controller_id = format!("controller-{}", Uuid::new_v4());
+
+    let mut active_session = match select_or_create_session(&state).await {
+        Ok(session) => session,
+        Err(_) => return,
+    };
+
+    if let Err(attach_err) = state
+        .runtime_manager
+        .attach_controller(&active_session, &controller_id)
+    {
+        let _ = send_response(
+            &mut socket,
+            WebResponse::Error {
+                request_id: "attach".to_string(),
+                error: session_busy_error(attach_err),
+            },
+        )
+        .await;
+        return;
+    }
+
+    let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
+
+    if send_bootstrap_event(&mut socket, &state, &active_session.id)
+        .await
+        .is_err()
+    {
+        state
+            .runtime_manager
+            .release_controller(&active_session.id, &controller_id);
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            biased;
+            maybe_message = socket.recv() => {
+                let Some(Ok(message)) = maybe_message else {
+                    break;
+                };
+
+                let Message::Text(text) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                    continue;
+                };
+
+                let raw: Value = match serde_json::from_str(&text) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        if send_response(
+                            &mut socket,
+                            WebResponse::Error {
+                                request_id: "unknown".to_string(),
+                                error: invalid_command_error("invalid command payload"),
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+                let request_id = raw
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let command: WebCommand = match serde_json::from_value(raw) {
+                    Ok(command) => command,
+                    Err(_) => {
+                        if send_response(
+                            &mut socket,
+                            WebResponse::Error {
+                                request_id,
+                                error: invalid_command_error("unsupported command"),
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+                match command {
+                    WebCommand::StateGet { request_id } => {
+                        match snapshot_data(&state, &active_session.id).await {
+                            Ok(snapshot) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: internal_error("failed to build state snapshot"),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::SessionsList { request_id } => {
+                        match list_sessions(&state).await {
+                            Ok(sessions) => {
+                                let data = json!({
+                                    "sessions": sessions,
+                                    "session_id": active_session.id,
+                                });
+                                if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: internal_error("failed to list sessions"),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::SessionLoad {
+                        request_id,
+                        session_id,
+                    } => match load_session_for_controller(
+                        &state,
+                        &controller_id,
+                        &active_session,
+                        &session_id,
+                    )
+                    .await
+                    {
+                        Ok(session) => {
+                            active_session = session;
+                            runtime_events = state.runtime_manager.subscribe(&active_session.id);
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Ok {
+                                    request_id,
+                                    data: json!({
+                                        "session_id": active_session.id,
+                                        "loaded": true,
+                                    }),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            if send_bootstrap_event(&mut socket, &state, &active_session.id)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(LoadSessionError::Busy(err)) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: session_busy_error(err),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(LoadSessionError::NotFound) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "session_not_found".to_string(),
+                                        message: "session does not exist".to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(LoadSessionError::Store) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: internal_error("failed to load session"),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    },
+                    WebCommand::PromptSubmit {
+                        request_id,
+                        session_id,
+                        prompt,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_session".to_string(),
+                                        message: "prompt session is not currently attached".to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        let turn_id = format!("turn-{}", Uuid::new_v4());
+                        let message_id = format!("msg-{}", Uuid::new_v4());
+
+                        match state.runtime_manager.start_active_turn(
+                            &active_session.id,
+                            request_id.clone(),
+                            turn_id.clone(),
+                            message_id.clone(),
+                        ) {
+                            Ok(()) => {}
+                            Err(err) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: prompt_submit_error(err),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+
+                        let keep_replay_on_completion = prompt.to_lowercase().contains("hold-open");
+
+                        match state.runtime_manager.submit_prompt(
+                            state.store.clone(),
+                            &active_session.id,
+                            keep_replay_on_completion,
+                            prompt,
+                        ) {
+                            Ok(SubmitPromptOutcome::Accepted {
+                                turn_id,
+                                message_id,
+                            }) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: json!({
+                                            "accepted": true,
+                                            "session_id": active_session.id,
+                                            "turn_id": turn_id,
+                                            "message_id": message_id,
+                                        }),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                state.runtime_manager.clear_active_turn(&active_session.id, &turn_id);
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: prompt_submit_error(err),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::TurnAbort {
+                        request_id,
+                        session_id,
+                        turn_id,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_session".to_string(),
+                                        message: "abort session is not currently attached".to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match state.runtime_manager.request_abort(&active_session.id, &turn_id) {
+                            Ok(_) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: json!({
+                                            "abort_requested": true,
+                                            "session_id": active_session.id,
+                                            "turn_id": turn_id,
+                                        }),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: abort_turn_error(err),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            runtime_event = next_runtime_event(&mut runtime_events) => {
+                if let Some(envelope) = runtime_event {
+                    let Some(ui_event) = runtime_event_to_ui_event(
+                        &envelope.event,
+                        &envelope.request_id,
+                        &active_session.id,
+                    ) else {
+                        continue;
+                    };
+
+                    if send_event(&mut socket, ui_event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    state
+        .runtime_manager
+        .release_controller(&active_session.id, &controller_id);
+}
+
+async fn next_runtime_event(
+    receiver: &mut Option<broadcast::Receiver<RuntimeEventEnvelope>>,
+) -> Option<RuntimeEventEnvelope> {
+    match receiver.as_mut() {
+        Some(rx) => loop {
+            match rx.recv().await {
+                Ok(event) => return Some(event),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        },
+        None => pending().await,
+    }
+}
+
+async fn send_bootstrap_event(
+    socket: &mut WebSocket,
+    state: &WebAppState,
+    session_id: &str,
+) -> Result<(), ()> {
+    let data = snapshot_data(state, session_id).await.map_err(|_| ())?;
+
+    send_event(
+        socket,
+        UiEvent::StateSnapshot {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            data,
+        },
+    )
+    .await
+}
+
+async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSnapshotData> {
+    let selected_session = load_selected_session(state, session_id).await?;
+    let sessions = list_sessions(state).await?;
+    let transcript = load_transcript(state, session_id).await?;
+    let active_turn = state
+        .runtime_manager
+        .active_turn(session_id)
+        .map(active_turn_snapshot);
+
+    Ok(StateSnapshotData {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: session_id.to_string(),
+        selected_session,
+        sessions,
+        transcript,
+        active_turn,
+    })
+}
+
+fn active_turn_snapshot(active: ActiveTurnReplay) -> ActiveTurnSnapshot {
+    ActiveTurnSnapshot {
+        request_id: active.request_id,
+        turn_id: active.turn_id,
+        message_id: active.message_id,
+        content: active.content,
+    }
+}
+
+async fn load_selected_session(state: &WebAppState, session_id: &str) -> Result<SelectedSession> {
+    let session_id = session_id.to_string();
+    let store_ref = state.store.clone();
+    let session = store::store_run(&store_ref, move |store| {
+        Session::find(store, &session_id)?.ok_or_else(|| anyhow::anyhow!("session not found"))
+    })
+    .await?;
+
+    Ok(SelectedSession {
+        session_id: session.id,
+        title: session.title.unwrap_or_else(|| "Untitled session".to_string()),
+        status: session.status.to_string(),
+        created_at: session.created_at.to_rfc3339(),
+        updated_at: session.updated_at.to_rfc3339(),
+    })
+}
+
+async fn select_or_create_session(state: &WebAppState) -> Result<Session> {
+    let store_ref = state.store.clone();
+    let mut session = store::store_run(&store_ref, |store| match Session::get_latest(store)? {
+        Some(existing) => Ok(existing),
+        None => Session::create(
+            store,
+            NewSession {
+                model: DEFAULT_WEB_MODEL.to_string(),
+                provider: DEFAULT_WEB_PROVIDER.to_string(),
+            },
+        ),
+    })
+    .await?;
+
+    if session.settings.is_none() {
+        let settings_json = default_settings_json(&session.model, &session.provider);
+        let id = session.id.clone();
+        let store_ref = state.store.clone();
+        let update_value = settings_json.clone();
+        store::store_run(&store_ref, move |store| {
+            Session::update_settings(store, &id, &update_value)?;
+            Ok(())
+        })
+        .await?;
+        session.settings = Some(settings_json);
+    }
+
+    Ok(session)
+}
+
+fn default_settings_json(model: &str, provider: &str) -> String {
+    json!({
+        "model": model,
+        "provider": provider,
+    })
+    .to_string()
+}
+
+async fn list_sessions(state: &WebAppState) -> Result<Vec<SessionSummary>> {
+    let store_ref = state.store.clone();
+    let sessions = store::store_run(&store_ref, |store| Session::list(store, 50)).await?;
+
+    Ok(sessions
+        .into_iter()
+        .map(|session| SessionSummary {
+            session_id: session.id,
+            title: session.title.unwrap_or_else(|| "Untitled session".to_string()),
+            updated_at: session.updated_at.to_rfc3339(),
+        })
+        .collect())
+}
+
+async fn load_transcript(state: &WebAppState, session_id: &str) -> Result<Vec<TranscriptEntry>> {
+    let session_id = session_id.to_string();
+    let store_ref = state.store.clone();
+    let turns = store::store_run(&store_ref, move |store| Turn::list_for_session(store, &session_id)).await?;
+    Ok(turns
+        .into_iter()
+        .map(|turn| TranscriptEntry {
+            turn_number: turn.turn_number,
+            kind: turn.kind,
+            role: turn.role,
+            content: turn.content,
+        })
+        .collect())
+}
+
+enum LoadSessionError {
+    Busy(AttachControllerError),
+    NotFound,
+    Store,
+}
+
+async fn load_session_for_controller(
+    state: &WebAppState,
+    controller_id: &str,
+    previous_session: &Session,
+    next_session_id: &str,
+) -> std::result::Result<Session, LoadSessionError> {
+    let next_session_id = next_session_id.to_string();
+    let store_ref = state.store.clone();
+    let session = store::store_run(&store_ref, move |store| Session::find(store, &next_session_id))
+        .await
+        .map_err(|_| LoadSessionError::Store)?
+        .ok_or(LoadSessionError::NotFound)?;
+
+    state
+        .runtime_manager
+        .attach_controller(&session, controller_id)
+        .map_err(LoadSessionError::Busy)?;
+
+    if session.id != previous_session.id {
+        state
+            .runtime_manager
+            .release_controller(&previous_session.id, controller_id);
+    }
+    Ok(session)
+}
+
+fn invalid_command_error(message: &str) -> ResponseError {
+    ResponseError {
+        code: "invalid_command".to_string(),
+        message: message.to_string(),
+        details: None,
+    }
+}
+
+fn internal_error(message: &str) -> ResponseError {
+    ResponseError {
+        code: "internal_error".to_string(),
+        message: message.to_string(),
+        details: None,
+    }
+}
+
+fn prompt_submit_error(error: SubmitPromptError) -> ResponseError {
+    match error {
+        SubmitPromptError::NoRuntime { .. } => ResponseError {
+            code: "runtime_unavailable".to_string(),
+            message: "runtime is not attached for this session".to_string(),
+            details: None,
+        },
+        SubmitPromptError::NoActiveTurn { .. } => ResponseError {
+            code: "turn_state_error".to_string(),
+            message: "active turn state is not initialized".to_string(),
+            details: None,
+        },
+        SubmitPromptError::TurnInProgress { turn_id, .. } => ResponseError {
+            code: "turn_in_progress".to_string(),
+            message: "session already has an active turn".to_string(),
+            details: Some(json!({ "turn_id": turn_id })),
+        },
+        SubmitPromptError::RuntimeFailed { error, .. } => ResponseError {
+            code: "runtime_failed".to_string(),
+            message: error,
+            details: None,
+        },
+    }
+}
+
+fn abort_turn_error(error: AbortTurnError) -> ResponseError {
+    match error {
+        AbortTurnError::NoRuntime { .. } => ResponseError {
+            code: "runtime_unavailable".to_string(),
+            message: "runtime is not attached for this session".to_string(),
+            details: None,
+        },
+        AbortTurnError::NoActiveTurn { .. } => ResponseError {
+            code: "turn_not_found".to_string(),
+            message: "session has no active turn".to_string(),
+            details: None,
+        },
+        AbortTurnError::TurnMismatch {
+            expected_turn_id,
+            requested_turn_id,
+            ..
+        } => ResponseError {
+            code: "turn_not_found".to_string(),
+            message: "requested turn does not match the active turn".to_string(),
+            details: Some(json!({
+                "expected_turn_id": expected_turn_id,
+                "requested_turn_id": requested_turn_id,
+            })),
+        },
+    }
+}
+
+fn runtime_event_to_ui_event(
+    event: &AgentEvent,
+    request_id: &str,
+    default_session_id: &str,
+) -> Option<UiEvent> {
+    match event {
+        AgentEvent::TurnStarted {
+            session_id,
+            turn_id,
+            ..
+        } => Some(UiEvent::TurnStarted {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+        }),
+        AgentEvent::MessageStarted {
+            session_id,
+            turn_id,
+            message_id,
+        } => Some(UiEvent::MessageStarted {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+        }),
+        AgentEvent::MessageDelta {
+            session_id,
+            turn_id,
+            message_id,
+            delta,
+        } => Some(UiEvent::MessageDelta {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+            delta: delta.clone(),
+        }),
+        AgentEvent::MessageCompleted {
+            session_id,
+            turn_id,
+            message_id,
+            content,
+        } => Some(UiEvent::MessageCompleted {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+            content: content.clone(),
+        }),
+        AgentEvent::ToolCallStarted {
+            session_id,
+            turn_id,
+            tool_call_id,
+            tool_name,
+            ..
+        } => Some(UiEvent::ToolStarted {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+        }),
+        AgentEvent::ToolCallCompleted {
+            session_id,
+            turn_id,
+            tool_call_id,
+            tool_name,
+            success,
+            ..
+        } => Some(UiEvent::ToolCompleted {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            success: *success,
+        }),
+        AgentEvent::TurnCompleted {
+            session_id,
+            turn_id,
+            ..
+        } => Some(UiEvent::TurnCompleted {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+        }),
+        AgentEvent::TurnFailed {
+            session_id,
+            turn_id,
+            error,
+            ..
+        } => Some(UiEvent::TurnFailed {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            error: error.clone(),
+        }),
+        AgentEvent::TransportSelected {
+            session_id,
+            transport,
+            ..
+        } => Some(UiEvent::TransportSelected {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            session_id: session_id
+                .clone()
+                .unwrap_or_else(|| default_session_id.to_string()),
+            transport: transport.to_string(),
+        }),
+        AgentEvent::TransportFallback {
+            session_id,
+            from,
+            to,
+            reason,
+            ..
+        } => Some(UiEvent::TransportFallback {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            session_id: session_id
+                .clone()
+                .unwrap_or_else(|| default_session_id.to_string()),
+            from: from.to_string(),
+            to: to.to_string(),
+            reason: reason.clone(),
+        }),
+        AgentEvent::TokenRefreshed {
+            session_id,
+            provider,
+        } => Some(UiEvent::AuthTokenRefreshed {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            session_id: session_id
+                .clone()
+                .unwrap_or_else(|| default_session_id.to_string()),
+            provider: provider.clone(),
+        }),
+        AgentEvent::StatusReport {
+            session_id,
+            summary,
+            ..
+        } => Some(UiEvent::StatusReport {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            session_id: session_id
+                .clone()
+                .unwrap_or_else(|| default_session_id.to_string()),
+            status: "runtime".to_string(),
+            detail: summary.clone(),
+        }),
+        AgentEvent::HistoryCompacted {
+            session_id,
+            old_items,
+            new_chars,
+            ..
+        } => Some(UiEvent::StatusReport {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            session_id: session_id
+                .clone()
+                .unwrap_or_else(|| default_session_id.to_string()),
+            status: "history_compacted".to_string(),
+            detail: format!("compacted {old_items} items into {new_chars} chars"),
+        }),
+    }
+}
+
+fn session_busy_error(err: AttachControllerError) -> ResponseError {
+    match err {
+        AttachControllerError::SessionBusy {
+            session_id,
+            active_controller_id,
+        } => ResponseError {
+            code: "session_busy".to_string(),
+            message: "session already has an active controller".to_string(),
+            details: Some(json!({
+                "session_id": session_id,
+                "active_controller_id": active_controller_id,
+            })),
+        },
+    }
+}
+
+fn ts_now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {
+    let text = serde_json::to_string(&response).map_err(|_| ())?;
+    socket.send(Message::Text(text.into())).await.map_err(|_| ())
+}
+
+async fn send_event(socket: &mut WebSocket, event: UiEvent) -> Result<(), ()> {
+    let text = serde_json::to_string(&event).map_err(|_| ())?;
+    socket.send(Message::Text(text.into())).await.map_err(|_| ())
+}

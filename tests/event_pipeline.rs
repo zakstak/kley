@@ -13,18 +13,25 @@ fn events_arrive_in_emission_order() {
     let collector = EventCollector::start(receiver);
 
     emitter.emit(AgentEvent::TransportSelected {
+        session_id: Some("sess-1".into()),
+        turn_id: Some("turn-1".into()),
         provider: "openai".into(),
         transport: Transport::WebSocket,
     });
 
-    emitter.emit(AgentEvent::TurnStart {
+    emitter.emit(AgentEvent::TurnStarted {
+        session_id: "sess-1".into(),
+        turn_id: "turn-1".into(),
         model: "gpt-4.1".into(),
         turn_number: 1,
     });
 
-    emitter.emit(AgentEvent::TurnComplete {
+    emitter.emit(AgentEvent::TurnCompleted {
+        session_id: "sess-1".into(),
+        turn_id: "turn-1".into(),
         model: "gpt-4.1".into(),
         turn_number: 1,
+        message_id: "msg-1".into(),
     });
 
     // Drop emitter to close the channel
@@ -34,16 +41,16 @@ fn events_arrive_in_emission_order() {
     assert_eq!(events.len(), 3);
 
     assert!(
-        matches!(&events[0], AgentEvent::TransportSelected { provider, transport }
+        matches!(&events[0], AgentEvent::TransportSelected { provider, transport, .. }
         if provider == "openai" && *transport == Transport::WebSocket)
     );
     assert!(matches!(
         &events[1],
-        AgentEvent::TurnStart { turn_number: 1, .. }
+        AgentEvent::TurnStarted { turn_number: 1, .. }
     ));
     assert!(matches!(
         &events[2],
-        AgentEvent::TurnComplete { turn_number: 1, .. }
+        AgentEvent::TurnCompleted { turn_number: 1, .. }
     ));
 }
 
@@ -55,6 +62,7 @@ fn channel_closes_on_emitter_drop() {
     let collector = EventCollector::start(receiver);
 
     emitter.emit(AgentEvent::TokenRefreshed {
+        session_id: None,
         provider: "zai".into(),
     });
 
@@ -70,15 +78,21 @@ fn channel_closes_on_emitter_drop() {
 fn drain_captures_pending_events() {
     let (emitter, receiver) = event_channel();
 
-    emitter.emit(AgentEvent::TurnStart {
+    emitter.emit(AgentEvent::TurnStarted {
+        session_id: "sess-1".into(),
+        turn_id: "turn-1".into(),
         model: "m".into(),
         turn_number: 1,
     });
-    emitter.emit(AgentEvent::TurnStart {
+    emitter.emit(AgentEvent::TurnStarted {
+        session_id: "sess-1".into(),
+        turn_id: "turn-2".into(),
         model: "m".into(),
         turn_number: 2,
     });
-    emitter.emit(AgentEvent::TurnStart {
+    emitter.emit(AgentEvent::TurnStarted {
+        session_id: "sess-1".into(),
+        turn_id: "turn-3".into(),
         model: "m".into(),
         turn_number: 3,
     });
@@ -98,7 +112,9 @@ fn emit_after_receiver_dropped_is_silent() {
     drop(receiver);
 
     // This should not panic
-    emitter.emit(AgentEvent::TurnError {
+    emitter.emit(AgentEvent::TurnFailed {
+        session_id: "sess-1".into(),
+        turn_id: "turn-1".into(),
         model: "m".into(),
         turn_number: 1,
         error: "test error".into(),
@@ -113,6 +129,8 @@ fn transport_fallback_captures_reason() {
     let collector = EventCollector::start(receiver);
 
     emitter.emit(AgentEvent::TransportFallback {
+        session_id: Some("sess-1".into()),
+        turn_id: Some("turn-1".into()),
         from: Transport::WebSocket,
         to: Transport::Sse,
         reason: "connection refused".into(),
@@ -123,7 +141,9 @@ fn transport_fallback_captures_reason() {
     let events = collector.collect();
     assert_eq!(events.len(), 1);
     match &events[0] {
-        AgentEvent::TransportFallback { from, to, reason } => {
+        AgentEvent::TransportFallback {
+            from, to, reason, ..
+        } => {
             assert_eq!(*from, Transport::WebSocket);
             assert_eq!(*to, Transport::Sse);
             assert_eq!(reason, "connection refused");
@@ -136,7 +156,9 @@ fn transport_fallback_captures_reason() {
 
 #[test]
 fn event_display_formatting() {
-    let event = AgentEvent::TurnStart {
+    let event = AgentEvent::TurnStarted {
+        session_id: "sess-1".into(),
+        turn_id: "turn-3".into(),
         model: "gpt-4.1".into(),
         turn_number: 3,
     };

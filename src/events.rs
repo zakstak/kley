@@ -1,43 +1,91 @@
-//! Structured runtime events for observability.
-//!
-//! Important state transitions (transport fallback, auth refresh, errors) are
-//! emitted as typed `AgentEvent` values, not just log lines. This gives future
-//! UI layers a clean seam to hook into.
-
 use std::fmt;
 use std::sync::mpsc;
 
-/// A significant runtime event that consumers should be aware of.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
-    /// Transport negotiation outcome for the current turn.
     TransportSelected {
+        session_id: Option<String>,
+        turn_id: Option<String>,
         provider: String,
         transport: Transport,
     },
-    /// WebSocket connection failed; falling back to HTTP SSE for the rest of the session.
     TransportFallback {
+        session_id: Option<String>,
+        turn_id: Option<String>,
         from: Transport,
         to: Transport,
         reason: String,
     },
-    /// OAuth token was auto-refreshed.
-    TokenRefreshed { provider: String },
-    /// A turn is starting (user sent a message).
-    TurnStart { model: String, turn_number: usize },
-    /// A turn completed successfully.
-    TurnComplete { model: String, turn_number: usize },
-    /// A turn failed with an error.
-    TurnError {
-        #[allow(dead_code)]
+    TokenRefreshed {
+        session_id: Option<String>,
+        provider: String,
+    },
+    TurnStarted {
+        session_id: String,
+        turn_id: String,
+        model: String,
+        turn_number: usize,
+    },
+    MessageStarted {
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+    },
+    MessageDelta {
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+        delta: String,
+    },
+    MessageCompleted {
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+        content: String,
+    },
+    ToolCallStarted {
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+        tool_call_id: String,
+        tool_name: String,
+        arguments: String,
+    },
+    ToolCallCompleted {
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+        tool_call_id: String,
+        tool_name: String,
+        output_preview: String,
+        success: bool,
+    },
+    TurnCompleted {
+        session_id: String,
+        turn_id: String,
+        model: String,
+        turn_number: usize,
+        message_id: String,
+    },
+    TurnFailed {
+        session_id: String,
+        turn_id: String,
         model: String,
         turn_number: usize,
         error: String,
     },
-    /// The agent reported a status update (heartbeat) during autonomous mode.
-    StatusReport { summary: String, turn_number: usize },
-    /// History was compacted to stay within context-window limits.
-    HistoryCompacted { old_items: usize, new_chars: usize },
+    StatusReport {
+        session_id: Option<String>,
+        turn_id: Option<String>,
+        summary: String,
+        turn_number: usize,
+    },
+    HistoryCompacted {
+        session_id: Option<String>,
+        turn_id: Option<String>,
+        old_items: usize,
+        new_chars: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,80 +109,130 @@ impl fmt::Display for AgentEvent {
             AgentEvent::TransportSelected {
                 provider,
                 transport,
-            } => write!(f, "[{provider}] using {transport} transport"),
-            AgentEvent::TransportFallback { from, to, reason } => {
-                write!(f, "⚠ transport fallback: {from} → {to} ({reason})")
+                turn_id,
+                ..
+            } => {
+                if let Some(turn_id) = turn_id {
+                    write!(f, "[{provider}] using {transport} transport ({turn_id})")
+                } else {
+                    write!(f, "[{provider}] using {transport} transport")
+                }
             }
-            AgentEvent::TokenRefreshed { provider } => {
+            AgentEvent::TransportFallback {
+                from,
+                to,
+                reason,
+                turn_id,
+                ..
+            } => {
+                if let Some(turn_id) = turn_id {
+                    write!(
+                        f,
+                        "transport fallback: {from} -> {to} ({reason}) [{turn_id}]"
+                    )
+                } else {
+                    write!(f, "transport fallback: {from} -> {to} ({reason})")
+                }
+            }
+            AgentEvent::TokenRefreshed { provider, .. } => {
                 write!(f, "[{provider}] token refreshed")
             }
-            AgentEvent::TurnStart { model, turn_number } => {
-                write!(f, "turn {turn_number} → {model}")
+            AgentEvent::TurnStarted {
+                model,
+                turn_number,
+                turn_id,
+                ..
+            } => {
+                write!(f, "turn {turn_number} -> {model} ({turn_id})")
             }
-            AgentEvent::TurnComplete { model, turn_number } => {
-                write!(f, "turn {turn_number} ✓ ({model})")
+            AgentEvent::MessageStarted { .. } => Ok(()),
+            AgentEvent::MessageDelta { delta, .. } => write!(f, "{delta}"),
+            AgentEvent::MessageCompleted { .. } => Ok(()),
+            AgentEvent::ToolCallStarted {
+                tool_name,
+                arguments,
+                ..
+            } => write!(f, "  [tool] {}({})", tool_name, truncate(arguments, 80)),
+            AgentEvent::ToolCallCompleted {
+                output_preview,
+                success,
+                ..
+            } => {
+                if *success {
+                    write!(f, "  [tool] -> {output_preview}")
+                } else {
+                    write!(f, "  [tool] ! {output_preview}")
+                }
             }
-            AgentEvent::TurnError {
+            AgentEvent::TurnCompleted {
+                model, turn_number, ..
+            } => {
+                write!(f, "turn {turn_number} ok ({model})")
+            }
+            AgentEvent::TurnFailed {
                 turn_number, error, ..
             } => {
-                write!(f, "turn {turn_number} ✗ {error}")
+                write!(f, "turn {turn_number} failed {error}")
             }
             AgentEvent::StatusReport {
                 summary,
                 turn_number,
+                ..
             } => {
-                write!(f, "turn {turn_number} 📋 {summary}")
+                write!(f, "turn {turn_number} status {summary}")
             }
             AgentEvent::HistoryCompacted {
                 old_items,
                 new_chars,
+                ..
             } => {
                 write!(
                     f,
-                    "📦 compacted history: {old_items} items → {new_chars} char summary"
+                    "compacted history: {old_items} items -> {new_chars} char summary"
                 )
             }
         }
     }
 }
 
-/// Emitter for agent events. Cheaply cloneable.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
+    }
+}
+
 #[derive(Clone)]
 pub struct EventEmitter {
     tx: mpsc::Sender<AgentEvent>,
 }
 
-/// Receiver for agent events.
 pub struct EventReceiver {
     rx: mpsc::Receiver<AgentEvent>,
 }
 
-/// Create a new event channel.
 pub fn event_channel() -> (EventEmitter, EventReceiver) {
     let (tx, rx) = mpsc::channel();
     (EventEmitter { tx }, EventReceiver { rx })
 }
 
 impl EventEmitter {
-    /// Emit an event. Non-blocking; silently drops if the receiver is gone.
     pub fn emit(&self, event: AgentEvent) {
         let _ = self.tx.send(event);
     }
 }
 
 impl EventReceiver {
-    /// Block until an event is received. Returns Err when the channel closes.
     pub fn recv_blocking(&self) -> std::result::Result<AgentEvent, mpsc::RecvError> {
         self.rx.recv()
     }
 
-    /// Try to receive an event without blocking.
     #[allow(dead_code)]
     pub fn try_recv(&self) -> Option<AgentEvent> {
         self.rx.try_recv().ok()
     }
 
-    /// Drain all pending events.
     #[allow(dead_code)]
     pub fn drain(&self) -> Vec<AgentEvent> {
         let mut events = Vec::new();

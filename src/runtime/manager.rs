@@ -1,0 +1,550 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, ensure};
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinError;
+
+use crate::auth::{CredentialStore, ResolvedAuth};
+use crate::compact::CompactConfig;
+use crate::events::{AgentEvent, event_channel};
+use crate::runtime::{RuntimeHooks, SessionRuntime, SubmitResult, TurnCorrelation};
+use crate::store::{Session, SharedStore};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedRuntime {
+    pub session_id: String,
+    pub model: String,
+    pub provider: String,
+    pub settings: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTurnReplay {
+    pub request_id: String,
+    pub turn_id: String,
+    pub message_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeEventEnvelope {
+    pub request_id: String,
+    pub event: AgentEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachControllerError {
+    SessionBusy {
+        session_id: String,
+        active_controller_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitPromptError {
+    NoRuntime { session_id: String },
+    NoActiveTurn { session_id: String },
+    TurnInProgress { session_id: String, turn_id: String },
+    RuntimeFailed { session_id: String, error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitPromptOutcome {
+    Accepted {
+        turn_id: String,
+        message_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbortTurnError {
+    NoRuntime { session_id: String },
+    NoActiveTurn { session_id: String },
+    TurnMismatch {
+        session_id: String,
+        expected_turn_id: String,
+        requested_turn_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbortTurnOutcome {
+    Requested { session_id: String, turn_id: String },
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeWorker {
+    session_id: String,
+    model: String,
+    provider: String,
+    project_dir: PathBuf,
+    instructions: String,
+    compact_config: CompactConfig,
+}
+
+impl RuntimeWorker {
+    fn from_session(session: &Session) -> Self {
+        let mut model = session.model.clone();
+        let mut provider = session.provider.clone();
+        if let Some(settings) = &session.settings {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(settings) {
+                if let Some(settings_model) = json.get("model").and_then(|v| v.as_str()) {
+                    model = settings_model.to_string();
+                }
+                if let Some(settings_provider) = json.get("provider").and_then(|v| v.as_str()) {
+                    provider = settings_provider.to_string();
+                }
+            }
+        }
+
+        let project_dir = std::env::current_dir().unwrap_or_default();
+        let rules = crate::skills::discover_rules(&project_dir);
+        let skills = crate::skills::discover_skills(&project_dir);
+        let instructions = crate::skills::build_system_prompt(&rules, &skills);
+
+        Self {
+            session_id: session.id.clone(),
+            model,
+            provider,
+            project_dir,
+            instructions,
+            compact_config: CompactConfig::default(),
+        }
+    }
+
+    fn resolved_auth(
+        &self,
+        runtime_rt: &tokio::runtime::Runtime,
+        events: &crate::events::EventEmitter,
+    ) -> Result<ResolvedAuth> {
+        if self.provider == "test" {
+            return Ok(ResolvedAuth {
+                provider: "test".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: "http://unused".to_string(),
+                account_id: None,
+            });
+        }
+
+        let store = CredentialStore::open().context("failed to open credential store")?;
+        let resolved = runtime_rt
+            .block_on(crate::auth::resolve_auth(&store, events))
+            .context("failed to resolve provider auth")?;
+
+        ensure!(
+            resolved.provider == self.provider,
+            "session provider '{}' does not match resolved auth provider '{}'; switch active provider or credentials",
+            self.provider,
+            resolved.provider
+        );
+
+        Ok(resolved)
+    }
+
+    async fn submit_prompt_stream(
+        &self,
+        shared_store: SharedStore,
+        prompt: String,
+        correlation: TurnCorrelation,
+        abort_signal: Arc<AtomicBool>,
+        stream_tx: mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<SubmitResult> {
+        let worker = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<SubmitResult> {
+            let runtime_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to build runtime worker tokio runtime")?;
+
+            let store_guard = shared_store
+                .lock()
+                .map_err(|e| anyhow::anyhow!("store mutex poisoned: {e}"))?;
+
+            let (events, receiver) = event_channel();
+            let forward_tx = stream_tx.clone();
+            let forwarder = std::thread::spawn(move || {
+                while let Ok(event) = receiver.recv_blocking() {
+                    if forward_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let resolved_auth = worker.resolved_auth(&runtime_rt, &events)?;
+            let registry = crate::tools::default_registry(worker.project_dir.clone());
+            let mut runtime = SessionRuntime::new_with_abort_signal(
+                &store_guard,
+                resolved_auth,
+                Some(&worker.model),
+                Some(&worker.session_id),
+                events.clone(),
+                worker.compact_config.clone(),
+                registry,
+                worker.instructions.clone(),
+                RuntimeHooks::default(),
+                abort_signal,
+            )?;
+
+            let submit = runtime_rt
+                .block_on(runtime.submit_prompt_with_ids(prompt, correlation))
+                .context("runtime submit failed")?;
+
+            drop(runtime);
+            drop(events);
+            let _ = forwarder.join();
+
+            Ok(submit)
+        })
+        .await
+        .map_err(join_error)?
+    }
+}
+
+#[derive(Debug)]
+struct ActivePrompt {
+    turn_id: String,
+    abort_signal: Arc<AtomicBool>,
+    keep_replay_on_completion: bool,
+}
+
+#[derive(Debug)]
+struct ManagedSession {
+    runtime: RuntimeWorker,
+    settings: Option<String>,
+    controller_id: Option<String>,
+    active_turn: Option<ActiveTurnReplay>,
+    active_prompt: Option<ActivePrompt>,
+    events: broadcast::Sender<RuntimeEventEnvelope>,
+}
+
+#[derive(Debug, Default)]
+pub struct RuntimeManager {
+    sessions: Mutex<HashMap<String, ManagedSession>>,
+}
+
+impl RuntimeManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn attach_controller(
+        &self,
+        session: &Session,
+        controller_id: &str,
+    ) -> Result<(), AttachControllerError> {
+        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let entry = sessions
+            .entry(session.id.clone())
+            .or_insert_with(|| ManagedSession {
+                runtime: RuntimeWorker::from_session(session),
+                settings: session.settings.clone(),
+                controller_id: None,
+                active_turn: None,
+                active_prompt: None,
+                events: broadcast::channel(256).0,
+            });
+
+        entry.settings = session.settings.clone();
+        entry.runtime = RuntimeWorker::from_session(session);
+
+        if let Some(active) = &entry.controller_id {
+            if active != controller_id {
+                return Err(AttachControllerError::SessionBusy {
+                    session_id: session.id.clone(),
+                    active_controller_id: active.clone(),
+                });
+            }
+        }
+
+        entry.controller_id = Some(controller_id.to_string());
+        Ok(())
+    }
+
+    pub fn release_controller(&self, session_id: &str, controller_id: &str) {
+        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        if let Some(entry) = sessions.get_mut(session_id) {
+            if entry.controller_id.as_deref() == Some(controller_id) {
+                entry.controller_id = None;
+            }
+        }
+    }
+
+    pub fn subscribe(&self, session_id: &str) -> Option<broadcast::Receiver<RuntimeEventEnvelope>> {
+        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        sessions.get(session_id).map(|entry| entry.events.subscribe())
+    }
+
+    pub fn runtime(&self, session_id: &str) -> Option<ManagedRuntime> {
+        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        sessions.get(session_id).map(|entry| ManagedRuntime {
+            session_id: entry.runtime.session_id.clone(),
+            model: entry.runtime.model.clone(),
+            provider: entry.runtime.provider.clone(),
+            settings: entry.settings.clone(),
+        })
+    }
+
+    pub fn start_active_turn(
+        &self,
+        session_id: &str,
+        request_id: String,
+        turn_id: String,
+        message_id: String,
+    ) -> Result<(), SubmitPromptError> {
+        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return Err(SubmitPromptError::NoRuntime {
+                session_id: session_id.to_string(),
+            });
+        };
+
+        if let Some(active_prompt) = &entry.active_prompt {
+            return Err(SubmitPromptError::TurnInProgress {
+                session_id: session_id.to_string(),
+                turn_id: active_prompt.turn_id.clone(),
+            });
+        }
+
+        entry.active_turn = Some(ActiveTurnReplay {
+            request_id,
+            turn_id,
+            message_id,
+            content: String::new(),
+        });
+        Ok(())
+    }
+
+    pub fn active_turn(&self, session_id: &str) -> Option<ActiveTurnReplay> {
+        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        sessions
+            .get(session_id)
+            .and_then(|entry| entry.active_turn.clone())
+    }
+
+    pub fn clear_active_turn(&self, session_id: &str, turn_id: &str) {
+        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        if let Some(entry) = sessions.get_mut(session_id) {
+            let should_clear = entry
+                .active_turn
+                .as_ref()
+                .map(|active| active.turn_id == turn_id)
+                .unwrap_or(false);
+            if should_clear {
+                entry.active_turn = None;
+            }
+        }
+    }
+
+    pub fn submit_prompt(
+        self: &Arc<Self>,
+        shared_store: SharedStore,
+        session_id: &str,
+        keep_replay_on_completion: bool,
+        prompt: String,
+    ) -> std::result::Result<SubmitPromptOutcome, SubmitPromptError> {
+        let (worker, active_turn, abort_signal) = {
+            let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return Err(SubmitPromptError::NoRuntime {
+                    session_id: session_id.to_string(),
+                });
+            };
+            let Some(active_turn) = entry.active_turn.clone() else {
+                return Err(SubmitPromptError::NoActiveTurn {
+                    session_id: session_id.to_string(),
+                });
+            };
+            if let Some(active_prompt) = &entry.active_prompt {
+                return Err(SubmitPromptError::TurnInProgress {
+                    session_id: session_id.to_string(),
+                    turn_id: active_prompt.turn_id.clone(),
+                });
+            }
+
+            let abort_signal = Arc::new(AtomicBool::new(false));
+            entry.active_prompt = Some(ActivePrompt {
+                turn_id: active_turn.turn_id.clone(),
+                abort_signal: abort_signal.clone(),
+                keep_replay_on_completion,
+            });
+
+            (entry.runtime.clone(), active_turn, abort_signal)
+        };
+
+        let manager = Arc::clone(self);
+        let session_id_owned = session_id.to_string();
+        let request_id = active_turn.request_id.clone();
+        let turn_id = active_turn.turn_id.clone();
+        let message_id = active_turn.message_id.clone();
+        let finish_turn_id = turn_id.clone();
+        let correlation = TurnCorrelation {
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+        };
+
+        tokio::spawn(async move {
+            let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+            let request_id_for_events = request_id.clone();
+            let session_id_for_events = session_id_owned.clone();
+            let event_manager = Arc::clone(&manager);
+
+            let worker_task = tokio::spawn(async move {
+                worker
+                    .submit_prompt_stream(shared_store, prompt, correlation, abort_signal, stream_tx)
+                    .await
+            });
+
+            while let Some(event) = stream_rx.recv().await {
+                event_manager.publish_runtime_event(&session_id_for_events, &request_id_for_events, event);
+            }
+
+            let result = match worker_task.await {
+                Ok(result) => result,
+                Err(err) => Err(join_error(err)),
+            };
+
+            manager.finish_prompt(&session_id_owned, &request_id, &finish_turn_id, result);
+        });
+
+        Ok(SubmitPromptOutcome::Accepted { turn_id, message_id })
+    }
+
+    pub fn request_abort(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> std::result::Result<AbortTurnOutcome, AbortTurnError> {
+        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let Some(entry) = sessions.get(session_id) else {
+            return Err(AbortTurnError::NoRuntime {
+                session_id: session_id.to_string(),
+            });
+        };
+        let Some(active_turn) = &entry.active_turn else {
+            return Err(AbortTurnError::NoActiveTurn {
+                session_id: session_id.to_string(),
+            });
+        };
+        if active_turn.turn_id != turn_id {
+            return Err(AbortTurnError::TurnMismatch {
+                session_id: session_id.to_string(),
+                expected_turn_id: active_turn.turn_id.clone(),
+                requested_turn_id: turn_id.to_string(),
+            });
+        }
+        let Some(active_prompt) = &entry.active_prompt else {
+            return Err(AbortTurnError::NoActiveTurn {
+                session_id: session_id.to_string(),
+            });
+        };
+
+        active_prompt.abort_signal.store(true, Ordering::Relaxed);
+        Ok(AbortTurnOutcome::Requested {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+        })
+    }
+
+    fn publish_runtime_event(&self, session_id: &str, request_id: &str, event: AgentEvent) {
+        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return;
+        };
+
+        if let AgentEvent::MessageDelta { delta, .. } = &event {
+            if let Some(active_turn) = entry.active_turn.as_mut() {
+                active_turn.content.push_str(delta);
+            }
+        }
+
+        let _ = entry.events.send(RuntimeEventEnvelope {
+            request_id: request_id.to_string(),
+            event: event.clone(),
+        });
+
+        match event {
+            AgentEvent::TurnCompleted { .. } => {
+                let keep_replay = entry
+                    .active_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.keep_replay_on_completion)
+                    .unwrap_or(false);
+                if !keep_replay {
+                    entry.active_turn = None;
+                }
+            }
+            AgentEvent::TurnFailed { .. } => {
+                entry.active_turn = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_prompt(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        turn_id: &str,
+        result: Result<SubmitResult>,
+    ) {
+        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return;
+        };
+
+        if result.is_err() {
+            let error = format!("{}", result.err().unwrap());
+            let _ = entry.events.send(RuntimeEventEnvelope {
+                request_id: request_id.to_string(),
+                event: AgentEvent::TurnFailed {
+                    session_id: session_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                    model: entry.runtime.model.clone(),
+                    turn_number: 0,
+                    error,
+                },
+            });
+            entry.active_prompt = None;
+            entry.active_turn = None;
+            return;
+        }
+
+        let keep_replay = entry
+            .active_prompt
+            .as_ref()
+            .map(|prompt| prompt.keep_replay_on_completion)
+            .unwrap_or(false);
+        entry.active_prompt = None;
+
+        match result.unwrap() {
+            SubmitResult::Completed { .. } => {
+                if !keep_replay
+                    && entry
+                        .active_turn
+                        .as_ref()
+                        .map(|active| active.turn_id == turn_id)
+                        .unwrap_or(false)
+                {
+                    entry.active_turn = None;
+                }
+            }
+            SubmitResult::Failed { .. } | SubmitResult::Aborted { .. } => {
+                if entry
+                    .active_turn
+                    .as_ref()
+                    .map(|active| active.turn_id == turn_id)
+                    .unwrap_or(false)
+                {
+                    entry.active_turn = None;
+                }
+            }
+        }
+    }
+}
+
+fn join_error(err: JoinError) -> anyhow::Error {
+    anyhow::anyhow!("runtime worker join error: {err}")
+}

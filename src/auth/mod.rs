@@ -329,6 +329,7 @@ pub async fn resolve_auth(store: &CredentialStore, events: &EventEmitter) -> Res
                 *oa = refreshed;
                 store.save(&creds)?;
                 events.emit(AgentEvent::TokenRefreshed {
+                    session_id: None,
                     provider: "openai".into(),
                 });
             }

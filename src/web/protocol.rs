@@ -1,0 +1,222 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum WebCommand {
+    #[serde(rename = "state.get")]
+    StateGet { request_id: String },
+    #[serde(rename = "sessions.list")]
+    SessionsList { request_id: String },
+    #[serde(rename = "session.load")]
+    SessionLoad {
+        request_id: String,
+        session_id: String,
+    },
+    #[serde(rename = "prompt.submit")]
+    PromptSubmit {
+        request_id: String,
+        session_id: String,
+        prompt: String,
+    },
+    #[serde(rename = "turn.abort")]
+    TurnAbort {
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum WebResponse {
+    #[serde(rename = "response.ok")]
+    Ok { request_id: String, data: Value },
+    #[serde(rename = "response.error")]
+    Error {
+        request_id: String,
+        error: ResponseError,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StateSnapshotData {
+    pub protocol_version: u32,
+    pub session_id: String,
+    pub selected_session: SelectedSession,
+    pub sessions: Vec<SessionSummary>,
+    pub transcript: Vec<TranscriptEntry>,
+    pub active_turn: Option<ActiveTurnSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedSession {
+    pub session_id: String,
+    pub title: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum UiEvent {
+    #[serde(rename = "state.snapshot")]
+    StateSnapshot {
+        event_id: String,
+        ts: String,
+        #[serde(flatten)]
+        data: StateSnapshotData,
+    },
+    #[serde(rename = "turn.started")]
+    TurnStarted {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+    },
+    #[serde(rename = "message.started")]
+    MessageStarted {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+    },
+    #[serde(rename = "message.delta")]
+    MessageDelta {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+        delta: String,
+    },
+    #[serde(rename = "message.completed")]
+    MessageCompleted {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+        message_id: String,
+        content: String,
+    },
+    #[serde(rename = "tool.started")]
+    ToolStarted {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+        tool_call_id: String,
+        tool_name: String,
+    },
+    #[serde(rename = "tool.completed")]
+    ToolCompleted {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+        tool_call_id: String,
+        tool_name: String,
+        success: bool,
+    },
+    #[serde(rename = "turn.completed")]
+    TurnCompleted {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+    },
+    #[serde(rename = "turn.failed")]
+    TurnFailed {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+        error: String,
+    },
+    #[serde(rename = "status.report")]
+    StatusReport {
+        event_id: String,
+        ts: String,
+        session_id: String,
+        status: String,
+        detail: String,
+    },
+    #[serde(rename = "transport.selected")]
+    TransportSelected {
+        event_id: String,
+        ts: String,
+        session_id: String,
+        transport: String,
+    },
+    #[serde(rename = "transport.fallback")]
+    TransportFallback {
+        event_id: String,
+        ts: String,
+        session_id: String,
+        from: String,
+        to: String,
+        reason: String,
+    },
+    #[serde(rename = "auth.token_refreshed")]
+    AuthTokenRefreshed {
+        event_id: String,
+        ts: String,
+        session_id: String,
+        provider: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub title: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptEntry {
+    pub turn_number: i64,
+    pub kind: String,
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveTurnSnapshot {
+    pub request_id: String,
+    pub turn_id: String,
+    pub message_id: String,
+    pub content: String,
+}
+
+impl WebCommand {
+    pub fn request_id(&self) -> &str {
+        match self {
+            WebCommand::StateGet { request_id }
+            | WebCommand::SessionsList { request_id }
+            | WebCommand::SessionLoad { request_id, .. }
+            | WebCommand::PromptSubmit { request_id, .. }
+            | WebCommand::TurnAbort { request_id, .. } => request_id,
+        }
+    }
+}

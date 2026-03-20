@@ -1,0 +1,13 @@
+{
+  "name": "kley-browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "playwright:install": "playwright install chromium",
+    "test:browser": "playwright test",
+    "test:browser:core": "playwright test playwright/core-workspace.spec.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}
