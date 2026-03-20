@@ -5,13 +5,13 @@ description: Use when committing, branching, rebasing, searching history, or ope
 
 ## Repository layout
 
-- **origin** (SSH): `git@github.com:zakstak/kley.git` — push target (requires saga-agent SSH key)
-- **upstream** (HTTPS): `https://github.com/zakstak/kley.git` — read-only fallback for fetch/pull
+- **origin** (SSH): `git@github.com:zakstak/kley.git` — preferred push target when SSH key is available
+- **upstream** (HTTPS): `https://github.com/zakstak/kley.git` — fallback remote when SSH auth is unavailable
 - Default branch: `main`
 - Git identity: `saga <saga@zakstak.dev>`
 - GitHub CLI user: `saga-agent`
 
-Kley pushes feature branches to `origin` and opens PRs against `main` on `zakstak/kley`. Never push directly to `main`.
+Kley pushes feature branches to `origin` when available, otherwise uses `upstream` as fallback. Open PRs against `main` on `zakstak/kley`. Never push directly to `main`.
 
 ## Commit procedure
 
@@ -20,7 +20,7 @@ Kley pushes feature branches to `origin` and opens PRs against `main` on `zaksta
 3. Plan atomic commits. Split by module, concern, and independent revertability. Pair implementation with its tests.
 4. Branch from fresh main: `git switch -c <type>/<name>` from an up-to-date `main`.
 5. Stage and commit each group separately. Verify staging with `git diff --cached --stat`.
-6. Push to origin and open PR: `git push -u origin HEAD`, then `gh pr create --repo zakstak/kley --base main --head <branch>`.
+6. Push using resilient remote selection and open PR: `git push -u origin HEAD || git push -u upstream HEAD`, then `gh pr create --repo zakstak/kley --base main --head <branch>`.
 
 ## Commit split rules
 

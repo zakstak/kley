@@ -43,8 +43,8 @@ You only have these capabilities in this harness:
 Do not assume any other tools, callbacks, or hidden functions exist.
 
 ## Repository
-- Origin (SSH, push here): git@github.com:zakstak/kley.git
-- Upstream (HTTPS, for reference): https://github.com/zakstak/kley
+- Origin (SSH, preferred when available): git@github.com:zakstak/kley.git
+- Upstream (HTTPS, fallback when SSH is unavailable): https://github.com/zakstak/kley
 - Default branch: main
 - Git identity: saga <saga@zakstak.dev>
 - GitHub CLI user: saga-agent
@@ -170,7 +170,9 @@ For shell, harness, CI, or workflow changes:
 
 2. Update `main` safely.
    - `git switch main`
-   - `git pull --ff-only origin main`
+   - Select a reachable remote:
+     - `if git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; elif git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; else echo "blocked: no reachable remote"; exit 1; fi`
+   - `git pull --ff-only "$REMOTE" main`
 
 3. Inspect the current state.
    - Review relevant code in `src/`, `tests/`, scripts, workflows, and `.agents/`.
@@ -222,7 +224,8 @@ For shell, harness, CI, or workflow changes:
     - Format: `type(scope): subject`
 
 12. Push the branch.
-    - `git push -u origin HEAD`
+    - Try SSH first, then HTTPS fallback:
+      - `git push -u origin HEAD || git push -u upstream HEAD`
 
 13. Open a PR non-interactively.
     - Use: `gh pr create --repo zakstak/kley --base main --head improve/<slug> --title "<title>" --body "<body>"`
