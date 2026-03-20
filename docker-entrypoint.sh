@@ -16,6 +16,22 @@ detect_host_ids() {
   fi
 }
 
+setup_github_https_credentials() {
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'warning: gh not installed; HTTPS git fallback may fail\n' >&2
+    return 0
+  fi
+
+  if ! gh auth status >/dev/null 2>&1; then
+    printf 'warning: gh is not authenticated; HTTPS git fallback may fail\n' >&2
+    return 0
+  fi
+
+  if ! gh auth setup-git >/dev/null 2>&1; then
+    printf 'warning: failed to configure git credential helper with gh\n' >&2
+  fi
+}
+
 fix_git_mount_ownership() {
   detect_host_ids
 
@@ -32,6 +48,7 @@ fix_git_mount_ownership() {
   for path in \
     "$WORKSPACE_DIR/.git/FETCH_HEAD" \
     "$WORKSPACE_DIR/.git/ORIG_HEAD" \
+    "$WORKSPACE_DIR/.git/COMMIT_EDITMSG" \
     "$WORKSPACE_DIR/.git/HEAD" \
     "$WORKSPACE_DIR/.git/index" \
     "$WORKSPACE_DIR/.git/logs" \
@@ -55,6 +72,8 @@ fix_git_mount_ownership
 if [ "$#" -eq 0 ]; then
   set -- chat
 fi
+
+setup_github_https_credentials
 
 if kley "$@"; then
   status=0
