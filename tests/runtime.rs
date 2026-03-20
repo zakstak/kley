@@ -1,11 +1,117 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::body::{Body, Bytes};
+use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use futures_util::stream;
 use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
 use kley::events::{AgentEvent, Transport, event_channel};
 use kley::runtime::{AbortResult, RuntimeHooks, SessionRuntime, SubmitResult};
-use kley::store::{Session, SessionStatus, Store, Turn};
+use kley::store::{Session, SessionStatus, SharedStore, Store, Turn};
 
 mod runtime {
     use super::*;
+
+    struct TestServer {
+        addr: std::net::SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn spawn_app(app: Router) -> TestServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        TestServer { addr, task }
+    }
+
+    async fn openai_ws_handler(ws: WebSocketUpgrade) -> Response {
+        ws.on_upgrade(handle_openai_ws)
+    }
+
+    async fn handle_openai_ws(mut socket: WebSocket) {
+        let _ = socket.recv().await;
+
+        for chunk in ["slow ", "provider ", "stream"] {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            if socket
+                .send(WsMessage::Text(
+                    serde_json::json!({
+                        "type": "response.output_text.delta",
+                        "delta": chunk,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let _ = socket
+            .send(WsMessage::Text(
+                serde_json::json!({ "type": "response.completed" }).to_string(),
+            ))
+            .await;
+    }
+
+    async fn slow_zai_sse_handler() -> impl IntoResponse {
+        let body = Body::from_stream(stream::unfold(0usize, |index| async move {
+            let chunk = match index {
+                0 => Some(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"slow \"}}]}\n",
+                )),
+                1 => Some(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"provider \"}}]}\n",
+                )),
+                2 => Some(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"stream\"}}]}\n",
+                )),
+                3 => Some(Bytes::from_static(b"data: [DONE]\n")),
+                _ => None,
+            }?;
+
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            Some((Ok::<Bytes, std::io::Error>(chunk), index + 1))
+        }));
+
+        ([(header::CONTENT_TYPE, "text/event-stream")], body)
+    }
+
+    fn shared_store() -> SharedStore {
+        Arc::new(Mutex::new(Store::open_memory().unwrap()))
+    }
+
+    fn runtime_with_abort_signal(
+        store: SharedStore,
+        auth: ResolvedAuth,
+        abort_signal: Arc<AtomicBool>,
+    ) -> (SessionRuntime<'static>, kley::events::EventReceiver) {
+        let (emitter, receiver) = event_channel();
+        let runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
+            store,
+            auth,
+            Some("test-model"),
+            None,
+            emitter,
+            CompactConfig::default(),
+            kley::tools::default_registry(std::env::current_dir().unwrap()),
+            "system".to_string(),
+            RuntimeHooks::default(),
+            abort_signal,
+        )
+        .unwrap();
+        (runtime, receiver)
+    }
 
     fn test_auth() -> ResolvedAuth {
         ResolvedAuth {
@@ -136,5 +242,91 @@ mod runtime {
         assert!(events
             .iter()
             .any(|event| matches!(event, AgentEvent::TokenRefreshed { .. })));
+    }
+
+    #[tokio::test]
+    async fn openai_websocket_stream_honors_abort_signal() {
+        let server = spawn_app(Router::new().route("/responses", get(openai_ws_handler))).await;
+        let store = shared_store();
+        let abort_signal = Arc::new(AtomicBool::new(false));
+        let (mut runtime, receiver) = runtime_with_abort_signal(
+            store,
+            ResolvedAuth {
+                provider: "openai".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: format!("http://{}", server.addr),
+                account_id: None,
+            },
+            abort_signal.clone(),
+        );
+
+        let abort_task = {
+            let abort_signal = abort_signal.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(110)).await;
+                abort_signal.store(true, Ordering::Relaxed);
+            })
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            runtime.submit_prompt("please stream slowly".to_string()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(result, SubmitResult::Aborted { .. }));
+        abort_task.await.unwrap();
+
+        let events = receiver.drain();
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::MessageDelta { .. })));
+        assert!(events.iter().any(|event| {
+            matches!(event, AgentEvent::TurnFailed { error, .. } if error == "aborted")
+        }));
+
+        server.task.abort();
+    }
+
+    #[tokio::test]
+    async fn zai_sse_stream_honors_abort_signal() {
+        let server = spawn_app(Router::new().route("/chat/completions", post(slow_zai_sse_handler))).await;
+        let store = shared_store();
+        let abort_signal = Arc::new(AtomicBool::new(false));
+        let (mut runtime, receiver) = runtime_with_abort_signal(
+            store,
+            ResolvedAuth {
+                provider: "zai".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: format!("http://{}", server.addr),
+                account_id: None,
+            },
+            abort_signal.clone(),
+        );
+
+        let abort_task = {
+            let abort_signal = abort_signal.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(110)).await;
+                abort_signal.store(true, Ordering::Relaxed);
+            })
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            runtime.submit_prompt("please stream slowly".to_string()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(result, SubmitResult::Aborted { .. }));
+        abort_task.await.unwrap();
+
+        let events = receiver.drain();
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::MessageDelta { .. })));
+        assert!(events.iter().any(|event| {
+            matches!(event, AgentEvent::TurnFailed { error, .. } if error == "aborted")
+        }));
+
+        server.task.abort();
     }
 }

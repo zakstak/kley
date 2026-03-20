@@ -466,6 +466,7 @@ impl<'a> SessionRuntime<'a> {
                         &self.registry,
                         &self.instructions,
                         &self.ws_disabled,
+                        &self.abort_signal,
                         &self.events,
                         Some(&output_hook),
                     )
@@ -478,14 +479,14 @@ impl<'a> SessionRuntime<'a> {
                         provider: self.resolved.provider.clone(),
                         transport: Transport::Sse,
                     });
-                    let text = send_zai_sse(
+                    send_zai_sse(
                         &self.resolved,
                         &self.model,
                         &messages_from_history(&self.history),
+                        &self.abort_signal,
                         Some(&output_hook),
                     )
-                    .await?;
-                    Ok(TurnResult::Text(text))
+                    .await
                 }
                 "test" => match test_provider_result(&self.history) {
                     TurnResult::ToolCalls(calls) => Ok(TurnResult::ToolCalls(calls)),
@@ -791,6 +792,12 @@ async fn run_test_provider(
     Ok(TurnResult::Text(response))
 }
 
+async fn wait_for_abort_signal(abort_signal: &AtomicBool) {
+    while !abort_signal.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn latest_test_user_prompt(history: &[serde_json::Value]) -> Option<String> {
     history.iter().rev().find_map(|item| {
         let item_type = item.get("type")?.as_str()?;
@@ -962,6 +969,7 @@ async fn send_openai(
     registry: &ToolRegistry,
     instructions: &str,
     ws_disabled: &AtomicBool,
+    abort_signal: &AtomicBool,
     events: &EventEmitter,
     output_hook: Option<&dyn Fn(&str)>,
 ) -> Result<TurnResult> {
@@ -972,7 +980,8 @@ async fn send_openai(
             provider: "openai".into(),
             transport: Transport::Sse,
         });
-        return send_openai_sse(auth, model, history, registry, instructions, output_hook).await;
+        return send_openai_sse(auth, model, history, registry, instructions, abort_signal, output_hook)
+            .await;
     }
 
     events.emit(AgentEvent::TransportSelected {
@@ -982,7 +991,7 @@ async fn send_openai(
         transport: Transport::WebSocket,
     });
 
-    match send_openai_ws(auth, model, history, registry, instructions, output_hook).await {
+    match send_openai_ws(auth, model, history, registry, instructions, abort_signal, output_hook).await {
         Ok(response) => Ok(response),
         Err(err) => {
             let reason = format!("{err:#}");
@@ -994,7 +1003,8 @@ async fn send_openai(
                 to: Transport::Sse,
                 reason,
             });
-            send_openai_sse(auth, model, history, registry, instructions, output_hook).await
+            send_openai_sse(auth, model, history, registry, instructions, abort_signal, output_hook)
+                .await
         }
     }
 }
@@ -1005,8 +1015,13 @@ async fn send_openai_ws(
     history: &[serde_json::Value],
     registry: &ToolRegistry,
     instructions: &str,
+    abort_signal: &AtomicBool,
     output_hook: Option<&dyn Fn(&str)>,
 ) -> Result<TurnResult> {
+    if abort_signal.load(Ordering::Relaxed) {
+        return Ok(TurnResult::Aborted);
+    }
+
     let ws_url = if let Some(stripped) = auth.base_url.strip_prefix("http://") {
         format!("ws://{stripped}/responses")
     } else if let Some(stripped) = auth.base_url.strip_prefix("https://") {
@@ -1038,9 +1053,12 @@ async fn send_openai_ws(
             .context("invalid beta header value")?,
     );
 
-    let (mut ws, _response) = tokio_tungstenite::connect_async(request)
-        .await
-        .context("WebSocket connect failed")?;
+    let (mut ws, _response) = tokio::select! {
+        _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
+        result = tokio_tungstenite::connect_async(request) => {
+            result.context("WebSocket connect failed")?
+        }
+    };
 
     let tools = registry.to_api_tools();
     let mut create_payload = serde_json::json!({
@@ -1056,9 +1074,15 @@ async fn send_openai_ws(
         create_payload["tools"] = serde_json::json!(tools);
     }
 
-    ws.send(tungstenite::Message::Text(create_payload.to_string()))
-        .await
-        .context("failed to send response.create")?;
+    tokio::select! {
+        _ = wait_for_abort_signal(abort_signal) => {
+            let _ = ws.close(None).await;
+            return Ok(TurnResult::Aborted);
+        }
+        result = ws.send(tungstenite::Message::Text(create_payload.to_string())) => {
+            result.context("failed to send response.create")?;
+        }
+    }
 
     let mut full_response = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -1066,10 +1090,23 @@ async fn send_openai_ws(
     let mut current_call_id = String::new();
     let mut current_call_name = String::new();
 
-    while let Some(msg) = ws.next().await {
+    loop {
+        let Some(msg) = (tokio::select! {
+            _ = wait_for_abort_signal(abort_signal) => {
+                let _ = ws.close(None).await;
+                return Ok(TurnResult::Aborted);
+            }
+            msg = ws.next() => msg
+        }) else {
+            break;
+        };
         let msg = msg.context("WebSocket read error")?;
         match msg {
             tungstenite::Message::Text(text) => {
+                if abort_signal.load(Ordering::Relaxed) {
+                    let _ = ws.close(None).await;
+                    return Ok(TurnResult::Aborted);
+                }
                 let event: ResponseEvent = match serde_json::from_str(&text) {
                     Ok(e) => e,
                     Err(_) => continue,
@@ -1142,8 +1179,13 @@ async fn send_openai_sse(
     history: &[serde_json::Value],
     registry: &ToolRegistry,
     instructions: &str,
+    abort_signal: &AtomicBool,
     output_hook: Option<&dyn Fn(&str)>,
 ) -> Result<TurnResult> {
+    if abort_signal.load(Ordering::Relaxed) {
+        return Ok(TurnResult::Aborted);
+    }
+
     let url = format!("{}/responses", auth.base_url);
     let tools = registry.to_api_tools();
     let mut body = serde_json::json!({
@@ -1166,7 +1208,10 @@ async fn send_openai_sse(
     if let Some(account_id) = &auth.account_id {
         req = req.header("ChatGPT-Account-ID", account_id);
     }
-    let resp = req.json(&body).send().await.context("SSE request failed")?;
+    let resp = tokio::select! {
+        _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
+        result = req.json(&body).send() => result.context("SSE request failed")?,
+    };
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -1181,12 +1226,21 @@ async fn send_openai_sse(
     let mut current_call_name = String::new();
     let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let Some(chunk) = (tokio::select! {
+            _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
+            chunk = stream.next() => chunk,
+        }) else {
+            break;
+        };
         let chunk = chunk.context("stream error")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         let mut done = false;
         while let Some(block_end) = buffer.find("\n\n") {
+            if abort_signal.load(Ordering::Relaxed) {
+                return Ok(TurnResult::Aborted);
+            }
             let block = buffer[..block_end].to_string();
             buffer = buffer[block_end + 2..].to_string();
 
@@ -1316,8 +1370,13 @@ async fn send_zai_sse(
     auth: &ResolvedAuth,
     model: &str,
     messages: &[Message],
+    abort_signal: &AtomicBool,
     output_hook: Option<&dyn Fn(&str)>,
-) -> Result<String> {
+) -> Result<TurnResult> {
+    if abort_signal.load(Ordering::Relaxed) {
+        return Ok(TurnResult::Aborted);
+    }
+
     let url = format!("{}/chat/completions", auth.base_url);
     let body = ChatCompletionsRequest {
         model: model.to_string(),
@@ -1325,14 +1384,15 @@ async fn send_zai_sse(
         stream: true,
     };
 
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", auth.api_key))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .context("ZAI request failed")?;
+    let resp = tokio::select! {
+        _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
+        result = reqwest::Client::new()
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", auth.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send() => result.context("ZAI request failed")?,
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1344,12 +1404,21 @@ async fn send_zai_sse(
     let mut full_response = String::new();
     let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let Some(chunk) = (tokio::select! {
+            _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
+            chunk = stream.next() => chunk,
+        }) else {
+            break;
+        };
         let chunk = chunk.context("stream error")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         let mut done = false;
         while let Some(line_end) = buffer.find('\n') {
+            if abort_signal.load(Ordering::Relaxed) {
+                return Ok(TurnResult::Aborted);
+            }
             let line = buffer[..line_end].trim().to_string();
             buffer = buffer[line_end + 1..].to_string();
 
@@ -1364,7 +1433,7 @@ async fn send_zai_sse(
         }
     }
 
-    Ok(full_response)
+    Ok(TurnResult::Text(full_response))
 }
 
 fn process_zai_sse_line_with_hook(
