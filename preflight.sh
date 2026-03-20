@@ -10,6 +10,8 @@ PASS=0
 FAIL=0
 WARN=0
 
+SELECTED_REMOTE=""
+
 # Detect if running inside Docker
 if [ -f /.dockerenv ]; then
   IN_DOCKER=true
@@ -45,24 +47,44 @@ optional() {
   fi
 }
 
+select_remote() {
+  if git ls-remote origin HEAD >/dev/null 2>&1; then
+    SELECTED_REMOTE="origin"
+    return 0
+  fi
+
+  if git ls-remote upstream HEAD >/dev/null 2>&1; then
+    SELECTED_REMOTE="upstream"
+    return 0
+  fi
+
+  SELECTED_REMOTE=""
+  return 1
+}
+
 echo "── Running from: $(pwd) ──"
 echo "   Environment: $(if $IN_DOCKER; then echo 'Docker'; else echo 'Host'; fi)"
 echo "   Git user:  $(git config user.name 2>/dev/null || echo '(not set)')"
 echo "   Git email: $(git config user.email 2>/dev/null || echo '(not set)')"
 echo "   GitHub:    $(gh api user --jq .login 2>/dev/null || echo '(not authenticated)')"
+if select_remote; then
+  echo "   Remote:    $SELECTED_REMOTE"
+else
+  echo "   Remote:    (none reachable)"
+fi
 echo ""
 
 echo "── Git access checks ──"
 check "git is installed"          git --version
 check "inside a git repo"        git rev-parse --is-inside-work-tree
-check "origin remote exists"     git remote get-url origin
-check "can fetch from origin"    git ls-remote origin HEAD
+check "origin/upstream exists"   bash -lc 'git remote get-url origin >/dev/null 2>&1 || git remote get-url upstream >/dev/null 2>&1'
+check "can fetch from a remote"  select_remote
 
 echo ""
 echo "── GitHub CLI checks ──"
 check "gh is installed"           gh --version
 check "gh is authenticated"       gh auth status
-check "can list PRs on origin"    gh pr list --limit 1
+check "can list PRs on repo"      gh pr list --repo zakstak/kley --limit 1
 
 echo ""
 echo "── Rust toolchain ──"
@@ -116,4 +138,3 @@ else
   echo ""
   echo "✓ All checks passed — ready to self-improve!"
 fi
-
