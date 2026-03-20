@@ -255,6 +255,7 @@
         activeMessageId: null,
         messageRows: new Map(),
         pendingRequests: new Map(),
+        pendingPromptText: new Map(),
         toolOrder: [],
         toolsByCallId: new Map(),
         busy: false,
@@ -692,6 +693,7 @@
           setStatus('error', 'error');
           pushInspectorEvent(`error: ${message}`);
           if (pending && pending.type === 'prompt.submit') {
+            state.pendingPromptText.delete(frame.request_id);
             setBusy(false);
             state.activeTurn = null;
           }
@@ -744,6 +746,15 @@
           case 'turn.started':
             if (!isActiveSession(frame.session_id)) {
               return;
+            }
+            {
+              const pendingPrompt = state.pendingPromptText.get(frame.request_id);
+              if (pendingPrompt && pendingPrompt.sessionId === frame.session_id) {
+                dom.transcriptRows.appendChild(
+                  createTranscriptRow('user', 'message', pendingPrompt.prompt, null)
+                );
+                state.pendingPromptText.delete(frame.request_id);
+              }
             }
             state.activeTurn = {
               requestId: frame.request_id,
@@ -949,9 +960,6 @@
           return;
         }
 
-        const optimisticRow = createTranscriptRow('user', 'message', prompt, null);
-        dom.transcriptRows.appendChild(optimisticRow);
-
         const requestId = makeRequestId('prompt');
         const sent = sendCommand({
           type: 'prompt.submit',
@@ -961,9 +969,13 @@
         });
 
         if (!sent) {
-          optimisticRow.remove();
           return;
         }
+
+        state.pendingPromptText.set(requestId, {
+          sessionId: state.selectedSessionId,
+          prompt,
+        });
 
         setBusy(true);
         setStatus('running', 'active');
