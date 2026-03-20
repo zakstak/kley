@@ -169,7 +169,7 @@ async fn handle_socket(mut socket: WebSocket, state: WebAppState, requested_sess
                         }
                     }
                     WebCommand::SessionsList { request_id } => {
-                        match list_sessions(&state).await {
+                        match list_sessions(&state, Some(&active_session.id)).await {
                             Ok(sessions) => {
                                 let data = json!({
                                     "sessions": sessions,
@@ -519,7 +519,7 @@ async fn send_bootstrap_event(
 
 async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSnapshotData> {
     let selected_session = load_selected_session(state, session_id).await?;
-    let sessions = list_sessions(state).await?;
+    let sessions = list_sessions(state, Some(session_id)).await?;
     let transcript = load_transcript(state, session_id).await?;
     let active_turn = state
         .runtime_manager
@@ -592,6 +592,16 @@ async fn attach_or_select_session(
         if let Some(index) = sessions.iter().position(|session| session.id == session_id) {
             let preferred = sessions.remove(index);
             sessions.insert(0, preferred);
+        } else {
+            let preferred_session_id = session_id.to_string();
+            if let Some(preferred) = store::store_run(&store_ref, move |store| {
+                Session::find(store, &preferred_session_id)
+            })
+            .await
+            .map_err(|_| SelectSessionError::Store)?
+            {
+            sessions.insert(0, preferred);
+            }
         }
     }
 
@@ -656,9 +666,23 @@ fn default_settings_json(model: &str, provider: &str) -> String {
     .to_string()
 }
 
-async fn list_sessions(state: &WebAppState) -> Result<Vec<SessionSummary>> {
+async fn list_sessions(state: &WebAppState, selected_session_id: Option<&str>) -> Result<Vec<SessionSummary>> {
     let store_ref = state.store.clone();
-    let sessions = store::store_run(&store_ref, |store| Session::list(store, 50)).await?;
+    let mut sessions = store::store_run(&store_ref, |store| Session::list(store, 50)).await?;
+
+    if let Some(selected_session_id) = selected_session_id {
+        let contains_selected = sessions.iter().any(|session| session.id == selected_session_id);
+        if !contains_selected {
+            let selected_session_id = selected_session_id.to_string();
+            if let Some(selected_session) = store::store_run(&store_ref, move |store| {
+                Session::find(store, &selected_session_id)
+            })
+            .await?
+            {
+                sessions.insert(0, selected_session);
+            }
+        }
+    }
 
     Ok(sessions
         .into_iter()

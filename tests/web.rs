@@ -356,6 +356,61 @@ mod web {
     }
 
     #[tokio::test]
+    async fn ws_connect_honors_requested_session_outside_recent_window() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let requested_session = store::store_run(&store, |s| {
+            let requested = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &requested.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &requested.id, "Requested Older Session")?;
+            Ok(requested)
+        })
+        .await
+        .unwrap();
+
+        for index in 0..55 {
+            store::store_run(&store, move |s| {
+                let session = Session::create(
+                    s,
+                    NewSession {
+                        model: "test-model".to_string(),
+                        provider: "test".to_string(),
+                    },
+                )?;
+                Session::update_settings(s, &session.id, r#"{"model":"test-model","provider":"test"}"#)?;
+                Session::update_title(s, &session.id, &format!("Recent Session {index}"))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", requested_session.id),
+        )
+        .await;
+
+        let frame = recv_json(&mut socket).await;
+        assert_eq!(frame["type"], "state.snapshot");
+        assert_eq!(frame["session_id"], requested_session.id);
+        assert_eq!(frame["selected_session"]["title"], "Requested Older Session");
+        assert!(frame["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["session_id"] == requested_session.id));
+    }
+
+    #[tokio::test]
     async fn session_load_replays_history() {
         let state = test_state();
         let store = state.store.clone();
