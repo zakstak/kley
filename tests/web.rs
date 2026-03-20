@@ -53,7 +53,16 @@ mod web {
     ) -> tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     > {
-        let url = format!("ws://{addr}/ws");
+        connect_ws_path(addr, "/ws").await
+    }
+
+    async fn connect_ws_path(
+        addr: std::net::SocketAddr,
+        path: &str,
+    ) -> tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    > {
+        let url = format!("ws://{addr}{path}");
         let (socket, _) = connect_async(url).await.unwrap();
         socket
     }
@@ -63,9 +72,7 @@ mod web {
     ) -> tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     > {
-        let url = format!("ws://{addr}/ws/mock");
-        let (socket, _) = connect_async(url).await.unwrap();
-        socket
+        connect_ws_path(addr, "/ws/mock").await
     }
 
     async fn recv_json(
@@ -264,6 +271,91 @@ mod web {
     }
 
     #[tokio::test]
+    async fn ws_connect_prefers_requested_session() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let (first_session, second_session) = store::store_run(&store, |s| {
+            let first = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &first.id, "Requested Session")?;
+
+            let second = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &second.id, "Newest Session")?;
+
+            Ok((first, second))
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={}", first_session.id)).await;
+
+        let frame = recv_json(&mut socket).await;
+        assert_eq!(frame["type"], "state.snapshot");
+        assert_eq!(frame["session_id"], first_session.id);
+        assert_eq!(frame["selected_session"]["title"], "Requested Session");
+        assert_ne!(frame["session_id"], second_session.id);
+    }
+
+    #[tokio::test]
+    async fn ws_connect_chooses_available_session_when_latest_is_busy() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let (first_session, second_session) = store::store_run(&store, |s| {
+            let first = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &first.id, "Available Session")?;
+
+            let second = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &second.id, "Busy Session")?;
+
+            Ok((first, second))
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut first_socket = connect_ws(server.addr).await;
+        let first_bootstrap = recv_json(&mut first_socket).await;
+        assert_eq!(first_bootstrap["session_id"], second_session.id);
+
+        let mut second_socket = connect_ws(server.addr).await;
+        let second_bootstrap = recv_json(&mut second_socket).await;
+        assert_eq!(second_bootstrap["type"], "state.snapshot");
+        assert_eq!(second_bootstrap["session_id"], first_session.id);
+        assert_eq!(second_bootstrap["selected_session"]["title"], "Available Session");
+    }
+
+    #[tokio::test]
     async fn session_load_replays_history() {
         let state = test_state();
         let store = state.store.clone();
@@ -349,6 +441,105 @@ mod web {
         let transcript = snapshot["transcript"].as_array().unwrap();
         assert!(transcript.iter().any(|entry| entry["content"] == "First session transcript"));
         assert!(!transcript.iter().any(|entry| entry["content"] == "Second session transcript"));
+    }
+
+    #[tokio::test]
+    async fn session_load_rejects_switch_while_turn_is_streaming() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let first_session = store::store_run(&store, |s| {
+            let first = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &first.id, "Streaming Session")?;
+            Ok(first)
+        })
+        .await
+        .unwrap();
+
+        let second_session = store::store_run(&store, |s| {
+            let second = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_title(s, &second.id, "Other Session")?;
+            Ok(second)
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={}", first_session.id)).await;
+
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["session_id"], first_session.id);
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"prompt.submit","request_id":"req-load-busy-prompt","session_id":"{}","prompt":"abortable response please stop"}}"#,
+                    first_session.id
+                )
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        let turn_id = ack["data"]["turn_id"].as_str().unwrap().to_string();
+
+        assert_eq!(recv_json(&mut socket).await["type"], "turn.started");
+        assert_eq!(recv_json(&mut socket).await["type"], "message.started");
+        assert_eq!(recv_json(&mut socket).await["type"], "message.delta");
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"session.load","request_id":"req-load-busy","session_id":"{}"}}"#,
+                    second_session.id
+                )
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let load_error = recv_until_type(&mut socket, "response.error").await;
+        assert_eq!(load_error["type"], "response.error");
+        assert_eq!(load_error["request_id"], "req-load-busy");
+        assert_eq!(load_error["error"]["code"], "turn_in_progress");
+        assert_eq!(load_error["error"]["details"]["session_id"], first_session.id);
+        assert_eq!(load_error["error"]["details"]["turn_id"], turn_id);
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"turn.abort","request_id":"req-load-busy-abort","session_id":"{}","turn_id":"{}"}}"#,
+                    first_session.id, turn_id
+                )
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let abort_ack = recv_json(&mut socket).await;
+        assert_eq!(abort_ack["type"], "response.ok");
+        assert_eq!(abort_ack["request_id"], "req-load-busy-abort");
+
+        let failed = recv_until_type(&mut socket, "turn.failed").await;
+        assert_eq!(failed["session_id"], first_session.id);
+        assert_eq!(failed["turn_id"], turn_id);
     }
 
     #[tokio::test]

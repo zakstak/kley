@@ -1,10 +1,11 @@
 use std::future::pending;
 
 use anyhow::Result;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -25,32 +26,43 @@ use super::state::WebAppState;
 const DEFAULT_WEB_MODEL: &str = "test-model";
 const DEFAULT_WEB_PROVIDER: &str = "test";
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<WebAppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+#[derive(Debug, Default, Deserialize)]
+pub struct WsConnectQuery {
+    session_id: Option<String>,
 }
 
-async fn handle_socket(mut socket: WebSocket, state: WebAppState) {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    Query(query): Query<WsConnectQuery>,
+    State(state): State<WebAppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, query.session_id))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: WebAppState, requested_session_id: Option<String>) {
     let controller_id = format!("controller-{}", Uuid::new_v4());
 
-    let mut active_session = match select_or_create_session(&state).await {
-        Ok(session) => session,
-        Err(_) => return,
-    };
-
-    if let Err(attach_err) = state
-        .runtime_manager
-        .attach_controller(&active_session, &controller_id)
+    let mut active_session = match attach_or_select_session(
+        &state,
+        &controller_id,
+        requested_session_id.as_deref(),
+    )
+    .await
     {
-        let _ = send_response(
-            &mut socket,
-            WebResponse::Error {
-                request_id: "attach".to_string(),
-                error: session_busy_error(attach_err),
-            },
-        )
-        .await;
-        return;
-    }
+        Ok(session) => session,
+        Err(SelectSessionError::Busy(attach_err)) => {
+            let _ = send_response(
+                &mut socket,
+                WebResponse::Error {
+                    request_id: "attach".to_string(),
+                    error: session_busy_error(attach_err),
+                },
+            )
+            .await;
+            return;
+        }
+        Err(SelectSessionError::Store) => return,
+    };
 
     let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
 
@@ -228,6 +240,28 @@ async fn handle_socket(mut socket: WebSocket, state: WebAppState) {
                                 WebResponse::Error {
                                     request_id,
                                     error: session_busy_error(err),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(LoadSessionError::TurnInProgress { turn_id }) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "turn_in_progress".to_string(),
+                                        message: "cannot switch sessions while a turn is still streaming"
+                                            .to_string(),
+                                        details: Some(json!({
+                                            "session_id": active_session.id,
+                                            "turn_id": turn_id,
+                                        })),
+                                    },
                                 },
                             )
                             .await
@@ -528,19 +562,75 @@ async fn load_selected_session(state: &WebAppState, session_id: &str) -> Result<
     })
 }
 
-async fn select_or_create_session(state: &WebAppState) -> Result<Session> {
+enum SelectSessionError {
+    Busy(AttachControllerError),
+    Store,
+}
+
+async fn attach_or_select_session(
+    state: &WebAppState,
+    controller_id: &str,
+    preferred_session_id: Option<&str>,
+) -> std::result::Result<Session, SelectSessionError> {
     let store_ref = state.store.clone();
-    let mut session = store::store_run(&store_ref, |store| match Session::get_latest(store)? {
-        Some(existing) => Ok(existing),
-        None => Session::create(
+    let mut sessions = store::store_run(&store_ref, |store| Session::list(store, 50))
+        .await
+        .map_err(|_| SelectSessionError::Store)?;
+
+    if sessions.is_empty() {
+        let session = create_default_session(state)
+            .await
+            .map_err(|_| SelectSessionError::Store)?;
+        state
+            .runtime_manager
+            .attach_controller(&session, controller_id)
+            .map_err(SelectSessionError::Busy)?;
+        return Ok(session);
+    }
+
+    if let Some(session_id) = preferred_session_id {
+        if let Some(index) = sessions.iter().position(|session| session.id == session_id) {
+            let preferred = sessions.remove(index);
+            sessions.insert(0, preferred);
+        }
+    }
+
+    let mut busy_error = None;
+    for session in sessions {
+        let session = ensure_session_settings(state, session)
+            .await
+            .map_err(|_| SelectSessionError::Store)?;
+        match state.runtime_manager.attach_controller(&session, controller_id) {
+            Ok(()) => return Ok(session),
+            Err(err) => {
+                busy_error = Some(err);
+                continue;
+            }
+        }
+    }
+
+    Err(SelectSessionError::Busy(
+        busy_error.expect("busy error should exist when no attachable session remains"),
+    ))
+}
+
+async fn create_default_session(state: &WebAppState) -> Result<Session> {
+    let store_ref = state.store.clone();
+    let session = store::store_run(&store_ref, |store| {
+        Session::create(
             store,
             NewSession {
                 model: DEFAULT_WEB_MODEL.to_string(),
                 provider: DEFAULT_WEB_PROVIDER.to_string(),
             },
-        ),
+        )
     })
     .await?;
+
+    ensure_session_settings(state, session).await
+}
+
+async fn ensure_session_settings(state: &WebAppState, mut session: Session) -> Result<Session> {
 
     if session.settings.is_none() {
         let settings_json = default_settings_json(&session.model, &session.provider);
@@ -597,6 +687,7 @@ async fn load_transcript(state: &WebAppState, session_id: &str) -> Result<Vec<Tr
 
 enum LoadSessionError {
     Busy(AttachControllerError),
+    TurnInProgress { turn_id: String },
     NotFound,
     Store,
 }
@@ -613,6 +704,14 @@ async fn load_session_for_controller(
         .await
         .map_err(|_| LoadSessionError::Store)?
         .ok_or(LoadSessionError::NotFound)?;
+
+    if session.id != previous_session.id {
+        if let Some(active_turn) = state.runtime_manager.active_turn(&previous_session.id) {
+            return Err(LoadSessionError::TurnInProgress {
+                turn_id: active_turn.turn_id,
+            });
+        }
+    }
 
     state
         .runtime_manager

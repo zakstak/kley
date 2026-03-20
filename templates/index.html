@@ -242,13 +242,14 @@
       const expectedProtocolVersion = Number(
         appShell.getAttribute('data-protocol-version') || '1'
       );
+      const selectedSessionStorageKey = 'kley:selected-session-id';
 
       const state = {
         socket: null,
         connected: false,
         reconnectDelayMs: 400,
         reconnectTimer: null,
-        selectedSessionId: null,
+        selectedSessionId: window.sessionStorage.getItem(selectedSessionStorageKey),
         sessions: [],
         activeTurn: null,
         activeMessageId: null,
@@ -268,13 +269,25 @@
 
       function socketUrl() {
         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-        return `${protocol}://${window.location.host}${wsPath}`;
+        const url = new URL(`${protocol}://${window.location.host}${wsPath}`);
+        if (state.selectedSessionId) {
+          url.searchParams.set('session_id', state.selectedSessionId);
+        }
+        return url.toString();
       }
 
       function clearChildren(node) {
         while (node.firstChild) {
           node.removeChild(node.firstChild);
         }
+      }
+
+      function persistSelectedSession() {
+        if (state.selectedSessionId) {
+          window.sessionStorage.setItem(selectedSessionStorageKey, state.selectedSessionId);
+          return;
+        }
+        window.sessionStorage.removeItem(selectedSessionStorageKey);
       }
 
       function pushInspectorEvent(text) {
@@ -316,6 +329,7 @@
 
       function setBusy(value) {
         state.busy = value;
+        renderSessionList();
         syncComposerState();
       }
 
@@ -442,14 +456,19 @@
           button.className =
             'w-full text-left rounded-lg border px-3 py-2 text-sm transition';
           const selected = session.session_id === state.selectedSessionId;
+          const switchingBlocked = state.busy && !selected;
           if (selected) {
             button.classList.add('border-bdr2', 'bg-bg3', 'text-txt');
           } else {
             button.classList.add('border-bdr', 'bg-bg2', 'text-txt2');
           }
+          if (switchingBlocked) {
+            button.disabled = true;
+            button.classList.add('cursor-not-allowed', 'opacity-60');
+          }
           button.textContent = session.title || session.session_id;
           button.addEventListener('click', () => {
-            if (session.session_id === state.selectedSessionId) {
+            if (button.disabled || session.session_id === state.selectedSessionId) {
               return;
             }
             const requestId = makeRequestId('load');
@@ -649,6 +668,7 @@
         state.selectedSessionId =
           (frame.selected_session && frame.selected_session.session_id) || frame.session_id || null;
         state.sessions = Array.isArray(frame.sessions) ? frame.sessions.slice() : [];
+        persistSelectedSession();
 
         renderSessionList();
         renderTranscriptFromSnapshot(frame.transcript, frame.active_turn);
@@ -687,6 +707,12 @@
             state.sessions = frame.data.sessions.slice();
             renderSessionList();
           }
+          return;
+        }
+
+        if (pending.type === 'session.load' && frame.data && frame.data.session_id) {
+          state.selectedSessionId = frame.data.session_id;
+          persistSelectedSession();
           return;
         }
 
