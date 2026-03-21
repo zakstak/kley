@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
-# Pre-push hook: scan repository content for secrets with gitleaks.
-# Blocks the push if any leaks are found.
 
-if ! command -v gitleaks &>/dev/null; then
-  echo "WARNING: gitleaks not found - skipping secret scan"
-  exit 0
-fi
+set -euo pipefail
 
-echo "Scanning repository for secrets before push..."
-gitleaks detect --source . --verbose
+run_check() {
+  local label="$1"
+  shift
 
-if [ $? -ne 0 ]; then
-  echo ""
-  echo "ERROR: gitleaks found potential secrets. Push blocked."
-  echo "Fix the issues above before pushing."
+  printf '\n==> %s\n' "$label"
+  "$@"
+}
+
+if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  printf 'ERROR: pre-push hook must run inside a git repository.\n' >&2
   exit 1
 fi
 
-exit 0
+cd "$repo_root"
+
+if command -v gitleaks >/dev/null 2>&1; then
+  run_check "Scanning repository for secrets" gitleaks detect --source . --verbose
+else
+  printf 'WARNING: gitleaks not found - skipping secret scan\n' >&2
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  printf 'ERROR: cargo not found - cannot verify fmt/clippy/test/build checks before push.\n' >&2
+  exit 1
+fi
+
+run_check "Running cargo fmt --check" cargo fmt --check
+run_check "Running cargo clippy -- -D warnings" cargo clippy -- -D warnings
+run_check "Running cargo test" cargo test
+run_check "Running cargo build --release" cargo build --release
