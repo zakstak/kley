@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-push hook: scan repository content for secrets with gitleaks.
+# Blocks the push if any leaks are found.
+
+if ! command -v gitleaks &>/dev/null; then
+  echo "WARNING: gitleaks not found - skipping secret scan"
+  exit 0
+fi
+
+echo "Scanning repository for secrets before push..."
+gitleaks detect --source . --verbose
+
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "ERROR: gitleaks found potential secrets. Push blocked."
+  echo "Fix the issues above before pushing."
+  exit 1
+fi
+
+exit 0
