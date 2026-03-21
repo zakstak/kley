@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:slim-bookworm AS builder
 WORKDIR /usr/src/app
 
 # Install dependencies required for building
@@ -10,6 +10,8 @@ RUN apt-get update && \
 # Copy manifests and source
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY templates ./templates
+COPY assets ./assets
 COPY .agents ./.agents
 
 # Build the release binary
