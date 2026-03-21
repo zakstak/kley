@@ -11,16 +11,16 @@ description: Use when committing, branching, rebasing, searching history, or ope
 - Git identity: `saga <saga@zakstak.dev>`
 - GitHub CLI user: `saga-agent`
 
-Kley pushes feature branches to `origin` when available, otherwise uses `upstream` as fallback. Open PRs against `main` on `zakstak/kley`. Never push directly to `main`.
+Kley pushes and pulls feature branches from `origin` when available, otherwise uses `upstream` as fallback. Open PRs against the intended base branch on `zakstak/kley`: use `main` for top-level work and the parent branch for stacked work. Never push directly to `main`.
 
 ## Commit procedure
 
 1. Gather context: `git status -s`, `git diff --stat`, `git log -20 --oneline`.
 2. Detect the repo's commit style from recent history. Default to `type(scope): subject`.
 3. Plan atomic commits. Split by module, concern, and independent revertability. Pair implementation with its tests.
-4. Branch from fresh main: `git switch -c <type>/<name>` from an up-to-date `main`.
+4. Branch from the intended base branch: use `main` for top-level work, or switch to the parent branch first for stacked work, then run `git switch -c <type>/<name>`.
 5. Stage and commit each group separately. Verify staging with `git diff --cached --stat`.
-6. Push using resilient remote selection and open PR: `git push -u origin HEAD || git push -u upstream HEAD`, then `gh pr create --repo zakstak/kley --base main --head <branch>`.
+6. Push using resilient remote selection and open PR. Use `main` for top-level work; for stacked work, branch from the parent branch, set `git config branch."$(git branch --show-current)".gh-merge-base <parent-branch>`, then run `git push -u origin HEAD || git push -u upstream HEAD` and `gh pr create --repo zakstak/kley --base <parent-branch> --head <branch>`.
 
 ## Commit split rules
 
@@ -63,7 +63,7 @@ The self-improvement harness (`self-improve.sh`) runs a RALF-style loop:
 
 ## Done checklist
 
-- Branch created from up-to-date `main`
+- Branch created from the intended up-to-date base branch
 - Commits are atomic and style-matched
-- PR opened against `zakstak/kley` `main`
+- PR opened against the intended base branch on `zakstak/kley`
 - Pre-commit checks passed before every commit
