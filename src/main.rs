@@ -63,6 +63,7 @@ enum Command {
         #[arg(long)]
         bind: Option<String>,
     },
+    Preflight,
 }
 
 #[derive(Debug, Subcommand)]
@@ -153,9 +154,25 @@ async fn run() -> Result<()> {
             let config = kley::web::config::WebConfig::from_bind_arg(bind.as_deref())?;
             kley::web::serve(config).await?;
         }
+        Command::Preflight => {
+            if !kley::preflight::run(&mut std::io::stdout())? {
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preflight_subcommand_parses() {
+        let cli = Cli::try_parse_from(["kley", "preflight"]).unwrap();
+        assert!(matches!(cli.command, Command::Preflight));
+    }
 }
 
 /// Render an event to stderr with visual emphasis appropriate to its severity.
