@@ -132,6 +132,18 @@ fi
 
 setup_github_https_credentials
 
+if [ "$1" = "self-improve.sh" ] || [ "$1" = "./self-improve.sh" ] || [ "$1" = "$WORKSPACE_DIR/self-improve.sh" ]; then
+  shift
+  if bash "$WORKSPACE_DIR/self-improve.sh" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  fix_git_mount_ownership
+  exit "$status"
+fi
+
 if kley "$@"; then
   status=0
 else
