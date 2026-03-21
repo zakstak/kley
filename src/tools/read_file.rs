@@ -53,6 +53,10 @@ impl Tool for ReadFileTool {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
 
+        if total == 0 {
+            return Ok(format!("File: {path} (0 lines total)\n"));
+        }
+
         let start = args
             .get("start_line")
             .and_then(|v| v.as_u64())
@@ -75,7 +79,7 @@ impl Tool for ReadFileTool {
         }
         output.push('\n');
 
-        for (i, line) in lines[start - 1..end].iter().enumerate() {
+        for (i, line) in lines[start - 1..=end - 1].iter().enumerate() {
             let line_num = start + i;
             output.push_str(&format!("{line_num}: {line}\n"));
         }
@@ -129,6 +133,24 @@ mod tests {
         assert!(!result.contains("1: a"));
         assert!(!result.contains("5: e"));
         assert!(result.contains("Showing lines 2-4"));
+    }
+
+    #[test]
+    fn read_empty_file() {
+        let f = temp_file("");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": 1,
+                "end_line": 1,
+            }))
+            .unwrap();
+
+        assert_eq!(
+            result,
+            format!("File: {} (0 lines total)\n", f.path().display())
+        );
     }
 
     #[test]
