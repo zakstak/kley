@@ -632,6 +632,14 @@ mod tests {
 
     #[test]
     fn report_rendering_includes_summary_and_failure_guidance() {
+        let env = RuntimeEnv {
+            in_docker: false,
+            current_dir: PathBuf::from("/workspace"),
+            current_exe: PathBuf::from("/tmp/kley"),
+        };
+        let manifest_path = find_repo_manifest(&env.current_dir)
+            .expect("test expects repository manifest to be discoverable");
+
         let runner = FakeRunner::new(vec![
             (remote_probe_command("upstream"), CommandOutput::failure()),
             (remote_probe_command("origin"), CommandOutput::failure()),
@@ -678,7 +686,10 @@ mod tests {
                 command("cargo").args(["clippy", "--version"]),
                 CommandOutput::success(),
             ),
-            (command("kley").arg("--help"), CommandOutput::failure()),
+            (
+                cargo_launcher_help_command(&manifest_path),
+                CommandOutput::failure(),
+            ),
             (command("gcc").arg("--version"), CommandOutput::success()),
             (command("make").arg("--version"), CommandOutput::success()),
             (command("cmake").arg("--version"), CommandOutput::failure()),
