@@ -202,7 +202,7 @@ This retrospective informs future cycles. It does not lower the quality bar for 
 2. Update `main` safely.
    - `git switch main`
    - Select a reachable remote:
-     - `if git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; elif git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; else echo "blocked: no reachable remote"; exit 1; fi`
+      - `if git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; elif git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; else echo "blocked: no reachable remote"; exit 1; fi`
    - `git pull --ff-only "$REMOTE" main`
 
 3. Inspect the current state.
