@@ -24,6 +24,8 @@ fn events_arrive_in_emission_order() {
         turn_id: "turn-1".into(),
         model: "gpt-4.1".into(),
         turn_number: 1,
+        context_used_chars: 100,
+        context_max_chars: 1000,
     });
 
     emitter.emit(AgentEvent::TurnCompleted {
@@ -32,6 +34,8 @@ fn events_arrive_in_emission_order() {
         model: "gpt-4.1".into(),
         turn_number: 1,
         message_id: "msg-1".into(),
+        context_used_chars: 180,
+        context_max_chars: 1000,
     });
 
     // Drop emitter to close the channel
@@ -83,18 +87,24 @@ fn drain_captures_pending_events() {
         turn_id: "turn-1".into(),
         model: "m".into(),
         turn_number: 1,
+        context_used_chars: 100,
+        context_max_chars: 1000,
     });
     emitter.emit(AgentEvent::TurnStarted {
         session_id: "sess-1".into(),
         turn_id: "turn-2".into(),
         model: "m".into(),
         turn_number: 2,
+        context_used_chars: 200,
+        context_max_chars: 1000,
     });
     emitter.emit(AgentEvent::TurnStarted {
         session_id: "sess-1".into(),
         turn_id: "turn-3".into(),
         model: "m".into(),
         turn_number: 3,
+        context_used_chars: 300,
+        context_max_chars: 1000,
     });
 
     // Give the channel a moment to buffer
@@ -161,6 +171,8 @@ fn event_display_formatting() {
         turn_id: "turn-3".into(),
         model: "gpt-4.1".into(),
         turn_number: 3,
+        context_used_chars: 300,
+        context_max_chars: 1000,
     };
     let s = format!("{event}");
     assert!(s.contains("turn 3"), "expected turn number in display: {s}");

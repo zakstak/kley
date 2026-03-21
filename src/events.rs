@@ -27,6 +27,8 @@ pub enum AgentEvent {
         turn_id: String,
         model: String,
         turn_number: usize,
+        context_used_chars: usize,
+        context_max_chars: usize,
     },
     MessageStarted {
         session_id: String,
@@ -68,6 +70,8 @@ pub enum AgentEvent {
         model: String,
         turn_number: usize,
         message_id: String,
+        context_used_chars: usize,
+        context_max_chars: usize,
     },
     TurnFailed {
         session_id: String,
@@ -143,9 +147,13 @@ impl fmt::Display for AgentEvent {
                 model,
                 turn_number,
                 turn_id,
+                context_used_chars,
+                context_max_chars,
                 ..
             } => {
-                write!(f, "turn {turn_number} -> {model} ({turn_id})")
+                let pct = ((*context_used_chars).saturating_mul(100) / (*context_max_chars).max(1))
+                    .min(100);
+                write!(f, "turn {turn_number} -> {model} ({turn_id}) [ctx {pct}%]")
             }
             AgentEvent::MessageStarted { .. } => Ok(()),
             AgentEvent::MessageDelta { delta, .. } => write!(f, "{delta}"),
@@ -167,9 +175,15 @@ impl fmt::Display for AgentEvent {
                 }
             }
             AgentEvent::TurnCompleted {
-                model, turn_number, ..
+                model,
+                turn_number,
+                context_used_chars,
+                context_max_chars,
+                ..
             } => {
-                write!(f, "turn {turn_number} ok ({model})")
+                let pct = ((*context_used_chars).saturating_mul(100) / (*context_max_chars).max(1))
+                    .min(100);
+                write!(f, "turn {turn_number} ok ({model}) [ctx {pct}%]")
             }
             AgentEvent::TurnFailed {
                 turn_number, error, ..

@@ -10,16 +10,17 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::compact::{CompactConfig, estimate_history_chars};
 use crate::events::AgentEvent;
 use crate::runtime::{
     AbortTurnError, ActiveTurnReplay, AttachControllerError, RuntimeEventEnvelope,
-    SubmitPromptError, SubmitPromptOutcome,
+    SubmitPromptError, SubmitPromptOutcome, history_items_from_turns,
 };
 use crate::store::{self, NewSession, Session, Turn};
 
 use super::protocol::{
-    ActiveTurnSnapshot, PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary,
-    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
+    ActiveTurnSnapshot, ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession,
+    SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 use super::state::WebAppState;
 
@@ -521,11 +522,13 @@ async fn send_bootstrap_event(
 async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSnapshotData> {
     let selected_session = load_selected_session(state, session_id).await?;
     let sessions = list_sessions(state, Some(session_id)).await?;
-    let transcript = load_transcript(state, session_id).await?;
+    let turns = load_turns(state, session_id).await?;
+    let transcript = turns_to_transcript(&turns);
     let active_turn = state
         .runtime_manager
         .active_turn(session_id)
         .map(active_turn_snapshot);
+    let context_usage = estimate_context_usage(&turns, active_turn.as_ref());
 
     Ok(StateSnapshotData {
         protocol_version: PROTOCOL_VERSION,
@@ -534,7 +537,34 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
         sessions,
         transcript,
         active_turn,
+        context_usage,
     })
+}
+
+fn estimate_context_usage(
+    turns: &[Turn],
+    active_turn: Option<&ActiveTurnSnapshot>,
+) -> ContextUsage {
+    let mut history_items = history_items_from_turns(turns);
+    if let Some(active) = active_turn
+        && !active.content.is_empty()
+    {
+        history_items.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": active.content,
+        }));
+    }
+
+    let used_chars = estimate_history_chars(&history_items);
+    let max_chars = CompactConfig::default().threshold_chars;
+    let percent_used = ((used_chars.saturating_mul(100)) / max_chars.max(1)).min(100) as u8;
+
+    ContextUsage {
+        used_chars,
+        max_chars,
+        percent_used,
+    }
 }
 
 fn active_turn_snapshot(active: ActiveTurnReplay) -> ActiveTurnSnapshot {
@@ -710,22 +740,25 @@ async fn list_sessions(
         .collect())
 }
 
-async fn load_transcript(state: &WebAppState, session_id: &str) -> Result<Vec<TranscriptEntry>> {
+async fn load_turns(state: &WebAppState, session_id: &str) -> Result<Vec<Turn>> {
     let session_id = session_id.to_string();
     let store_ref = state.store.clone();
-    let turns = store::store_run(&store_ref, move |store| {
+    store::store_run(&store_ref, move |store| {
         Turn::list_for_session(store, &session_id)
     })
-    .await?;
-    Ok(turns
+    .await
+}
+
+fn turns_to_transcript(turns: &[Turn]) -> Vec<TranscriptEntry> {
+    turns
         .into_iter()
         .map(|turn| TranscriptEntry {
             turn_number: turn.turn_number,
-            kind: turn.kind,
-            role: turn.role,
-            content: turn.content,
+            kind: turn.kind.clone(),
+            role: turn.role.clone(),
+            content: turn.content.clone(),
         })
-        .collect())
+        .collect()
 }
 
 enum LoadSessionError {

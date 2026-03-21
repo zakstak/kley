@@ -57,6 +57,14 @@ pub struct StateSnapshotData {
     pub sessions: Vec<SessionSummary>,
     pub transcript: Vec<TranscriptEntry>,
     pub active_turn: Option<ActiveTurnSnapshot>,
+    pub context_usage: ContextUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextUsage {
+    pub used_chars: usize,
+    pub max_chars: usize,
+    pub percent_used: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

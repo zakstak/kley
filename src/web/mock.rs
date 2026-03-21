@@ -3,8 +3,8 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::protocol::{
-    PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary, StateSnapshotData,
-    TranscriptEntry, UiEvent, WebCommand, WebResponse,
+    ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary,
+    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -199,6 +199,11 @@ fn snapshot_data() -> StateSnapshotData {
         sessions: sessions(),
         transcript: Vec::<TranscriptEntry>::new(),
         active_turn: None,
+        context_usage: ContextUsage {
+            used_chars: 0,
+            max_chars: 800_000,
+            percent_used: 0,
+        },
     }
 }
 
