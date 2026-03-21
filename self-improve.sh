@@ -26,100 +26,13 @@ append_retrospective_record() {
   local status="$5"
   local output_file="$6"
 
-  python3 - "$log_file" "$cycle" "$timestamp" "$run_exit" "$status" "$output_file" <<'PY'
-import json
-import pathlib
-import sys
-
-log_path = pathlib.Path(sys.argv[1])
-cycle = int(sys.argv[2])
-timestamp = sys.argv[3]
-run_exit = int(sys.argv[4])
-status = sys.argv[5]
-output_path = pathlib.Path(sys.argv[6])
-
-lines = log_path.read_text(encoding="utf-8").splitlines()
-status_start = None
-for index, line in enumerate(lines):
-    if line.startswith("STATUS: "):
-        status_start = index
-
-if status_start is None:
-    raise SystemExit("no final status block found")
-
-block = lines[status_start:]
-scalar_values = {
-    "branch": "none",
-    "commit": "none",
-    "pr": "none",
-}
-section_names = {
-    "HELPFUL FEATURE IDEAS": "helpful_feature_ideas",
-    "STRUGGLE": "struggle_lines",
-    "PREVENTABLE": "preventable_lines",
-    "PREVENTION NOTES": "prevention_notes",
-}
-sections = {name: [] for name in section_names.values()}
-current_section = None
-
-for line in block:
-    if line.startswith("BRANCH: "):
-        scalar_values["branch"] = line.partition(": ")[2].strip()
-        current_section = None
-        continue
-    if line.startswith("COMMIT: "):
-        scalar_values["commit"] = line.partition(": ")[2].strip()
-        current_section = None
-        continue
-    if line.startswith("PR: "):
-        scalar_values["pr"] = line.partition(": ")[2].strip()
-        current_section = None
-        continue
-
-    stripped = line.strip()
-    if stripped.endswith(":"):
-        current_section = section_names.get(stripped[:-1])
-        continue
-
-    if current_section is None or not stripped:
-        continue
-
-    if stripped.startswith("- "):
-        sections[current_section].append(stripped[2:].strip())
-    elif sections[current_section]:
-        sections[current_section][-1] = f"{sections[current_section][-1]} {stripped}"
-    else:
-        sections[current_section].append(stripped)
-
-preventable_raw = " ".join(sections["preventable_lines"]).strip().lower()
-if preventable_raw == "yes":
-    preventable = True
-elif preventable_raw == "no":
-    preventable = False
-else:
-    preventable = None
-
-record = {
-    "cycle": cycle,
-    "timestamp": timestamp,
-    "status": status,
-    "run_exit": run_exit,
-    "log_file": str(log_path),
-    "branch": scalar_values["branch"],
-    "commit": scalar_values["commit"],
-    "pr": scalar_values["pr"],
-    "helpful_feature_ideas": sections["helpful_feature_ideas"],
-    "struggle": " ".join(sections["struggle_lines"]).strip(),
-    "preventable": preventable,
-    "preventable_raw": preventable_raw or None,
-    "prevention_notes": sections["prevention_notes"],
-}
-
-output_path.parent.mkdir(parents=True, exist_ok=True)
-with output_path.open("a", encoding="utf-8") as handle:
-    json.dump(record, handle, ensure_ascii=True)
-    handle.write("\n")
-PY
+  cargo run --quiet --bin self-improve-retrospective -- \
+    "$log_file" \
+    "$cycle" \
+    "$timestamp" \
+    "$run_exit" \
+    "$status" \
+    "$output_file"
 }
 
 cycle=0
