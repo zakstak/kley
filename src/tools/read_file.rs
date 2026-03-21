@@ -53,6 +53,12 @@ impl Tool for ReadFileTool {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
 
+        if total == 0 {
+            return Ok(format!(
+                "File: {path} ({total} lines total)\n\n[empty file]\n"
+            ));
+        }
+
         let start = args
             .get("start_line")
             .and_then(|v| v.as_u64())
@@ -65,7 +71,7 @@ impl Tool for ReadFileTool {
             .map(|n| n as usize)
             .unwrap_or(total);
 
-        // Clamp to valid range
+        // Clamp to valid range.
         let start = start.min(total).max(1);
         let end = end.min(total).max(start);
 
@@ -142,5 +148,20 @@ mod tests {
             }))
             .unwrap();
         assert!(result.contains("Error:"));
+    }
+
+    #[test]
+    fn read_empty_file() {
+        let f = temp_file("");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": null,
+                "end_line": null,
+            }))
+            .unwrap();
+        assert!(result.contains("0 lines total"));
+        assert!(result.contains("[empty file]"));
     }
 }
