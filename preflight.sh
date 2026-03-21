@@ -48,13 +48,13 @@ optional() {
 }
 
 select_remote() {
-  if git ls-remote origin HEAD >/dev/null 2>&1; then
-    SELECTED_REMOTE="origin"
+  if git ls-remote upstream HEAD >/dev/null 2>&1; then
+    SELECTED_REMOTE="upstream"
     return 0
   fi
 
-  if git ls-remote upstream HEAD >/dev/null 2>&1; then
-    SELECTED_REMOTE="upstream"
+  if git ls-remote origin HEAD >/dev/null 2>&1; then
+    SELECTED_REMOTE="origin"
     return 0
   fi
 
@@ -77,7 +77,7 @@ echo ""
 echo "── Git access checks ──"
 check "git is installed"          git --version
 check "inside a git repo"        git rev-parse --is-inside-work-tree
-check "origin/upstream exists"   bash -lc 'git remote get-url origin >/dev/null 2>&1 || git remote get-url upstream >/dev/null 2>&1'
+check "upstream/origin exists"   bash -lc 'git remote get-url upstream >/dev/null 2>&1 || git remote get-url origin >/dev/null 2>&1'
 check "can fetch from a remote"  select_remote
 
 echo ""

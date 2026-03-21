@@ -148,8 +148,8 @@ You only have these capabilities in this harness:
 Do not assume any other tools, callbacks, or hidden functions exist.
 
 ## Repository
-- Origin (SSH, preferred when available): git@github.com:zakstak/kley.git
-- Upstream (HTTPS, fallback when SSH is unavailable): https://github.com/zakstak/kley
+- Upstream (HTTPS, preferred for agent/container): https://github.com/zakstak/kley
+- Origin (SSH, fallback when HTTPS is unavailable): git@github.com:zakstak/kley.git
 - Default branch: main
 - Git identity: saga <saga@zakstak.dev>
 - GitHub CLI user: saga-agent
@@ -289,7 +289,7 @@ This retrospective informs future cycles. It does not lower the quality bar for 
 2. Update `main` safely.
    - `git switch main`
    - Select a reachable remote:
-     - `if git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; elif git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; else echo "blocked: no reachable remote"; exit 1; fi`
+     - `if git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; elif git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; else echo "blocked: no reachable remote"; exit 1; fi`
    - `git pull --ff-only "$REMOTE" main`
 
 3. Inspect the current state.
