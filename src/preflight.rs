@@ -264,7 +264,7 @@ fn remote_exists(runner: &impl CommandRunner) -> bool {
 }
 
 fn select_remote(runner: &impl CommandRunner) -> Option<String> {
-    for remote in ["upstream", "origin"] {
+    for remote in ["origin", "upstream"] {
         if runner.run(&remote_probe_command(remote)).success {
             return Some(remote.to_string());
         }
@@ -542,13 +542,13 @@ mod tests {
     }
 
     #[test]
-    fn select_remote_prefers_upstream_without_probing_origin() {
+    fn select_remote_prefers_origin_without_probing_upstream() {
         let runner = FakeRunner::new(vec![(
-            remote_probe_command("upstream"),
+            remote_probe_command("origin"),
             CommandOutput::success(),
         )]);
 
-        assert_eq!(select_remote(&runner), Some("upstream".to_string()));
+        assert_eq!(select_remote(&runner), Some("origin".to_string()));
     }
 
     #[test]
