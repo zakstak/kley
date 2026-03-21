@@ -19,7 +19,7 @@ export default defineConfig({
     video: 'retain-on-failure',
   },
   webServer: {
-    command: 'node ./playwright/support/web-server.mjs',
+    command: 'node ./playwright-web-server.mjs',
     url: `${baseURL}/healthz`,
     reuseExistingServer: false,
     stdout: 'pipe',
