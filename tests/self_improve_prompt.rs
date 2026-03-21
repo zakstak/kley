@@ -59,8 +59,9 @@ fn self_improve_script_appends_structured_retrospective_records() {
 
     for required in [
         "RETROSPECTIVE_FILE=\"$LOG_DIR/retrospectives.jsonl\"",
+        "run_repo_cargo_bin()",
         "append_retrospective_record()",
-        "cargo run --quiet --bin self-improve-retrospective --",
+        "run_repo_cargo_bin self-improve-retrospective \\",
         "\"$RETROSPECTIVE_FILE\"",
         "Retrospective record appended to $RETROSPECTIVE_FILE",
     ] {

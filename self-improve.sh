@@ -12,11 +12,41 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_MANIFEST_PATH="$SCRIPT_DIR/Cargo.toml"
+
 MAX_CYCLES="${1:-5}"
 TURNS_PER_CYCLE="${MAX_TURN_PER_CYCLE:-30}"
 LOG_DIR="$(pwd)/.self-improve-logs"
 RETROSPECTIVE_FILE="$LOG_DIR/retrospectives.jsonl"
 mkdir -p "$LOG_DIR"
+
+run_repo_cargo_bin() {
+  local bin="$1"
+  shift
+
+  if command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_MANIFEST_PATH" ]; then
+    cargo run --quiet --manifest-path "$SCRIPT_MANIFEST_PATH" --bin "$bin" -- "$@"
+    return
+  fi
+
+  cargo run --quiet --bin "$bin" -- "$@"
+}
+
+run_kley() {
+  if command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_MANIFEST_PATH" ]; then
+    run_repo_cargo_bin kley "$@"
+    return
+  fi
+
+  if command -v kley >/dev/null 2>&1; then
+    kley "$@"
+    return
+  fi
+
+  echo "error: could not find 'kley' in PATH and no repo-local Cargo manifest next to self-improve.sh" >&2
+  return 127
+}
 
 append_retrospective_record() {
   local log_file="$1"
@@ -26,7 +56,7 @@ append_retrospective_record() {
   local status="$5"
   local output_file="$6"
 
-  cargo run --quiet --bin self-improve-retrospective -- \
+  run_repo_cargo_bin self-improve-retrospective \
     "$log_file" \
     "$cycle" \
     "$timestamp" \
@@ -202,7 +232,7 @@ This retrospective informs future cycles. It does not lower the quality bar for 
 2. Update `main` safely.
    - `git switch main`
    - Select a reachable remote:
-      - `if git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; elif git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; else echo "blocked: no reachable remote"; exit 1; fi`
+    - `if GIT_TERMINAL_PROMPT=0 git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; elif GIT_TERMINAL_PROMPT=0 git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; else echo "blocked: no reachable remote"; exit 1; fi`
    - `git pull --ff-only "$REMOTE" main`
 
 3. Inspect the current state.
@@ -367,7 +397,7 @@ EOF
 )
 
   # Run one cycle, tee output to log
-  if kley chat \
+  if run_kley chat \
     --autonomous \
     --yolo \
     --max-turns "$TURNS_PER_CYCLE" \
