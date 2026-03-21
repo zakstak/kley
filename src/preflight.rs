@@ -641,12 +641,12 @@ mod tests {
         fs::write(&manifest_path, "[package]\nname = 'kley'\n").unwrap();
         fs::write(repo_root.join("self-improve.sh"), "#!/usr/bin/env bash\n").unwrap();
 
-        let expected_kley_help_command = cargo_launcher_help_command(&manifest_path);
         let env = RuntimeEnv {
             in_docker: false,
             current_dir: work_dir.clone(),
             current_exe: PathBuf::from("/tmp/kley"),
         };
+        let expected_kley_help_command = resolve_launcher(&env).help_command();
 
         let runner = FakeRunner::new(vec![
             (remote_probe_command("upstream"), CommandOutput::failure()),

@@ -78,13 +78,10 @@ const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
-/// Run any pending migrations. Idempotent.
 pub fn migrate(conn: &Connection) -> Result<()> {
     // Ensure the meta table exists
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS _schema_version (
-            version INTEGER NOT NULL
-        );",
+        "CREATE TABLE IF NOT EXISTS _schema_version (\n            version INTEGER NOT NULL\n        );",
     )
     .context("failed to create _schema_version table")?;
 
@@ -94,7 +91,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             [],
             |row| row.get(0),
         )
-        .unwrap_or(0);
+        .context("failed to read schema version")?;
 
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let version = (i + 1) as i64;
@@ -113,4 +110,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn migrate_with_corrupted_schema_version_returns_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _schema_version (version TEXT NOT NULL);\n            INSERT INTO _schema_version (version) VALUES ('not-a-number');",
+        )
+        .unwrap();
+
+        let err = migrate(&conn).unwrap_err();
+        assert!(err.to_string().contains("failed to read schema version"));
+    }
 }
