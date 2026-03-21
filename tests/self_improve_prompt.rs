@@ -60,11 +60,8 @@ fn self_improve_script_appends_structured_retrospective_records() {
     for required in [
         "RETROSPECTIVE_FILE=\"$LOG_DIR/retrospectives.jsonl\"",
         "append_retrospective_record()",
-        "python3 - \"$log_file\" \"$cycle\" \"$timestamp\" \"$run_exit\" \"$status\" \"$output_file\"",
-        "\"helpful_feature_ideas\"",
-        "\"struggle\"",
-        "\"preventable\"",
-        "\"prevention_notes\"",
+        "cargo run --quiet --bin self-improve-retrospective --",
+        "\"$RETROSPECTIVE_FILE\"",
         "Retrospective record appended to $RETROSPECTIVE_FILE",
     ] {
         assert!(

@@ -190,6 +190,8 @@ fn append_record(output_path: &Path, record: &RetrospectiveRecord) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_record_extracts_status_block_and_sections() {
@@ -260,5 +262,60 @@ PREVENTABLE:
 
         assert_eq!(record.preventable, None);
         assert_eq!(record.preventable_raw, Some("maybe".to_string()));
+    }
+
+    #[test]
+    fn append_record_serializes_structured_retrospective_fields() {
+        let log_content = r#"STATUS: success
+BRANCH: improve/rust
+COMMIT: abc123
+PR: https://example/pr/1
+
+HELPFUL FEATURE IDEAS:
+- One
+- Two
+continued details
+
+STRUGGLE:
+- Hard thing
+
+PREVENTABLE:
+- yes
+
+PREVENTION NOTES:
+- Add richer diagnostics
+"#;
+
+        let record = parse_record(
+            log_content,
+            2,
+            "20260101T000000".to_string(),
+            0,
+            "success".to_string(),
+            Path::new("/tmp/cycle.log"),
+        )
+        .expect("record should parse");
+
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let output_path = temp_dir.path().join("retrospectives.jsonl");
+        append_record(&output_path, &record).expect("record should append");
+
+        let serialized =
+            std::fs::read_to_string(&output_path).expect("serialized record should be readable");
+        let line = serialized
+            .lines()
+            .next()
+            .expect("serialized record should contain one JSON line");
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("serialized record should be valid JSON");
+
+        assert_eq!(
+            value["helpful_feature_ideas"],
+            json!(["One", "Two continued details"])
+        );
+        assert_eq!(value["struggle"], json!("Hard thing"));
+        assert_eq!(value["preventable"], json!(true));
+        assert_eq!(value["preventable_raw"], json!("yes"));
+        assert_eq!(value["prevention_notes"], json!(["Add richer diagnostics"]));
     }
 }
