@@ -530,46 +530,124 @@ impl RuntimeManager {
             return;
         };
 
-        if result.is_err() {
-            let error = format!("{}", result.err().unwrap());
-            let _ = entry.events.send(RuntimeEventEnvelope {
-                request_id: request_id.to_string(),
-                event: AgentEvent::TurnFailed {
-                    session_id: session_id.to_string(),
-                    turn_id: turn_id.to_string(),
-                    model: entry.runtime.model.clone(),
-                    turn_number: 0,
-                    error,
-                },
-            });
-            entry.active_prompt = None;
-            entry.active_turn = None;
-            return;
+        match result {
+            Ok(SubmitResult::Completed { .. }) => {
+                entry.active_prompt = None;
+                if entry
+                    .active_turn
+                    .as_ref()
+                    .map(|active| active.turn_id == turn_id)
+                    .unwrap_or(false)
+                {
+                    entry.active_turn = None;
+                }
+            }
+            Ok(SubmitResult::Failed { .. }) | Ok(SubmitResult::Aborted { .. }) => {
+                entry.active_prompt = None;
+                if entry
+                    .active_turn
+                    .as_ref()
+                    .map(|active| active.turn_id == turn_id)
+                    .unwrap_or(false)
+                {
+                    entry.active_turn = None;
+                }
+            }
+            Err(error) => {
+                let error = format!("{}", error);
+                let _ = entry.events.send(RuntimeEventEnvelope {
+                    request_id: request_id.to_string(),
+                    event: AgentEvent::TurnFailed {
+                        session_id: session_id.to_string(),
+                        turn_id: turn_id.to_string(),
+                        model: entry.runtime.model.clone(),
+                        turn_number: 0,
+                        error,
+                    },
+                });
+                entry.active_prompt = None;
+                entry.active_turn = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{NewSession, Session};
+    use anyhow::anyhow;
+
+    #[test]
+    fn finish_prompt_err_clears_active_state_and_emits_event() {
+        let store = crate::store::Store::open_memory().expect("failed to open in-memory store");
+        let session = Session::create(
+            &store,
+            NewSession {
+                model: "test-model".to_string(),
+                provider: "test".to_string(),
+            },
+        )
+        .expect("failed to create session");
+
+        let manager = RuntimeManager::new();
+        manager
+            .attach_controller(&session, "controller-1")
+            .expect("failed to attach controller");
+
+        manager
+            .start_active_turn(
+                &session.id,
+                "request-id".to_string(),
+                "turn-1".to_string(),
+                "message-1".to_string(),
+            )
+            .expect("failed to start active turn");
+
+        let mut receiver = manager
+            .subscribe(&session.id)
+            .expect("failed to subscribe to runtime events");
+
+        {
+            let mut sessions = manager
+                .sessions
+                .lock()
+                .expect("runtime manager mutex poisoned");
+            if let Some(entry) = sessions.get_mut(&session.id) {
+                entry.active_prompt = Some(ActivePrompt {
+                    turn_id: "turn-1".to_string(),
+                    abort_signal: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                });
+            }
         }
 
-        entry.active_prompt = None;
+        manager.finish_prompt(
+            &session.id,
+            "request-id",
+            "turn-1",
+            Err(anyhow!("runtime worker failed")),
+        );
 
-        match result.unwrap() {
-            SubmitResult::Completed { .. } => {
-                if entry
-                    .active_turn
-                    .as_ref()
-                    .map(|active| active.turn_id == turn_id)
-                    .unwrap_or(false)
-                {
-                    entry.active_turn = None;
-                }
+        assert!(manager.active_turn(&session.id).is_none());
+
+        let runtime_sessions = manager
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
+        let entry = runtime_sessions
+            .get(&session.id)
+            .expect("manager session should exist");
+        assert!(entry.active_prompt.is_none());
+
+        let emitted = receiver
+            .try_recv()
+            .expect("expected runtime manager event to be emitted")
+            .event;
+        match emitted {
+            AgentEvent::TurnFailed { error, .. } => {
+                assert!(error.contains("runtime worker failed"));
             }
-            SubmitResult::Failed { .. } | SubmitResult::Aborted { .. } => {
-                if entry
-                    .active_turn
-                    .as_ref()
-                    .map(|active| active.turn_id == turn_id)
-                    .unwrap_or(false)
-                {
-                    entry.active_turn = None;
-                }
-            }
+            _ => panic!("unexpected event type"),
         }
     }
 }
