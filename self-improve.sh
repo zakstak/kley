@@ -91,8 +91,8 @@ You only have these capabilities in this harness:
 Do not assume any other tools, callbacks, or hidden functions exist.
 
 ## Repository
-- Upstream (HTTPS, preferred for agent/container): https://github.com/zakstak/kley
-- Origin (SSH, fallback when HTTPS is unavailable): git@github.com:zakstak/kley.git
+- Origin (SSH, preferred when the saga-agent SSH key is available): git@github.com:zakstak/kley.git
+- Upstream (HTTPS, fallback when SSH is unavailable): https://github.com/zakstak/kley
 - Default branch: main
 - Git identity: saga <saga@zakstak.dev>
 - GitHub CLI user: saga-agent
@@ -229,11 +229,15 @@ This retrospective informs future cycles. It does not lower the quality bar for 
    - Never destroy unknown changes.
    - If leftover changes are clearly from a previous cycle's unfinished attempt and safe to discard, discard only those.
 
-2. Update `main` safely.
-   - `git switch main`
-   - Select a reachable remote:
-    - `if GIT_TERMINAL_PROMPT=0 git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; elif GIT_TERMINAL_PROMPT=0 git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; else echo "blocked: no reachable remote"; exit 1; fi`
-   - `git pull --ff-only "$REMOTE" main`
+2. Select and update the base branch safely.
+   - Use `main` for top-level work. If this cycle depends on an open branch or PR, set `BASE_BRANCH` to that parent branch instead of stacking another PR directly on `main`.
+   - `BASE_BRANCH="${BASE_BRANCH:-main}"`
+   - Select a reachable remote, preferring SSH first:
+    - `if GIT_TERMINAL_PROMPT=0 git ls-remote origin HEAD >/dev/null 2>&1; then REMOTE=origin; elif GIT_TERMINAL_PROMPT=0 git ls-remote upstream HEAD >/dev/null 2>&1; then REMOTE=upstream; else echo "blocked: no reachable remote"; exit 1; fi`
+   - If `BASE_BRANCH` only exists on the remote, fetch it explicitly with `git fetch "$REMOTE" "$BASE_BRANCH:$BASE_BRANCH"` before switching.
+   - `git switch "$BASE_BRANCH"`
+   - If `gh auth status` succeeds, refresh the HTTPS credential helper with `gh auth setup-git` before any HTTPS fallback path.
+   - `git pull --ff-only "$REMOTE" "$BASE_BRANCH"`
 
 3. Inspect the current state.
    - Review relevant code in `src/`, `tests/`, scripts, workflows, and `.agents/`.
@@ -253,9 +257,10 @@ This retrospective informs future cycles. It does not lower the quality bar for 
    - Save the exact command and its result for the PR/status report.
    - If no before-evidence is possible, do not proceed.
 
-6. Create a branch from `main`.
+6. Create a branch from the selected base branch.
    - `git switch -c improve/<short-slug>`
    - If that branch name already exists, choose a unique one.
+   - If `BASE_BRANCH` is not `main`, record it with `git config branch."$(git branch --show-current)".gh-merge-base "$BASE_BRANCH"` so `gh` keeps the stack pointed at the right parent.
 
 7. Implement the smallest complete fix.
    - Keep the change focused and atomic.
@@ -289,8 +294,8 @@ This retrospective informs future cycles. It does not lower the quality bar for 
       - `git push -u origin HEAD || git push -u upstream HEAD`
 
 13. Open a PR non-interactively.
-    - Use: `gh pr create --repo zakstak/kley --base main --head improve/<slug> --title "<title>" --body "<body>"`
-    - Do not rely only on `gh pr create --fill`.
+    - Use: `gh pr create --repo zakstak/kley --base "$BASE_BRANCH" --head improve/<slug> --title "<title>" --body "<body>"`
+    - Do not rely on implicit base selection or only on `gh pr create --fill`.
 
 14. PR body requirements
 The PR body must include these sections:
