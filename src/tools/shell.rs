@@ -196,12 +196,13 @@ mod tests {
     #[test]
     fn shell_truncates_unicode_output_without_panic() {
         let tool = ShellTool::new();
-        // "界" is 3 bytes in UTF-8. With odd-length multibyte output,
-        // naive byte slicing by midpoint can panic with "byte index not on char boundary".
         let unicode_count = 35_001;
+        let command = format!(
+            "i=0; while [ \"$i\" -lt {unicode_count} ]; do printf '界'; i=$((i + 1)); done"
+        );
         let result = tool
             .execute(serde_json::json!({
-                "command": format!("python3 -c 'print(\"界\" * {unicode_count})'"),
+                "command": command,
             }))
             .unwrap();
 
