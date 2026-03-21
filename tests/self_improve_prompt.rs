@@ -259,8 +259,14 @@ fn docker_session_self_improve_uses_standard_container_entrypoint_and_rebuilds_a
         "expected docker-session.sh to normalize ./self-improve.sh to self-improve.sh"
     );
     assert!(
-        script.contains("docker compose run --rm --build \"$SERVICE_NAME\" \"$@\""),
-        "expected docker-session.sh to use the standard compose run path"
+        script.contains(
+            "[ \"$1\" = \"./self-improve.sh\" ] || [ \"$1\" = \"/workspace/self-improve.sh\" ]"
+        ),
+        "expected docker-session.sh to normalize the workspace self-improve path"
+    );
+    assert!(
+        script.contains("exec docker compose run --rm --build \"$SERVICE_NAME\" \"$@\""),
+        "expected docker-session.sh to keep exec semantics for non-self-improve runs"
     );
     assert!(
         !script.contains("--entrypoint bash"),
@@ -271,6 +277,9 @@ fn docker_session_self_improve_uses_standard_container_entrypoint_and_rebuilds_a
         "docker compose run --rm --build \"$SERVICE_NAME\" \"$@\"",
         "docker compose build \"$SERVICE_NAME\"",
         "build_status=$?",
+        "trap 'forward_signal TERM 143' TERM",
+        "trap 'forward_signal INT 130' INT",
+        "if [ \"$INTERRUPT_STATUS\" -ne 0 ]; then",
     ] {
         assert!(
             script.contains(required),
@@ -282,6 +291,7 @@ fn docker_session_self_improve_uses_standard_container_entrypoint_and_rebuilds_a
         &script,
         &[
             "set -- self-improve.sh \"$@\"",
+            "exec docker compose run --rm --build \"$SERVICE_NAME\" \"$@\"",
             "docker compose run --rm --build \"$SERVICE_NAME\" \"$@\"",
             "docker compose build \"$SERVICE_NAME\"",
         ],
