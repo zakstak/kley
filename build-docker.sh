@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-set -e
 
-IMAGE_NAME="kley-agent"
+set -euo pipefail
 
-echo "Building Docker image: ${IMAGE_NAME}..."
-docker build -t "${IMAGE_NAME}" .
+SERVICE_NAME="${KLEY_DOCKER_SERVICE:-kley}"
 
-echo ""
-echo "Build complete! To run the agent interactively, use:"
-echo ""
-echo "    docker run -it -e OPENAI_API_KEY=\"your-api-key-here\" ${IMAGE_NAME}"
-echo ""
-echo "Note: If you have an active kley passphrase and stored credentials,"
-echo "you can mount them into the container instead:"
-echo "    docker run -it -v ~/.config/kley:/app/.config/kley ${IMAGE_NAME}"
+printf 'Building Docker image for compose service %s...\n' "$SERVICE_NAME"
+docker compose build "$SERVICE_NAME"
+
+printf '\nBuild complete. Start a fresh rebuilt session with:\n\n'
+printf '    ./docker-session.sh\n\n'
+printf 'Or pass a specific command to the container:\n\n'
+printf '    ./docker-session.sh web --bind 127.0.0.1:8080\n'
