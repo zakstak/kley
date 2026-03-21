@@ -8,11 +8,20 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy manifests and source
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock Dockerfile ./
 COPY src ./src
 COPY templates ./templates
 COPY assets ./assets
 COPY .agents ./.agents
+
+RUN set -eu; \
+    { \
+      printf '%s\n' Cargo.toml Cargo.lock Dockerfile; \
+      find src templates assets -type f -print; \
+    } | LC_ALL=C sort > /tmp/kley-image-source-files.txt; \
+    while IFS= read -r path; do \
+      sha256sum "$path" | cut -d ' ' -f1; \
+    done < /tmp/kley-image-source-files.txt | sha256sum | cut -d ' ' -f1 > /tmp/kley-image-source.sha256
 
 # Build the release binary
 RUN cargo build --release
@@ -99,6 +108,7 @@ RUN mkdir -p /root/.ssh && \
 
 # Copy the compiled binary
 COPY --from=builder /usr/src/app/target/release/kley /usr/local/bin/kley
+COPY --from=builder /tmp/kley-image-source.sha256 /usr/local/bin/kley-image-source.sha256
 
 # Copy scripts and agent config
 COPY .agents /app/.agents
