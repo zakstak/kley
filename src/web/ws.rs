@@ -531,7 +531,17 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
     let context_usage = if let Some((used_chars, max_chars)) =
         state.runtime_manager.context_usage_chars(session_id)
     {
-        context_usage_from_chars(used_chars, max_chars)
+        let (input_tokens, output_tokens, total_tokens) = state
+            .runtime_manager
+            .token_usage(session_id)
+            .unwrap_or((None, None, None));
+        context_usage_from_chars(
+            used_chars,
+            max_chars,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+        )
     } else {
         estimate_persisted_context_usage(&turns)
     };
@@ -550,10 +560,36 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
 fn estimate_persisted_context_usage(turns: &[Turn]) -> ContextUsage {
     let used_chars = estimate_history_chars(&crate::runtime::history_items_from_turns(turns));
     let max_chars = CompactConfig::default().threshold_chars;
-    context_usage_from_chars(used_chars, max_chars)
+    let latest_assistant = turns
+        .iter()
+        .rev()
+        .find(|turn| turn.role == "assistant" && turn.kind == "message");
+    let input_tokens = latest_assistant
+        .and_then(|turn| turn.tokens_in)
+        .and_then(|value| usize::try_from(value).ok());
+    let output_tokens = latest_assistant
+        .and_then(|turn| turn.tokens_out)
+        .and_then(|value| usize::try_from(value).ok());
+    let total_tokens = match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => Some(input.saturating_add(output)),
+        _ => None,
+    };
+    context_usage_from_chars(
+        used_chars,
+        max_chars,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    )
 }
 
-fn context_usage_from_chars(used_chars: usize, max_chars: usize) -> ContextUsage {
+fn context_usage_from_chars(
+    used_chars: usize,
+    max_chars: usize,
+    input_tokens: Option<usize>,
+    output_tokens: Option<usize>,
+    total_tokens: Option<usize>,
+) -> ContextUsage {
     let clamped_max = max_chars.max(1);
     let percent_used = ((used_chars.saturating_mul(100)) / clamped_max).min(100) as u8;
 
@@ -561,6 +597,9 @@ fn context_usage_from_chars(used_chars: usize, max_chars: usize) -> ContextUsage
         used_chars,
         max_chars: clamped_max,
         percent_used,
+        input_tokens,
+        output_tokens,
+        total_tokens,
     }
 }
 

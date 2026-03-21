@@ -65,6 +65,9 @@ pub struct ContextUsage {
     pub used_chars: usize,
     pub max_chars: usize,
     pub percent_used: u8,
+    pub input_tokens: Option<usize>,
+    pub output_tokens: Option<usize>,
+    pub total_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

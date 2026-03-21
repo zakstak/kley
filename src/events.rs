@@ -72,6 +72,9 @@ pub enum AgentEvent {
         message_id: String,
         context_used_chars: usize,
         context_max_chars: usize,
+        input_tokens: Option<usize>,
+        output_tokens: Option<usize>,
+        total_tokens: Option<usize>,
     },
     TurnFailed {
         session_id: String,
@@ -153,7 +156,10 @@ impl fmt::Display for AgentEvent {
             } => {
                 let pct = ((*context_used_chars).saturating_mul(100) / (*context_max_chars).max(1))
                     .min(100);
-                write!(f, "turn {turn_number} -> {model} ({turn_id}) [ctx {pct}%]")
+                write!(
+                    f,
+                    "turn {turn_number} -> {model} ({turn_id}) [ctx {pct}% | tok n/a]"
+                )
             }
             AgentEvent::MessageStarted { .. } => Ok(()),
             AgentEvent::MessageDelta { delta, .. } => write!(f, "{delta}"),
@@ -179,11 +185,28 @@ impl fmt::Display for AgentEvent {
                 turn_number,
                 context_used_chars,
                 context_max_chars,
+                input_tokens,
+                output_tokens,
+                total_tokens,
                 ..
             } => {
                 let pct = ((*context_used_chars).saturating_mul(100) / (*context_max_chars).max(1))
                     .min(100);
-                write!(f, "turn {turn_number} ok ({model}) [ctx {pct}%]")
+                if let (Some(total), Some(input), Some(output)) =
+                    (total_tokens, input_tokens, output_tokens)
+                {
+                    write!(
+                        f,
+                        "turn {turn_number} ok ({model}) [ctx {pct}% | tok {total} ({input} in/{output} out)]"
+                    )
+                } else if let Some(tokens) = total_tokens {
+                    write!(
+                        f,
+                        "turn {turn_number} ok ({model}) [ctx {pct}% | tok {tokens}]"
+                    )
+                } else {
+                    write!(f, "turn {turn_number} ok ({model}) [ctx {pct}% | tok n/a]")
+                }
             }
             AgentEvent::TurnFailed {
                 turn_number, error, ..

@@ -39,6 +39,13 @@ enum TurnResult {
     Aborted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenUsage {
+    input_tokens: usize,
+    output_tokens: usize,
+    total_tokens: usize,
+}
+
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     SessionCreated {
@@ -479,6 +486,7 @@ impl<'a> SessionRuntime<'a> {
 
             let result = match self.resolved.provider.as_str() {
                 "openai" => {
+                    let mut token_usage = None;
                     send_openai(
                         &self.resolved,
                         OpenaiRequestContext {
@@ -493,10 +501,13 @@ impl<'a> SessionRuntime<'a> {
                             events: &self.events,
                             output_hook: Some(&output_hook),
                         },
+                        &mut token_usage,
                     )
                     .await
+                    .map(|result| (result, token_usage))
                 }
                 "zai" => {
+                    let mut token_usage = None;
                     self.events.emit(AgentEvent::TransportSelected {
                         session_id: Some(self.session.id.clone()),
                         turn_id: Some(turn_id.clone()),
@@ -509,25 +520,26 @@ impl<'a> SessionRuntime<'a> {
                         &messages_from_history(&self.history),
                         &self.abort_signal,
                         Some(&output_hook),
+                        &mut token_usage,
                     )
                     .await
+                    .map(|result| (result, token_usage))
                 }
                 "test" => match test_provider_result(&self.history) {
-                    TurnResult::ToolCalls(calls) => Ok(TurnResult::ToolCalls(calls)),
-                    _ => {
-                        run_test_provider(&self.history, Some(&output_hook), &self.abort_signal)
-                            .await
-                    }
+                    TurnResult::ToolCalls(calls) => Ok((TurnResult::ToolCalls(calls), None)),
+                    _ => run_test_provider(&self.history, Some(&output_hook), &self.abort_signal)
+                        .await
+                        .map(|result| (result, None)),
                 },
                 other => anyhow::bail!("unsupported provider in runtime: {other}"),
             };
 
             match result {
-                Ok(TurnResult::Text(text)) => break Ok(text),
-                Ok(TurnResult::Aborted) => {
+                Ok((TurnResult::Text(text), usage)) => break Ok((text, usage)),
+                Ok((TurnResult::Aborted, _)) => {
                     return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
                 }
-                Ok(TurnResult::ToolCalls(calls)) => {
+                Ok((TurnResult::ToolCalls(calls), _)) => {
                     for call in &calls {
                         if self.abort_signal.load(Ordering::Relaxed) {
                             return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
@@ -650,7 +662,7 @@ impl<'a> SessionRuntime<'a> {
         self.abort_signal.store(false, Ordering::Relaxed);
 
         match final_text {
-            Ok(response) => {
+            Ok((response, token_usage)) => {
                 self.events.emit(AgentEvent::MessageCompleted {
                     session_id: self.session.id.clone(),
                     turn_id: turn_id.clone(),
@@ -667,8 +679,12 @@ impl<'a> SessionRuntime<'a> {
                             role: "assistant".into(),
                             content: response.clone(),
                             model: Some(self.model.clone()),
-                            tokens_in: None,
-                            tokens_out: None,
+                            tokens_in: token_usage
+                                .as_ref()
+                                .and_then(|u| i64::try_from(u.input_tokens).ok()),
+                            tokens_out: token_usage
+                                .as_ref()
+                                .and_then(|u| i64::try_from(u.output_tokens).ok()),
                         },
                     )?;
                     Ok(())
@@ -696,6 +712,9 @@ impl<'a> SessionRuntime<'a> {
                     message_id: message_id.clone(),
                     context_used_chars,
                     context_max_chars,
+                    input_tokens: token_usage.as_ref().map(|u| u.input_tokens),
+                    output_tokens: token_usage.as_ref().map(|u| u.output_tokens),
+                    total_tokens: token_usage.as_ref().map(|u| u.total_tokens),
                 });
 
                 Ok(SubmitResult::Completed {
@@ -1020,6 +1039,8 @@ struct ChatCompletionsRequest {
 #[derive(Deserialize)]
 struct SseChunk {
     choices: Option<Vec<SseChoice>>,
+    #[serde(default)]
+    usage: Option<UsagePayload>,
 }
 
 #[derive(Deserialize)]
@@ -1045,7 +1066,11 @@ struct OpenaiRequestContext<'a> {
     output_hook: Option<&'a dyn Fn(&str)>,
 }
 
-async fn send_openai(auth: &ResolvedAuth, ctx: OpenaiRequestContext<'_>) -> Result<TurnResult> {
+async fn send_openai(
+    auth: &ResolvedAuth,
+    ctx: OpenaiRequestContext<'_>,
+    token_usage: &mut Option<TokenUsage>,
+) -> Result<TurnResult> {
     if ctx.ws_disabled.load(Ordering::Relaxed) {
         ctx.events.emit(AgentEvent::TransportSelected {
             session_id: Some(ctx.session_id.to_string()),
@@ -1061,6 +1086,7 @@ async fn send_openai(auth: &ResolvedAuth, ctx: OpenaiRequestContext<'_>) -> Resu
             ctx.instructions,
             ctx.abort_signal,
             ctx.output_hook,
+            token_usage,
         )
         .await;
     }
@@ -1080,6 +1106,7 @@ async fn send_openai(auth: &ResolvedAuth, ctx: OpenaiRequestContext<'_>) -> Resu
         ctx.instructions,
         ctx.abort_signal,
         ctx.output_hook,
+        token_usage,
     )
     .await
     {
@@ -1102,6 +1129,7 @@ async fn send_openai(auth: &ResolvedAuth, ctx: OpenaiRequestContext<'_>) -> Resu
                 ctx.instructions,
                 ctx.abort_signal,
                 ctx.output_hook,
+                token_usage,
             )
             .await
         }
@@ -1116,6 +1144,7 @@ async fn send_openai_ws(
     instructions: &str,
     abort_signal: &AtomicBool,
     output_hook: Option<&dyn Fn(&str)>,
+    token_usage: &mut Option<TokenUsage>,
 ) -> Result<TurnResult> {
     if abort_signal.load(Ordering::Relaxed) {
         return Ok(TurnResult::Aborted);
@@ -1244,7 +1273,12 @@ async fn send_openai_ws(
                         current_call_id.clear();
                         current_call_name.clear();
                     }
-                    "response.completed" => break,
+                    "response.completed" => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                            *token_usage = parse_token_usage(&value);
+                        }
+                        break;
+                    }
                     "error" => {
                         let err_value: serde_json::Value =
                             serde_json::from_str(&text).unwrap_or_default();
@@ -1280,6 +1314,7 @@ async fn send_openai_sse(
     instructions: &str,
     abort_signal: &AtomicBool,
     output_hook: Option<&dyn Fn(&str)>,
+    token_usage: &mut Option<TokenUsage>,
 ) -> Result<TurnResult> {
     if abort_signal.load(Ordering::Relaxed) {
         return Ok(TurnResult::Aborted);
@@ -1351,6 +1386,7 @@ async fn send_openai_sse(
                 &mut current_call_id,
                 &mut current_call_name,
                 output_hook,
+                token_usage,
             )? {
                 done = true;
                 break;
@@ -1377,6 +1413,7 @@ fn process_openai_sse_block_with_tools(
     current_call_id: &mut String,
     current_call_name: &mut String,
     output_hook: Option<&dyn Fn(&str)>,
+    token_usage: &mut Option<TokenUsage>,
 ) -> Result<bool> {
     let mut event_type = String::new();
     let mut data = String::new();
@@ -1432,7 +1469,12 @@ fn process_openai_sse_block_with_tools(
                 current_call_name.clear();
             }
         }
-        "response.completed" => return Ok(true),
+        "response.completed" => {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+                *token_usage = parse_token_usage(&value);
+            }
+            return Ok(true);
+        }
         "error" => {
             let err_value: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
             let err_msg = err_value
@@ -1453,6 +1495,7 @@ pub fn process_openai_sse_block(block: &str, full_response: &mut String) -> Resu
     let mut dummy_args = String::new();
     let mut dummy_id = String::new();
     let mut dummy_name = String::new();
+    let mut dummy_usage = None;
     process_openai_sse_block_with_tools(
         block,
         full_response,
@@ -1461,6 +1504,7 @@ pub fn process_openai_sse_block(block: &str, full_response: &mut String) -> Resu
         &mut dummy_id,
         &mut dummy_name,
         None,
+        &mut dummy_usage,
     )
 }
 
@@ -1470,6 +1514,7 @@ async fn send_zai_sse(
     messages: &[Message],
     abort_signal: &AtomicBool,
     output_hook: Option<&dyn Fn(&str)>,
+    token_usage: &mut Option<TokenUsage>,
 ) -> Result<TurnResult> {
     if abort_signal.load(Ordering::Relaxed) {
         return Ok(TurnResult::Aborted);
@@ -1520,7 +1565,8 @@ async fn send_zai_sse(
             let line = buffer[..line_end].trim().to_string();
             buffer = buffer[line_end + 1..].to_string();
 
-            if process_zai_sse_line_with_hook(&line, &mut full_response, output_hook)? {
+            if process_zai_sse_line_with_hook(&line, &mut full_response, output_hook, token_usage)?
+            {
                 done = true;
                 break;
             }
@@ -1538,6 +1584,7 @@ fn process_zai_sse_line_with_hook(
     line: &str,
     full_response: &mut String,
     output_hook: Option<&dyn Fn(&str)>,
+    token_usage: &mut Option<TokenUsage>,
 ) -> Result<bool> {
     if line.is_empty() || line.starts_with(':') {
         return Ok(false);
@@ -1548,17 +1595,20 @@ fn process_zai_sse_line_with_hook(
             return Ok(true);
         }
 
-        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data)
-            && let Some(choices) = chunk.choices
-        {
-            for choice in choices {
-                if let Some(delta) = choice.delta
-                    && let Some(content) = delta.content
-                {
-                    if let Some(hook) = output_hook {
-                        hook(&content);
+        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
+            if let Some(usage) = chunk.usage {
+                *token_usage = usage.into_token_usage();
+            }
+            if let Some(choices) = chunk.choices {
+                for choice in choices {
+                    if let Some(delta) = choice.delta
+                        && let Some(content) = delta.content
+                    {
+                        if let Some(hook) = output_hook {
+                            hook(&content);
+                        }
+                        full_response.push_str(&content);
                     }
-                    full_response.push_str(&content);
                 }
             }
         }
@@ -1568,5 +1618,66 @@ fn process_zai_sse_line_with_hook(
 }
 
 pub fn process_zai_sse_line(line: &str, full_response: &mut String) -> Result<bool> {
-    process_zai_sse_line_with_hook(line, full_response, None)
+    let mut dummy_usage = None;
+    process_zai_sse_line_with_hook(line, full_response, None, &mut dummy_usage)
+}
+
+#[derive(Deserialize)]
+struct UsageEnvelope {
+    #[serde(default)]
+    usage: Option<UsagePayload>,
+    #[serde(default)]
+    response: Option<UsageEnvelopeResponse>,
+}
+
+#[derive(Deserialize)]
+struct UsageEnvelopeResponse {
+    #[serde(default)]
+    usage: Option<UsagePayload>,
+}
+
+#[derive(Deserialize)]
+struct UsagePayload {
+    #[serde(default)]
+    input_tokens: Option<usize>,
+    #[serde(default)]
+    output_tokens: Option<usize>,
+    #[serde(default)]
+    prompt_tokens: Option<usize>,
+    #[serde(default)]
+    completion_tokens: Option<usize>,
+    #[serde(default)]
+    total_tokens: Option<usize>,
+}
+
+impl UsagePayload {
+    fn into_token_usage(self) -> Option<TokenUsage> {
+        let input = self.input_tokens.or(self.prompt_tokens);
+        let output = self.output_tokens.or(self.completion_tokens);
+        let total = self.total_tokens.or_else(|| match (input, output) {
+            (Some(i), Some(o)) => Some(i + o),
+            _ => None,
+        });
+        match (input, output, total) {
+            (Some(input_tokens), Some(output_tokens), Some(total_tokens)) => Some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn parse_token_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let envelope = serde_json::from_value::<UsageEnvelope>(value.clone()).ok()?;
+    envelope
+        .usage
+        .and_then(UsagePayload::into_token_usage)
+        .or_else(|| {
+            envelope
+                .response
+                .and_then(|response| response.usage)
+                .and_then(UsagePayload::into_token_usage)
+        })
 }

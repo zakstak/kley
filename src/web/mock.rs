@@ -203,6 +203,9 @@ fn snapshot_data() -> StateSnapshotData {
             used_chars: 0,
             max_chars: 800_000,
             percent_used: 0,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
         },
     }
 }

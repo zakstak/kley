@@ -29,6 +29,9 @@ pub struct ActiveTurnReplay {
     pub content: String,
     pub context_used_chars: usize,
     pub context_max_chars: usize,
+    pub input_tokens: Option<usize>,
+    pub output_tokens: Option<usize>,
+    pub total_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +218,7 @@ struct ManagedSession {
     controller_id: Option<String>,
     active_turn: Option<ActiveTurnReplay>,
     last_context_usage: Option<(usize, usize)>,
+    last_token_usage: Option<(Option<usize>, Option<usize>, Option<usize>)>,
     active_prompt: Option<ActivePrompt>,
     events: broadcast::Sender<RuntimeEventEnvelope>,
 }
@@ -250,6 +254,7 @@ impl RuntimeManager {
                 controller_id: None,
                 active_turn: None,
                 last_context_usage: None,
+                last_token_usage: None,
                 active_prompt: None,
                 events: broadcast::channel(256).0,
             });
@@ -324,6 +329,9 @@ impl RuntimeManager {
             content: String::new(),
             context_used_chars: 0,
             context_max_chars: 1,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
         });
         Ok(())
     }
@@ -340,6 +348,28 @@ impl RuntimeManager {
             ));
         }
         entry.last_context_usage
+    }
+
+    pub fn token_usage(
+        &self,
+        session_id: &str,
+    ) -> Option<(Option<usize>, Option<usize>, Option<usize>)> {
+        let sessions = self.lock_sessions();
+        let entry = sessions.get(session_id)?;
+        if let Some(active_turn) = &entry.active_turn {
+            if active_turn.input_tokens.is_some()
+                || active_turn.output_tokens.is_some()
+                || active_turn.total_tokens.is_some()
+            {
+                return Some((
+                    active_turn.input_tokens,
+                    active_turn.output_tokens,
+                    active_turn.total_tokens,
+                ));
+            }
+            return None;
+        }
+        entry.last_token_usage
     }
 
     pub fn active_turn(&self, session_id: &str) -> Option<ActiveTurnReplay> {
@@ -513,19 +543,32 @@ impl RuntimeManager {
         {
             active_turn.context_used_chars = *context_used_chars;
             active_turn.context_max_chars = (*context_max_chars).max(1);
+            active_turn.input_tokens = None;
+            active_turn.output_tokens = None;
+            active_turn.total_tokens = None;
             entry.last_context_usage = Some((
                 active_turn.context_used_chars,
                 active_turn.context_max_chars,
             ));
+            entry.last_token_usage = None;
         }
 
         if let AgentEvent::TurnCompleted {
             context_used_chars,
             context_max_chars,
+            input_tokens,
+            output_tokens,
+            total_tokens,
             ..
         } = &event
         {
             entry.last_context_usage = Some((*context_used_chars, (*context_max_chars).max(1)));
+            entry.last_token_usage = Some((*input_tokens, *output_tokens, *total_tokens));
+            if let Some(active_turn) = entry.active_turn.as_mut() {
+                active_turn.input_tokens = *input_tokens;
+                active_turn.output_tokens = *output_tokens;
+                active_turn.total_tokens = *total_tokens;
+            }
         }
 
         let _ = entry.events.send(RuntimeEventEnvelope {
@@ -539,6 +582,8 @@ impl RuntimeManager {
             }
             AgentEvent::TurnFailed { .. } => {
                 entry.active_turn = None;
+                entry.last_context_usage = None;
+                entry.last_token_usage = None;
             }
             _ => {}
         }
@@ -578,6 +623,8 @@ impl RuntimeManager {
                 {
                     entry.active_turn = None;
                 }
+                entry.last_context_usage = None;
+                entry.last_token_usage = None;
             }
             Err(error) => {
                 let error = format!("{}", error);
@@ -593,6 +640,8 @@ impl RuntimeManager {
                 });
                 entry.active_prompt = None;
                 entry.active_turn = None;
+                entry.last_context_usage = None;
+                entry.last_token_usage = None;
             }
         }
     }
