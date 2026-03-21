@@ -15,6 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 SCRIPT_MANIFEST_PATH="$SCRIPT_DIR/Cargo.toml"
 
+cd "$SCRIPT_DIR"
+
 MAX_CYCLES="${1:-5}"
 TURNS_PER_CYCLE="${MAX_TURN_PER_CYCLE:-30}"
 LOG_DIR="$(pwd)/.self-improve-logs"

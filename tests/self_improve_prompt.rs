@@ -1,11 +1,21 @@
-use std::fs;
 use std::path::PathBuf;
+use std::{env, fs};
 
 use kley::tools;
 
 fn self_improve_script() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("self-improve.sh");
     fs::read_to_string(path).expect("self-improve.sh should be readable")
+}
+
+fn assert_ordered_markers(script: &str, markers: &[&str], context: &str) {
+    let mut cursor = 0;
+    for marker in markers {
+        let relative_index = script[cursor..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("expected {context} to contain {marker:?}"));
+        cursor += relative_index + marker.len();
+    }
 }
 
 fn prompt_capability_tools(script: &str) -> Vec<String> {
@@ -82,7 +92,8 @@ fn self_improve_prompt_keeps_retrospective_fields_in_final_status_order() {
 fn self_improve_prompt_tool_list_matches_builtin_registry() {
     let script = self_improve_script();
     let prompt_tools = prompt_capability_tools(&script);
-    let registry = tools::default_registry(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let registry =
+        tools::default_registry(env::current_dir().expect("test cwd should be readable"));
     let builtin_tools: Vec<String> = registry
         .to_api_tools()
         .into_iter()
@@ -101,6 +112,22 @@ fn self_improve_prompt_tool_list_matches_builtin_registry() {
     assert!(
         script.contains("There is no separate `git` or `write` tool."),
         "expected self-improve prompt to explain that git/write are not separate tools"
+    );
+}
+
+#[test]
+fn self_improve_script_enters_repo_root_before_logging_or_launch() {
+    let script = self_improve_script();
+
+    assert_ordered_markers(
+        &script,
+        &[
+            "SCRIPT_DIR=",
+            "cd \"$SCRIPT_DIR\"",
+            "LOG_DIR=",
+            "run_kley chat \\",
+        ],
+        "self-improve launcher flow",
     );
 }
 
