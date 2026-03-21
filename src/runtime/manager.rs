@@ -53,16 +53,17 @@ pub enum SubmitPromptError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitPromptOutcome {
-    Accepted {
-        turn_id: String,
-        message_id: String,
-    },
+    Accepted { turn_id: String, message_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbortTurnError {
-    NoRuntime { session_id: String },
-    NoActiveTurn { session_id: String },
+    NoRuntime {
+        session_id: String,
+    },
+    NoActiveTurn {
+        session_id: String,
+    },
     TurnMismatch {
         session_id: String,
         expected_turn_id: String,
@@ -89,14 +90,14 @@ impl RuntimeWorker {
     fn from_session(session: &Session) -> Self {
         let mut model = session.model.clone();
         let mut provider = session.provider.clone();
-        if let Some(settings) = &session.settings {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(settings) {
-                if let Some(settings_model) = json.get("model").and_then(|v| v.as_str()) {
-                    model = settings_model.to_string();
-                }
-                if let Some(settings_provider) = json.get("provider").and_then(|v| v.as_str()) {
-                    provider = settings_provider.to_string();
-                }
+        if let Some(settings) = &session.settings
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(settings)
+        {
+            if let Some(settings_model) = json.get("model").and_then(|v| v.as_str()) {
+                model = settings_model.to_string();
+            }
+            if let Some(settings_provider) = json.get("provider").and_then(|v| v.as_str()) {
+                provider = settings_provider.to_string();
             }
         }
 
@@ -230,7 +231,10 @@ impl RuntimeManager {
         session: &Session,
         controller_id: &str,
     ) -> Result<(), AttachControllerError> {
-        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         let entry = sessions
             .entry(session.id.clone())
             .or_insert_with(|| ManagedSession {
@@ -245,13 +249,13 @@ impl RuntimeManager {
         entry.settings = session.settings.clone();
         entry.runtime = RuntimeWorker::from_session(session);
 
-        if let Some(active) = &entry.controller_id {
-            if active != controller_id {
-                return Err(AttachControllerError::SessionBusy {
-                    session_id: session.id.clone(),
-                    active_controller_id: active.clone(),
-                });
-            }
+        if let Some(active) = &entry.controller_id
+            && active != controller_id
+        {
+            return Err(AttachControllerError::SessionBusy {
+                session_id: session.id.clone(),
+                active_controller_id: active.clone(),
+            });
         }
 
         entry.controller_id = Some(controller_id.to_string());
@@ -259,21 +263,32 @@ impl RuntimeManager {
     }
 
     pub fn release_controller(&self, session_id: &str, controller_id: &str) {
-        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
-        if let Some(entry) = sessions.get_mut(session_id) {
-            if entry.controller_id.as_deref() == Some(controller_id) {
-                entry.controller_id = None;
-            }
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
+        if let Some(entry) = sessions.get_mut(session_id)
+            && entry.controller_id.as_deref() == Some(controller_id)
+        {
+            entry.controller_id = None;
         }
     }
 
     pub fn subscribe(&self, session_id: &str) -> Option<broadcast::Receiver<RuntimeEventEnvelope>> {
-        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
-        sessions.get(session_id).map(|entry| entry.events.subscribe())
+        let sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
+        sessions
+            .get(session_id)
+            .map(|entry| entry.events.subscribe())
     }
 
     pub fn runtime(&self, session_id: &str) -> Option<ManagedRuntime> {
-        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         sessions.get(session_id).map(|entry| ManagedRuntime {
             session_id: entry.runtime.session_id.clone(),
             model: entry.runtime.model.clone(),
@@ -289,7 +304,10 @@ impl RuntimeManager {
         turn_id: String,
         message_id: String,
     ) -> Result<(), SubmitPromptError> {
-        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         let Some(entry) = sessions.get_mut(session_id) else {
             return Err(SubmitPromptError::NoRuntime {
                 session_id: session_id.to_string(),
@@ -313,14 +331,20 @@ impl RuntimeManager {
     }
 
     pub fn active_turn(&self, session_id: &str) -> Option<ActiveTurnReplay> {
-        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         sessions
             .get(session_id)
             .and_then(|entry| entry.active_turn.clone())
     }
 
     pub fn clear_active_turn(&self, session_id: &str, turn_id: &str) {
-        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         if let Some(entry) = sessions.get_mut(session_id) {
             let should_clear = entry
                 .active_turn
@@ -340,7 +364,10 @@ impl RuntimeManager {
         prompt: String,
     ) -> std::result::Result<SubmitPromptOutcome, SubmitPromptError> {
         let (worker, active_turn, abort_signal) = {
-            let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+            let mut sessions = self
+                .sessions
+                .lock()
+                .expect("runtime manager mutex poisoned");
             let Some(entry) = sessions.get_mut(session_id) else {
                 return Err(SubmitPromptError::NoRuntime {
                     session_id: session_id.to_string(),
@@ -386,12 +413,22 @@ impl RuntimeManager {
 
             let worker_task = tokio::spawn(async move {
                 worker
-                    .submit_prompt_stream(shared_store, prompt, correlation, abort_signal, stream_tx)
+                    .submit_prompt_stream(
+                        shared_store,
+                        prompt,
+                        correlation,
+                        abort_signal,
+                        stream_tx,
+                    )
                     .await
             });
 
             while let Some(event) = stream_rx.recv().await {
-                event_manager.publish_runtime_event(&session_id_for_events, &request_id_for_events, event);
+                event_manager.publish_runtime_event(
+                    &session_id_for_events,
+                    &request_id_for_events,
+                    event,
+                );
             }
 
             let result = match worker_task.await {
@@ -402,7 +439,10 @@ impl RuntimeManager {
             manager.finish_prompt(&session_id_owned, &request_id, &finish_turn_id, result);
         });
 
-        Ok(SubmitPromptOutcome::Accepted { turn_id, message_id })
+        Ok(SubmitPromptOutcome::Accepted {
+            turn_id,
+            message_id,
+        })
     }
 
     pub fn request_abort(
@@ -410,7 +450,10 @@ impl RuntimeManager {
         session_id: &str,
         turn_id: &str,
     ) -> std::result::Result<AbortTurnOutcome, AbortTurnError> {
-        let sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         let Some(entry) = sessions.get(session_id) else {
             return Err(AbortTurnError::NoRuntime {
                 session_id: session_id.to_string(),
@@ -442,15 +485,18 @@ impl RuntimeManager {
     }
 
     fn publish_runtime_event(&self, session_id: &str, request_id: &str, event: AgentEvent) {
-        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         let Some(entry) = sessions.get_mut(session_id) else {
             return;
         };
 
-        if let AgentEvent::MessageDelta { delta, .. } = &event {
-            if let Some(active_turn) = entry.active_turn.as_mut() {
-                active_turn.content.push_str(delta);
-            }
+        if let AgentEvent::MessageDelta { delta, .. } = &event
+            && let Some(active_turn) = entry.active_turn.as_mut()
+        {
+            active_turn.content.push_str(delta);
         }
 
         let _ = entry.events.send(RuntimeEventEnvelope {
@@ -476,7 +522,10 @@ impl RuntimeManager {
         turn_id: &str,
         result: Result<SubmitResult>,
     ) {
-        let mut sessions = self.sessions.lock().expect("runtime manager mutex poisoned");
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("runtime manager mutex poisoned");
         let Some(entry) = sessions.get_mut(session_id) else {
             return;
         };

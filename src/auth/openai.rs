@@ -3,8 +3,8 @@
 //! Mirrors the JS implementation in packages/ai/dist/utils/oauth/openai-codex.js.
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
@@ -387,7 +387,9 @@ pub async fn login_interactive() -> Result<()> {
     let _ = open::that(&url);
 
     eprintln!("Waiting for callback on http://localhost:{CALLBACK_PORT}/auth/callback...");
-    eprintln!("(If the browser cannot redirect back to this terminal, copy the final URL from your browser's address bar and paste it here)");
+    eprintln!(
+        "(If the browser cannot redirect back to this terminal, copy the final URL from your browser's address bar and paste it here)"
+    );
     eprintln!("Paste URL or code > ");
     let code = wait_for_callback(&state).await?;
 

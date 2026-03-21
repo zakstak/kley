@@ -1,8 +1,8 @@
 use std::future::pending;
 
 use anyhow::Result;
-use axum::extract::{Query, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Query, State};
 use axum::response::Response;
 use chrono::Utc;
 use serde::Deserialize;
@@ -18,8 +18,8 @@ use crate::runtime::{
 use crate::store::{self, NewSession, Session, Turn};
 
 use super::protocol::{
-    ActiveTurnSnapshot, ResponseError, SelectedSession, SessionSummary, StateSnapshotData,
-    TranscriptEntry, UiEvent, WebCommand, WebResponse, PROTOCOL_VERSION,
+    ActiveTurnSnapshot, PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary,
+    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 use super::state::WebAppState;
 
@@ -39,30 +39,31 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state, query.session_id))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: WebAppState, requested_session_id: Option<String>) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: WebAppState,
+    requested_session_id: Option<String>,
+) {
     let controller_id = format!("controller-{}", Uuid::new_v4());
 
-    let mut active_session = match attach_or_select_session(
-        &state,
-        &controller_id,
-        requested_session_id.as_deref(),
-    )
-    .await
-    {
-        Ok(session) => session,
-        Err(SelectSessionError::Busy(attach_err)) => {
-            let _ = send_response(
-                &mut socket,
-                WebResponse::Error {
-                    request_id: "attach".to_string(),
-                    error: session_busy_error(attach_err),
-                },
-            )
-            .await;
-            return;
-        }
-        Err(SelectSessionError::Store) => return,
-    };
+    let mut active_session =
+        match attach_or_select_session(&state, &controller_id, requested_session_id.as_deref())
+            .await
+        {
+            Ok(session) => session,
+            Err(SelectSessionError::Busy(attach_err)) => {
+                let _ = send_response(
+                    &mut socket,
+                    WebResponse::Error {
+                        request_id: "attach".to_string(),
+                        error: session_busy_error(attach_err),
+                    },
+                )
+                .await;
+                return;
+            }
+            Err(SelectSessionError::Store) => return,
+        };
 
     let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
 
@@ -555,7 +556,9 @@ async fn load_selected_session(state: &WebAppState, session_id: &str) -> Result<
 
     Ok(SelectedSession {
         session_id: session.id,
-        title: session.title.unwrap_or_else(|| "Untitled session".to_string()),
+        title: session
+            .title
+            .unwrap_or_else(|| "Untitled session".to_string()),
         status: session.status.to_string(),
         created_at: session.created_at.to_rfc3339(),
         updated_at: session.updated_at.to_rfc3339(),
@@ -600,7 +603,7 @@ async fn attach_or_select_session(
             .await
             .map_err(|_| SelectSessionError::Store)?
             {
-            sessions.insert(0, preferred);
+                sessions.insert(0, preferred);
             }
         }
     }
@@ -611,7 +614,10 @@ async fn attach_or_select_session(
             .await
             .map_err(|_| SelectSessionError::Store)?;
         let is_requested_session = preferred_session_id == Some(session.id.as_str());
-        match state.runtime_manager.attach_controller(&session, controller_id) {
+        match state
+            .runtime_manager
+            .attach_controller(&session, controller_id)
+        {
             Ok(()) => return Ok(session),
             Err(err) => {
                 if is_requested_session {
@@ -623,9 +629,9 @@ async fn attach_or_select_session(
         }
     }
 
-    Err(SelectSessionError::Busy(
-        busy_error.expect("busy error should exist when no attachable session remains"),
-    ))
+    Err(SelectSessionError::Busy(busy_error.expect(
+        "busy error should exist when no attachable session remains",
+    )))
 }
 
 async fn create_default_session(state: &WebAppState) -> Result<Session> {
@@ -645,7 +651,6 @@ async fn create_default_session(state: &WebAppState) -> Result<Session> {
 }
 
 async fn ensure_session_settings(state: &WebAppState, mut session: Session) -> Result<Session> {
-
     if session.settings.is_none() {
         let settings_json = default_settings_json(&session.model, &session.provider);
         let id = session.id.clone();
@@ -670,12 +675,17 @@ fn default_settings_json(model: &str, provider: &str) -> String {
     .to_string()
 }
 
-async fn list_sessions(state: &WebAppState, selected_session_id: Option<&str>) -> Result<Vec<SessionSummary>> {
+async fn list_sessions(
+    state: &WebAppState,
+    selected_session_id: Option<&str>,
+) -> Result<Vec<SessionSummary>> {
     let store_ref = state.store.clone();
     let mut sessions = store::store_run(&store_ref, |store| Session::list(store, 50)).await?;
 
     if let Some(selected_session_id) = selected_session_id {
-        let contains_selected = sessions.iter().any(|session| session.id == selected_session_id);
+        let contains_selected = sessions
+            .iter()
+            .any(|session| session.id == selected_session_id);
         if !contains_selected {
             let selected_session_id = selected_session_id.to_string();
             if let Some(selected_session) = store::store_run(&store_ref, move |store| {
@@ -692,7 +702,9 @@ async fn list_sessions(state: &WebAppState, selected_session_id: Option<&str>) -
         .into_iter()
         .map(|session| SessionSummary {
             session_id: session.id,
-            title: session.title.unwrap_or_else(|| "Untitled session".to_string()),
+            title: session
+                .title
+                .unwrap_or_else(|| "Untitled session".to_string()),
             updated_at: session.updated_at.to_rfc3339(),
         })
         .collect())
@@ -701,7 +713,10 @@ async fn list_sessions(state: &WebAppState, selected_session_id: Option<&str>) -
 async fn load_transcript(state: &WebAppState, session_id: &str) -> Result<Vec<TranscriptEntry>> {
     let session_id = session_id.to_string();
     let store_ref = state.store.clone();
-    let turns = store::store_run(&store_ref, move |store| Turn::list_for_session(store, &session_id)).await?;
+    let turns = store::store_run(&store_ref, move |store| {
+        Turn::list_for_session(store, &session_id)
+    })
+    .await?;
     Ok(turns
         .into_iter()
         .map(|turn| TranscriptEntry {
@@ -728,17 +743,19 @@ async fn load_session_for_controller(
 ) -> std::result::Result<Session, LoadSessionError> {
     let next_session_id = next_session_id.to_string();
     let store_ref = state.store.clone();
-    let session = store::store_run(&store_ref, move |store| Session::find(store, &next_session_id))
-        .await
-        .map_err(|_| LoadSessionError::Store)?
-        .ok_or(LoadSessionError::NotFound)?;
+    let session = store::store_run(&store_ref, move |store| {
+        Session::find(store, &next_session_id)
+    })
+    .await
+    .map_err(|_| LoadSessionError::Store)?
+    .ok_or(LoadSessionError::NotFound)?;
 
-    if session.id != previous_session.id {
-        if let Some(active_turn) = state.runtime_manager.active_turn(&previous_session.id) {
-            return Err(LoadSessionError::TurnInProgress {
-                turn_id: active_turn.turn_id,
-            });
-        }
+    if session.id != previous_session.id
+        && let Some(active_turn) = state.runtime_manager.active_turn(&previous_session.id)
+    {
+        return Err(LoadSessionError::TurnInProgress {
+            turn_id: active_turn.turn_id,
+        });
     }
 
     state
@@ -1026,10 +1043,10 @@ fn ts_now() -> String {
 
 async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {
     let text = serde_json::to_string(&response).map_err(|_| ())?;
-    socket.send(Message::Text(text.into())).await.map_err(|_| ())
+    socket.send(Message::Text(text)).await.map_err(|_| ())
 }
 
 async fn send_event(socket: &mut WebSocket, event: UiEvent) -> Result<(), ()> {
     let text = serde_json::to_string(&event).map_err(|_| ())?;
-    socket.send(Message::Text(text.into())).await.map_err(|_| ())
+    socket.send(Message::Text(text)).await.map_err(|_| ())
 }

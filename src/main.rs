@@ -4,7 +4,7 @@ use std::io::Write;
 
 use kley::agent::RunMode;
 use kley::compact::CompactConfig;
-use kley::events::{event_channel, AgentEvent};
+use kley::events::{AgentEvent, event_channel};
 use kley::store::Store;
 
 #[derive(Debug, Parser)]

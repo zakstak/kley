@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -50,18 +50,16 @@ mod web {
 
     async fn connect_ws(
         addr: std::net::SocketAddr,
-    ) -> tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    > {
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         connect_ws_path(addr, "/ws").await
     }
 
     async fn connect_ws_path(
         addr: std::net::SocketAddr,
         path: &str,
-    ) -> tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    > {
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let url = format!("ws://{addr}{path}");
         let (socket, _) = connect_async(url).await.unwrap();
         socket
@@ -69,9 +67,8 @@ mod web {
 
     async fn connect_mock_ws(
         addr: std::net::SocketAddr,
-    ) -> tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    > {
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         connect_ws_path(addr, "/ws/mock").await
     }
 
@@ -219,7 +216,11 @@ mod web {
                     provider: "test".to_string(),
                 },
             )?;
-            Session::update_settings(s, &session.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
             Session::update_title(s, &session.id, "Bootstrap Session")?;
             Turn::append(
                 s,
@@ -266,8 +267,16 @@ mod web {
         assert!(frame["selected_session"]["created_at"].as_str().is_some());
         assert!(frame["selected_session"]["updated_at"].as_str().is_some());
         let transcript = frame["transcript"].as_array().unwrap();
-        assert!(transcript.iter().any(|entry| entry["content"] == "Persisted bootstrap prompt"));
-        assert!(transcript.iter().any(|entry| entry["content"] == "Persisted bootstrap reply"));
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["content"] == "Persisted bootstrap prompt")
+        );
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["content"] == "Persisted bootstrap reply")
+        );
     }
 
     #[tokio::test]
@@ -352,7 +361,10 @@ mod web {
         let second_bootstrap = recv_json(&mut second_socket).await;
         assert_eq!(second_bootstrap["type"], "state.snapshot");
         assert_eq!(second_bootstrap["session_id"], first_session.id);
-        assert_eq!(second_bootstrap["selected_session"]["title"], "Available Session");
+        assert_eq!(
+            second_bootstrap["selected_session"]["title"],
+            "Available Session"
+        );
     }
 
     #[tokio::test]
@@ -404,8 +416,14 @@ mod web {
         assert_eq!(rejection["type"], "response.error");
         assert_eq!(rejection["request_id"], "attach");
         assert_eq!(rejection["error"]["code"], "session_busy");
-        assert_eq!(rejection["error"]["details"]["session_id"], second_session.id);
-        assert_ne!(rejection["error"]["details"]["session_id"], first_session.id);
+        assert_eq!(
+            rejection["error"]["details"]["session_id"],
+            second_session.id
+        );
+        assert_ne!(
+            rejection["error"]["details"]["session_id"],
+            first_session.id
+        );
     }
 
     #[tokio::test]
@@ -421,7 +439,11 @@ mod web {
                     provider: "test".to_string(),
                 },
             )?;
-            Session::update_settings(s, &requested.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &requested.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
             Session::update_title(s, &requested.id, "Requested Older Session")?;
             Ok(requested)
         })
@@ -437,7 +459,11 @@ mod web {
                         provider: "test".to_string(),
                     },
                 )?;
-                Session::update_settings(s, &session.id, r#"{"model":"test-model","provider":"test"}"#)?;
+                Session::update_settings(
+                    s,
+                    &session.id,
+                    r#"{"model":"test-model","provider":"test"}"#,
+                )?;
                 Session::update_title(s, &session.id, &format!("Recent Session {index}"))?;
                 Ok(())
             })
@@ -455,12 +481,17 @@ mod web {
         let frame = recv_json(&mut socket).await;
         assert_eq!(frame["type"], "state.snapshot");
         assert_eq!(frame["session_id"], requested_session.id);
-        assert_eq!(frame["selected_session"]["title"], "Requested Older Session");
-        assert!(frame["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["session_id"] == requested_session.id));
+        assert_eq!(
+            frame["selected_session"]["title"],
+            "Requested Older Session"
+        );
+        assert!(
+            frame["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["session_id"] == requested_session.id)
+        );
     }
 
     #[tokio::test]
@@ -525,13 +556,10 @@ mod web {
         assert_eq!(bootstrap["session_id"], second_session.id);
 
         socket
-            .send(Message::Text(
-                format!(
-                    r#"{{"type":"session.load","request_id":"req-load-1","session_id":"{}"}}"#,
-                    first_session.id
-                )
-                .into(),
-            ))
+            .send(Message::Text(format!(
+                r#"{{"type":"session.load","request_id":"req-load-1","session_id":"{}"}}"#,
+                first_session.id
+            )))
             .await
             .unwrap();
 
@@ -547,8 +575,16 @@ mod web {
         assert_eq!(snapshot["selected_session"]["title"], "First Session");
 
         let transcript = snapshot["transcript"].as_array().unwrap();
-        assert!(transcript.iter().any(|entry| entry["content"] == "First session transcript"));
-        assert!(!transcript.iter().any(|entry| entry["content"] == "Second session transcript"));
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["content"] == "First session transcript")
+        );
+        assert!(
+            !transcript
+                .iter()
+                .any(|entry| entry["content"] == "Second session transcript")
+        );
     }
 
     #[tokio::test]
@@ -599,7 +635,7 @@ mod web {
                     r#"{{"type":"prompt.submit","request_id":"req-load-busy-prompt","session_id":"{}","prompt":"abortable response please stop"}}"#,
                     first_session.id
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -613,13 +649,10 @@ mod web {
         assert_eq!(recv_json(&mut socket).await["type"], "message.delta");
 
         socket
-            .send(Message::Text(
-                format!(
-                    r#"{{"type":"session.load","request_id":"req-load-busy","session_id":"{}"}}"#,
-                    second_session.id
-                )
-                .into(),
-            ))
+            .send(Message::Text(format!(
+                r#"{{"type":"session.load","request_id":"req-load-busy","session_id":"{}"}}"#,
+                second_session.id
+            )))
             .await
             .unwrap();
 
@@ -627,7 +660,10 @@ mod web {
         assert_eq!(load_error["type"], "response.error");
         assert_eq!(load_error["request_id"], "req-load-busy");
         assert_eq!(load_error["error"]["code"], "turn_in_progress");
-        assert_eq!(load_error["error"]["details"]["session_id"], first_session.id);
+        assert_eq!(
+            load_error["error"]["details"]["session_id"],
+            first_session.id
+        );
         assert_eq!(load_error["error"]["details"]["turn_id"], turn_id);
 
         socket
@@ -636,7 +672,7 @@ mod web {
                     r#"{{"type":"turn.abort","request_id":"req-load-busy-abort","session_id":"{}","turn_id":"{}"}}"#,
                     first_session.id, turn_id
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -659,9 +695,7 @@ mod web {
 
         socket
             .send(Message::Text(
-                r#"{"type":"mock.invalid","request_id":"req-bad-1"}"#
-                    .to_string()
-                    .into(),
+                r#"{"type":"mock.invalid","request_id":"req-bad-1"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -673,9 +707,7 @@ mod web {
 
         socket
             .send(Message::Text(
-                r#"{"type":"state.get","request_id":"req-ok-1"}"#
-                    .to_string()
-                    .into(),
+                r#"{"type":"state.get","request_id":"req-ok-1"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -699,7 +731,7 @@ mod web {
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-prompt-1","session_id":"{session_id}","prompt":"hello"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -741,7 +773,7 @@ mod web {
 
         socket
             .send(Message::Text(
-                r#"{"type":"prompt.submit","request_id":"req-mock-prompt-1","session_id":"sess-mock-001","prompt":"mock prompt"}"#.into(),
+                r#"{"type":"prompt.submit","request_id":"req-mock-prompt-1","session_id":"sess-mock-001","prompt":"mock prompt"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -788,7 +820,7 @@ mod web {
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-tool-1","session_id":"{session_id}","prompt":"please use a tool"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -804,12 +836,22 @@ mod web {
 
             if event_type == "tool.started" {
                 started_id = frame["tool_call_id"].as_str().map(|s| s.to_string());
-                assert!(frame["tool_name"].as_str().unwrap().contains("unknown_tool"));
+                assert!(
+                    frame["tool_name"]
+                        .as_str()
+                        .unwrap()
+                        .contains("unknown_tool")
+                );
             }
 
             if event_type == "tool.completed" {
                 completed_id = frame["tool_call_id"].as_str().map(|s| s.to_string());
-                assert!(frame["tool_name"].as_str().unwrap().contains("unknown_tool"));
+                assert!(
+                    frame["tool_name"]
+                        .as_str()
+                        .unwrap()
+                        .contains("unknown_tool")
+                );
             }
 
             if event_type == "turn.completed" {
@@ -835,7 +877,7 @@ mod web {
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-ui-prompt-1","session_id":"{session_id}","prompt":"please use a tool"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -878,9 +920,7 @@ mod web {
 
         socket
             .send(Message::Text(
-                r#"{"type":"state.get","request_id":"req-ui-state-1"}"#
-                    .to_string()
-                    .into(),
+                r#"{"type":"state.get","request_id":"req-ui-state-1"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -896,7 +936,11 @@ mod web {
                 .any(|entry| entry["role"] == "user" && entry["content"] == "please use a tool")
         );
         assert!(transcript.iter().any(|entry| {
-            entry["role"] == "assistant" && entry["content"].as_str().unwrap_or_default().contains("tool")
+            entry["role"] == "assistant"
+                && entry["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("tool")
         }));
     }
 
@@ -963,13 +1007,10 @@ mod web {
         assert_eq!(bootstrap["session_id"], second_session.id);
 
         socket
-            .send(Message::Text(
-                format!(
-                    r#"{{"type":"session.load","request_id":"req-ui-load-1","session_id":"{}"}}"#,
-                    first_session.id
-                )
-                .into(),
-            ))
+            .send(Message::Text(format!(
+                r#"{{"type":"session.load","request_id":"req-ui-load-1","session_id":"{}"}}"#,
+                first_session.id
+            )))
             .await
             .unwrap();
 
@@ -983,12 +1024,28 @@ mod web {
         assert_eq!(snapshot["selected_session"]["title"], "First Session");
 
         let transcript = snapshot["transcript"].as_array().unwrap();
-        assert!(transcript.iter().any(|entry| entry["content"] == "First session transcript"));
-        assert!(!transcript.iter().any(|entry| entry["content"] == "Second session transcript"));
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["content"] == "First session transcript")
+        );
+        assert!(
+            !transcript
+                .iter()
+                .any(|entry| entry["content"] == "Second session transcript")
+        );
 
         let sessions = snapshot["sessions"].as_array().unwrap();
-        assert!(sessions.iter().any(|entry| entry["session_id"] == first_session.id));
-        assert!(sessions.iter().any(|entry| entry["session_id"] == second_session.id));
+        assert!(
+            sessions
+                .iter()
+                .any(|entry| entry["session_id"] == first_session.id)
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|entry| entry["session_id"] == second_session.id)
+        );
     }
 
     #[tokio::test]
@@ -1004,7 +1061,7 @@ mod web {
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-ui-abort-prompt","session_id":"{session_id}","prompt":"abortable response please stop"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -1025,7 +1082,7 @@ mod web {
                 format!(
                     r#"{{"type":"turn.abort","request_id":"req-ui-abort-turn","session_id":"{session_id}","turn_id":"{first_turn_id}"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -1043,7 +1100,7 @@ mod web {
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-ui-after-abort","session_id":"{session_id}","prompt":"hello after abort"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -1057,9 +1114,7 @@ mod web {
 
         socket
             .send(Message::Text(
-                r#"{"type":"state.get","request_id":"req-ui-post-abort-state"}"#
-                    .to_string()
-                    .into(),
+                r#"{"type":"state.get","request_id":"req-ui-post-abort-state"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -1094,9 +1149,7 @@ mod web {
 
         socket1
             .send(Message::Text(
-                r#"{"type":"state.get","request_id":"req-still-active"}"#
-                    .to_string()
-                    .into(),
+                r#"{"type":"state.get","request_id":"req-still-active"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -1118,7 +1171,11 @@ mod web {
                     provider: "test".to_string(),
                 },
             )?;
-            Session::update_settings(s, &session.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
             Turn::append(
                 s,
                 NewTurn {
@@ -1147,7 +1204,7 @@ mod web {
                     r#"{{"type":"prompt.submit","request_id":"req-reconnect-1","session_id":"{}","prompt":"abortable response please stop"}}"#,
                     seeded_session.id
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -1177,9 +1234,8 @@ mod web {
                 .any(|turn| turn["content"] == "Persisted history message")
         );
         assert!(
-            transcript
-                .iter()
-                .any(|turn| turn["role"] == "user" && turn["content"] == "abortable response please stop")
+            transcript.iter().any(|turn| turn["role"] == "user"
+                && turn["content"] == "abortable response please stop")
         );
 
         assert_eq!(bootstrap2["active_turn"]["request_id"], "req-reconnect-1");
@@ -1191,9 +1247,7 @@ mod web {
 
         socket2
             .send(Message::Text(
-                r#"{"type":"state.get","request_id":"req-reconnect-state"}"#
-                    .to_string()
-                    .into(),
+                r#"{"type":"state.get","request_id":"req-reconnect-state"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -1208,7 +1262,7 @@ mod web {
                     r#"{{"type":"turn.abort","request_id":"req-reconnect-abort","session_id":"{}","turn_id":"{}"}}"#,
                     seeded_session.id, turn_id
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -1263,7 +1317,7 @@ mod web {
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-abort-prompt","session_id":"{session_id}","prompt":"abortable response please stop"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -1284,7 +1338,7 @@ mod web {
                 format!(
                     r#"{{"type":"turn.abort","request_id":"req-abort-turn","session_id":"{session_id}","turn_id":"{turn_id}"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();
@@ -1301,9 +1355,7 @@ mod web {
 
         socket
             .send(Message::Text(
-                r#"{"type":"state.get","request_id":"req-post-abort-state"}"#
-                    .to_string()
-                    .into(),
+                r#"{"type":"state.get","request_id":"req-post-abort-state"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -1317,7 +1369,7 @@ mod web {
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-after-abort","session_id":"{session_id}","prompt":"hello after abort"}}"#
                 )
-                .into(),
+                ,
             ))
             .await
             .unwrap();

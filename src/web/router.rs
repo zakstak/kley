@@ -1,4 +1,7 @@
-use axum::{routing::{any, get}, Router};
+use axum::{
+    Router,
+    routing::{any, get},
+};
 
 use super::{mock, state::WebAppState, ui, ws};
 

@@ -40,9 +40,15 @@ enum TurnResult {
 
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
-    SessionCreated { session_id: String },
-    SessionResumed { session_id: String },
-    HistoryLoaded { turns: usize },
+    SessionCreated {
+        session_id: String,
+    },
+    SessionResumed {
+        session_id: String,
+    },
+    HistoryLoaded {
+        turns: usize,
+    },
     ToolCallStarted {
         call_id: String,
         name: String,
@@ -213,12 +219,12 @@ impl<'a> SessionRuntime<'a> {
 
         let existing_turns = Turn::list_for_session(store, &session.id)?;
         let history = history_items_from_turns(&existing_turns);
-        if !existing_turns.is_empty() {
-            if let Some(hook) = &hooks.on_event {
-                hook(RuntimeEvent::HistoryLoaded {
-                    turns: existing_turns.len(),
-                });
-            }
+        if !existing_turns.is_empty()
+            && let Some(hook) = &hooks.on_event
+        {
+            hook(RuntimeEvent::HistoryLoaded {
+                turns: existing_turns.len(),
+            });
         }
 
         Ok(Self {
@@ -291,12 +297,12 @@ impl<'a> SessionRuntime<'a> {
         drop(store_guard);
 
         let history = history_items_from_turns(&existing_turns);
-        if !existing_turns.is_empty() {
-            if let Some(hook) = &hooks.on_event {
-                hook(RuntimeEvent::HistoryLoaded {
-                    turns: existing_turns.len(),
-                });
-            }
+        if !existing_turns.is_empty()
+            && let Some(hook) = &hooks.on_event
+        {
+            hook(RuntimeEvent::HistoryLoaded {
+                turns: existing_turns.len(),
+            });
         }
 
         Ok(Self {
@@ -459,16 +465,18 @@ impl<'a> SessionRuntime<'a> {
                 "openai" => {
                     send_openai(
                         &self.resolved,
-                        &self.model,
-                        &self.session.id,
-                        &turn_id,
-                        &self.history,
-                        &self.registry,
-                        &self.instructions,
-                        &self.ws_disabled,
-                        &self.abort_signal,
-                        &self.events,
-                        Some(&output_hook),
+                        OpenaiRequestContext {
+                            model: &self.model,
+                            session_id: &self.session.id,
+                            turn_id: &turn_id,
+                            history: &self.history,
+                            registry: &self.registry,
+                            instructions: &self.instructions,
+                            ws_disabled: &self.ws_disabled,
+                            abort_signal: &self.abort_signal,
+                            events: &self.events,
+                            output_hook: Some(&output_hook),
+                        },
                     )
                     .await
                 }
@@ -490,8 +498,10 @@ impl<'a> SessionRuntime<'a> {
                 }
                 "test" => match test_provider_result(&self.history) {
                     TurnResult::ToolCalls(calls) => Ok(TurnResult::ToolCalls(calls)),
-                    _ => run_test_provider(&self.history, Some(&output_hook), &self.abort_signal)
-                        .await,
+                    _ => {
+                        run_test_provider(&self.history, Some(&output_hook), &self.abort_signal)
+                            .await
+                    }
                 },
                 other => anyhow::bail!("unsupported provider in runtime: {other}"),
             };
@@ -545,7 +555,11 @@ impl<'a> SessionRuntime<'a> {
                         let (output, success) = match self.registry.get(&call.name) {
                             Some(tool) => {
                                 if self.abort_signal.load(Ordering::Relaxed) {
-                                    return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
+                                    return self.finish_aborted_submit(
+                                        &turn_id,
+                                        &message_id,
+                                        turn_number,
+                                    );
                                 }
                                 let args: serde_json::Value =
                                     serde_json::from_str(&call.arguments).unwrap_or_default();
@@ -560,7 +574,10 @@ impl<'a> SessionRuntime<'a> {
                         self.emit_runtime_event(RuntimeEvent::ToolCallCompleted {
                             call_id: call.call_id.clone(),
                             name: call.name.clone(),
-                            output_preview: truncate(output.lines().next().unwrap_or("(empty)"), 80),
+                            output_preview: truncate(
+                                output.lines().next().unwrap_or("(empty)"),
+                                80,
+                            ),
                         });
                         self.events.emit(AgentEvent::ToolCallCompleted {
                             session_id: self.session.id.clone(),
@@ -568,7 +585,10 @@ impl<'a> SessionRuntime<'a> {
                             message_id: message_id.clone(),
                             tool_call_id: call.call_id.clone(),
                             tool_name: call.name.clone(),
-                            output_preview: truncate(output.lines().next().unwrap_or("(empty)"), 80),
+                            output_preview: truncate(
+                                output.lines().next().unwrap_or("(empty)"),
+                                80,
+                            ),
                             success,
                         });
 
@@ -776,7 +796,11 @@ async fn run_test_provider(
         return Ok(TurnResult::Text(response));
     }
 
-    let delay_ms = if latest_user.contains("hold-open") { 150 } else { 25 };
+    let delay_ms = if latest_user.contains("hold-open") {
+        150
+    } else {
+        25
+    };
 
     for chunk in response_chunks(&response, 4) {
         if abort_signal.load(Ordering::Relaxed) {
@@ -809,7 +833,9 @@ fn latest_test_user_prompt(history: &[serde_json::Value]) -> Option<String> {
     history.iter().rev().find_map(|item| {
         let item_type = item.get("type")?.as_str()?;
         if item_type == "message" && item.get("role")?.as_str()? == "user" {
-            item.get("content")?.as_str().map(|content| content.to_lowercase())
+            item.get("content")?
+                .as_str()
+                .map(|content| content.to_lowercase())
         } else {
             None
         }
@@ -967,51 +993,78 @@ struct SseDelta {
     content: Option<String>,
 }
 
-async fn send_openai(
-    auth: &ResolvedAuth,
-    model: &str,
-    session_id: &str,
-    turn_id: &str,
-    history: &[serde_json::Value],
-    registry: &ToolRegistry,
-    instructions: &str,
-    ws_disabled: &AtomicBool,
-    abort_signal: &AtomicBool,
-    events: &EventEmitter,
-    output_hook: Option<&dyn Fn(&str)>,
-) -> Result<TurnResult> {
-    if ws_disabled.load(Ordering::Relaxed) {
-        events.emit(AgentEvent::TransportSelected {
-            session_id: Some(session_id.to_string()),
-            turn_id: Some(turn_id.to_string()),
+struct OpenaiRequestContext<'a> {
+    model: &'a str,
+    session_id: &'a str,
+    turn_id: &'a str,
+    history: &'a [serde_json::Value],
+    registry: &'a ToolRegistry,
+    instructions: &'a str,
+    ws_disabled: &'a AtomicBool,
+    abort_signal: &'a AtomicBool,
+    events: &'a EventEmitter,
+    output_hook: Option<&'a dyn Fn(&str)>,
+}
+
+async fn send_openai(auth: &ResolvedAuth, ctx: OpenaiRequestContext<'_>) -> Result<TurnResult> {
+    if ctx.ws_disabled.load(Ordering::Relaxed) {
+        ctx.events.emit(AgentEvent::TransportSelected {
+            session_id: Some(ctx.session_id.to_string()),
+            turn_id: Some(ctx.turn_id.to_string()),
             provider: "openai".into(),
             transport: Transport::Sse,
         });
-        return send_openai_sse(auth, model, history, registry, instructions, abort_signal, output_hook)
-            .await;
+        return send_openai_sse(
+            auth,
+            ctx.model,
+            ctx.history,
+            ctx.registry,
+            ctx.instructions,
+            ctx.abort_signal,
+            ctx.output_hook,
+        )
+        .await;
     }
 
-    events.emit(AgentEvent::TransportSelected {
-        session_id: Some(session_id.to_string()),
-        turn_id: Some(turn_id.to_string()),
+    ctx.events.emit(AgentEvent::TransportSelected {
+        session_id: Some(ctx.session_id.to_string()),
+        turn_id: Some(ctx.turn_id.to_string()),
         provider: "openai".into(),
         transport: Transport::WebSocket,
     });
 
-    match send_openai_ws(auth, model, history, registry, instructions, abort_signal, output_hook).await {
+    match send_openai_ws(
+        auth,
+        ctx.model,
+        ctx.history,
+        ctx.registry,
+        ctx.instructions,
+        ctx.abort_signal,
+        ctx.output_hook,
+    )
+    .await
+    {
         Ok(response) => Ok(response),
         Err(err) => {
             let reason = format!("{err:#}");
-            ws_disabled.store(true, Ordering::Relaxed);
-            events.emit(AgentEvent::TransportFallback {
-                session_id: Some(session_id.to_string()),
-                turn_id: Some(turn_id.to_string()),
+            ctx.ws_disabled.store(true, Ordering::Relaxed);
+            ctx.events.emit(AgentEvent::TransportFallback {
+                session_id: Some(ctx.session_id.to_string()),
+                turn_id: Some(ctx.turn_id.to_string()),
                 from: Transport::WebSocket,
                 to: Transport::Sse,
                 reason,
             });
-            send_openai_sse(auth, model, history, registry, instructions, abort_signal, output_hook)
-                .await
+            send_openai_sse(
+                auth,
+                ctx.model,
+                ctx.history,
+                ctx.registry,
+                ctx.instructions,
+                ctx.abort_signal,
+                ctx.output_hook,
+            )
+            .await
         }
     }
 }
@@ -1129,12 +1182,12 @@ async fn send_openai_ws(
                         }
                     }
                     "response.output_item.added" => {
-                        if let Some(item) = &event.item {
-                            if item.r#type.as_deref() == Some("function_call") {
-                                current_call_id = item.call_id.clone().unwrap_or_default();
-                                current_call_name = item.name.clone().unwrap_or_default();
-                                current_call_args.clear();
-                            }
+                        if let Some(item) = &event.item
+                            && item.r#type.as_deref() == Some("function_call")
+                        {
+                            current_call_id = item.call_id.clone().unwrap_or_default();
+                            current_call_name = item.name.clone().unwrap_or_default();
+                            current_call_args.clear();
                         }
                     }
                     "response.function_call_arguments.delta" => {
@@ -1302,31 +1355,30 @@ fn process_openai_sse_block_with_tools(
 
     match event_type.as_str() {
         "response.output_text.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                if let Some(delta) = event.delta {
-                    if let Some(hook) = output_hook {
-                        hook(&delta);
-                    }
-                    full_response.push_str(&delta);
+            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
+                && let Some(delta) = event.delta
+            {
+                if let Some(hook) = output_hook {
+                    hook(&delta);
                 }
+                full_response.push_str(&delta);
             }
         }
         "response.output_item.added" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                if let Some(item) = &event.item {
-                    if item.r#type.as_deref() == Some("function_call") {
-                        *current_call_id = item.call_id.clone().unwrap_or_default();
-                        *current_call_name = item.name.clone().unwrap_or_default();
-                        current_call_args.clear();
-                    }
-                }
+            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
+                && let Some(item) = &event.item
+                && item.r#type.as_deref() == Some("function_call")
+            {
+                *current_call_id = item.call_id.clone().unwrap_or_default();
+                *current_call_name = item.name.clone().unwrap_or_default();
+                current_call_args.clear();
             }
         }
         "response.function_call_arguments.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                if let Some(delta) = event.delta {
-                    current_call_args.push_str(&delta);
-                }
+            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
+                && let Some(delta) = event.delta
+            {
+                current_call_args.push_str(&delta);
             }
         }
         "response.function_call_arguments.done" => {
@@ -1457,17 +1509,17 @@ fn process_zai_sse_line_with_hook(
             return Ok(true);
         }
 
-        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
-            if let Some(choices) = chunk.choices {
-                for choice in choices {
-                    if let Some(delta) = choice.delta {
-                        if let Some(content) = delta.content {
-                            if let Some(hook) = output_hook {
-                                hook(&content);
-                            }
-                            full_response.push_str(&content);
-                        }
+        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data)
+            && let Some(choices) = chunk.choices
+        {
+            for choice in choices {
+                if let Some(delta) = choice.delta
+                    && let Some(content) = delta.content
+                {
+                    if let Some(hook) = output_hook {
+                        hook(&content);
                     }
+                    full_response.push_str(&content);
                 }
             }
         }

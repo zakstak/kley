@@ -3,7 +3,7 @@
 mod harness;
 
 use harness::EventCollector;
-use kley::events::{event_channel, AgentEvent, Transport};
+use kley::events::{AgentEvent, Transport, event_channel};
 
 // ── Events arrive in order ──────────────────────────────────────────────────
 

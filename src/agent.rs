@@ -6,9 +6,7 @@ use anyhow::Result;
 use crate::auth::{self, CredentialStore};
 use crate::compact::CompactConfig;
 use crate::events::EventEmitter;
-use crate::runtime::{
-    AbortResult, RuntimeEvent, RuntimeHooks, SessionRuntime, SubmitResult,
-};
+use crate::runtime::{AbortResult, RuntimeEvent, RuntimeHooks, SessionRuntime, SubmitResult};
 use crate::store::Store;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,7 +4,7 @@
 //! Provides `TestContext`, builders, and helper utilities so integration
 //! tests stay DRY and expressive.
 
-use kley::events::{event_channel, AgentEvent, EventEmitter, EventReceiver};
+use kley::events::{AgentEvent, EventEmitter, EventReceiver, event_channel};
 use kley::store::{NewSession, NewTurn, Session, Store, Turn};
 use std::thread;
 

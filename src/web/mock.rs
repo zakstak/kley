@@ -1,10 +1,10 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::protocol::{
-    ResponseError, SelectedSession, SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent,
-    WebCommand, WebResponse, PROTOCOL_VERSION,
+    PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary, StateSnapshotData,
+    TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -284,11 +284,7 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
 
     events.push(UiEvent::TurnCompleted {
         event_id: format!("evt-turn-completed-{index:04}"),
-        ts: if has_tool_activity {
-            ts(17)
-        } else {
-            ts(15)
-        },
+        ts: if has_tool_activity { ts(17) } else { ts(15) },
         request_id: request_id.to_string(),
         session_id: session_id.to_string(),
         turn_id,
@@ -303,10 +299,10 @@ fn ts(second: u8) -> String {
 
 async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {
     let text = serde_json::to_string(&response).map_err(|_| ())?;
-    socket.send(Message::Text(text.into())).await.map_err(|_| ())
+    socket.send(Message::Text(text)).await.map_err(|_| ())
 }
 
 async fn send_event(socket: &mut WebSocket, event: UiEvent) -> Result<(), ()> {
     let text = serde_json::to_string(&event).map_err(|_| ())?;
-    socket.send(Message::Text(text.into())).await.map_err(|_| ())
+    socket.send(Message::Text(text)).await.map_err(|_| ())
 }

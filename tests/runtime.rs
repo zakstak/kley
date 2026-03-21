@@ -2,12 +2,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use futures_util::stream;
 use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
@@ -171,7 +171,10 @@ mod runtime {
         )
         .unwrap();
 
-        let result = runtime.submit_prompt("hello runtime".to_string()).await.unwrap();
+        let result = runtime
+            .submit_prompt("hello runtime".to_string())
+            .await
+            .unwrap();
         assert!(matches!(result, SubmitResult::Completed { .. }));
 
         let session = Session::get(&store, runtime.session_id()).unwrap();
@@ -209,7 +212,10 @@ mod runtime {
         let session = Session::get(&store, runtime.session_id()).unwrap();
         assert_eq!(session.status, SessionStatus::Active);
 
-        let submit = runtime.submit_prompt("still usable".to_string()).await.unwrap();
+        let submit = runtime
+            .submit_prompt("still usable".to_string())
+            .await
+            .unwrap();
         assert!(matches!(submit, SubmitResult::Completed { .. }));
 
         let turns = Turn::list_for_session(&store, runtime.session_id()).unwrap();
@@ -248,7 +254,10 @@ mod runtime {
         )
         .unwrap();
 
-        let _ = runtime.submit_prompt("hello transport".to_string()).await.unwrap();
+        let _ = runtime
+            .submit_prompt("hello transport".to_string())
+            .await
+            .unwrap();
 
         let events = receiver.drain();
         assert!(events.iter().any(|event| {
@@ -270,9 +279,11 @@ mod runtime {
                 }
             )
         }));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TokenRefreshed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TokenRefreshed { .. }))
+        );
     }
 
     #[tokio::test]
@@ -310,7 +321,11 @@ mod runtime {
         abort_task.await.unwrap();
 
         let events = receiver.drain();
-        assert!(events.iter().any(|event| matches!(event, AgentEvent::MessageDelta { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::MessageDelta { .. }))
+        );
         assert!(events.iter().any(|event| {
             matches!(event, AgentEvent::TurnFailed { error, .. } if error == "aborted")
         }));
@@ -320,7 +335,8 @@ mod runtime {
 
     #[tokio::test]
     async fn zai_sse_stream_honors_abort_signal() {
-        let server = spawn_app(Router::new().route("/chat/completions", post(slow_zai_sse_handler))).await;
+        let server =
+            spawn_app(Router::new().route("/chat/completions", post(slow_zai_sse_handler))).await;
         let store = shared_store();
         let abort_signal = Arc::new(AtomicBool::new(false));
         let (mut runtime, receiver) = runtime_with_abort_signal(
@@ -353,7 +369,11 @@ mod runtime {
         abort_task.await.unwrap();
 
         let events = receiver.drain();
-        assert!(events.iter().any(|event| matches!(event, AgentEvent::MessageDelta { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::MessageDelta { .. }))
+        );
         assert!(events.iter().any(|event| {
             matches!(event, AgentEvent::TurnFailed { error, .. } if error == "aborted")
         }));
@@ -399,7 +419,10 @@ mod runtime {
         )
         .unwrap();
 
-        let result = runtime.submit_prompt("please use a tool".to_string()).await.unwrap();
+        let result = runtime
+            .submit_prompt("please use a tool".to_string())
+            .await
+            .unwrap();
         assert!(matches!(result, SubmitResult::Aborted { .. }));
         assert!(!executed.load(Ordering::Relaxed));
     }
