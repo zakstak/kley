@@ -65,6 +65,10 @@ impl Tool for ReadFileTool {
             .map(|n| n as usize)
             .unwrap_or(total);
 
+        if total == 0 {
+            return Ok(format!("File: {path} (0 lines total)\n"));
+        }
+
         // Clamp to valid range
         let start = start.min(total).max(1);
         let end = end.min(total).max(start);
