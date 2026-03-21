@@ -123,8 +123,8 @@ case "${1:-} ${2:-}" in
     ;;
   "compose build")
     printf '%s\n' "$$" > "$state_dir/build.pid"
-    : > "$state_dir/build.started"
     trap 'printf term > "$state_dir/build.term"; sleep 1; printf exited > "$state_dir/build.exited"; exit 143' TERM INT
+    : > "$state_dir/build.started"
     while :; do :; done
     ;;
   *)
