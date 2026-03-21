@@ -132,6 +132,21 @@ mod tests {
     }
 
     #[test]
+    fn read_empty_file_reports_zero_lines() {
+        let f = temp_file("");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": null,
+                "end_line": null,
+            }))
+            .unwrap();
+        assert!(result.contains("File: "));
+        assert!(result.contains("(0 lines total)"));
+    }
+
+    #[test]
     fn read_not_found() {
         let tool = ReadFileTool;
         let result = tool
