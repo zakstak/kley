@@ -36,6 +36,9 @@ fn events_arrive_in_emission_order() {
         message_id: "msg-1".into(),
         context_used_chars: 180,
         context_max_chars: 1000,
+        input_tokens: Some(10),
+        output_tokens: Some(8),
+        total_tokens: Some(18),
     });
 
     // Drop emitter to close the channel

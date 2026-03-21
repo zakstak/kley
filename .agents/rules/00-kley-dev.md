@@ -9,3 +9,4 @@
 - Keep always-on rules compact. Load skill content on demand, never auto-inject full bodies.
 - No `unwrap()` in library code. Use `anyhow::Result` or `?`.
 - Prefer `eprintln!` for agent-visible output. `println!` is reserved for model response text.
+- Product surfaces: terminal TUI output is a debugging-first surface; extra diagnostic context is expected and encouraged. The web UI is the polished/final user-facing form.
