@@ -17,6 +17,20 @@ SCRIPT_MANIFEST_PATH="$SCRIPT_DIR/Cargo.toml"
 
 cd "$SCRIPT_DIR"
 
+if [ ! -e "/.dockerenv" ]; then
+  echo "error: self-improve.sh must run inside Docker" >&2
+  echo "hint: rerun with ./docker-session.sh self-improve.sh" >&2
+  exit 1
+fi
+
+if "$SCRIPT_DIR/preflight.sh"; then
+  :
+else
+  preflight_status=$?
+  echo "error: preflight failed; refusing to start self-improve" >&2
+  exit "$preflight_status"
+fi
+
 MAX_CYCLES="${1:-5}"
 TURNS_PER_CYCLE="${MAX_TURN_PER_CYCLE:-30}"
 LOG_DIR="$(pwd)/.self-improve-logs"

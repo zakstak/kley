@@ -8,6 +8,16 @@ fn self_improve_script() -> String {
     fs::read_to_string(path).expect("self-improve.sh should be readable")
 }
 
+fn docker_session_script() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker-session.sh");
+    fs::read_to_string(path).expect("docker-session.sh should be readable")
+}
+
+fn docker_entrypoint_script() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker-entrypoint.sh");
+    fs::read_to_string(path).expect("docker-entrypoint.sh should be readable")
+}
+
 fn assert_ordered_markers(script: &str, markers: &[&str], context: &str) {
     let mut cursor = 0;
     for marker in markers {
@@ -208,4 +218,70 @@ fn self_improve_prompt_requires_explicit_base_branch_guidance() {
         ],
         "self-improve base branch flow",
     );
+}
+
+#[test]
+fn self_improve_script_requires_docker_preflight_gate() {
+    let script = self_improve_script();
+
+    for required in [
+        "if [ ! -e \"/.dockerenv\" ]; then",
+        "error: self-improve.sh must run inside Docker",
+        "./docker-session.sh self-improve.sh",
+        "\"$SCRIPT_DIR/preflight.sh\"",
+        "error: preflight failed; refusing to start self-improve",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected self-improve script to contain {required:?}"
+        );
+    }
+
+    assert_ordered_markers(
+        &script,
+        &[
+            "cd \"$SCRIPT_DIR\"",
+            "if [ ! -e \"/.dockerenv\" ]; then",
+            "\"$SCRIPT_DIR/preflight.sh\"",
+            "LOG_DIR=",
+            "while (( cycle < MAX_CYCLES ))",
+        ],
+        "self-improve docker preflight gate",
+    );
+}
+
+#[test]
+fn docker_session_self_improve_uses_standard_container_entrypoint() {
+    let script = docker_session_script();
+
+    assert!(
+        script.contains("set -- self-improve.sh \"$@\""),
+        "expected docker-session.sh to normalize ./self-improve.sh to self-improve.sh"
+    );
+    assert!(
+        script.contains("docker compose run --rm --build \"$SERVICE_NAME\" \"$@\""),
+        "expected docker-session.sh to use the standard compose run path"
+    );
+    assert!(
+        !script.contains("--entrypoint bash"),
+        "expected docker-session.sh to preserve the normal container entrypoint"
+    );
+}
+
+#[test]
+fn docker_entrypoint_dispatches_self_improve_through_bootstrap() {
+    let script = docker_entrypoint_script();
+
+    for required in [
+        "if [ \"$1\" = \"self-improve.sh\" ] || [ \"$1\" = \"./self-improve.sh\" ] || [ \"$1\" = \"$WORKSPACE_DIR/self-improve.sh\" ]; then",
+        "bash \"$WORKSPACE_DIR/self-improve.sh\" \"$@\"",
+        "status=$?",
+        "fix_git_mount_ownership",
+        "exit \"$status\"",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected docker-entrypoint.sh to contain {required:?}"
+        );
+    }
 }
