@@ -53,21 +53,29 @@ impl Tool for ReadFileTool {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
 
-        let start = args
+        if total == 0 {
+            return Ok(format!("File: {path} (0 lines total)\n"));
+        }
+
+        let requested_start = args
             .get("start_line")
             .and_then(|v| v.as_u64())
             .map(|n| n.max(1) as usize)
             .unwrap_or(1);
-
-        let end = args
+        let requested_end = args
             .get("end_line")
             .and_then(|v| v.as_u64())
-            .map(|n| n as usize)
+            .map(|n| n.max(1) as usize)
             .unwrap_or(total);
 
-        // Clamp to valid range
-        let start = start.min(total).max(1);
-        let end = end.min(total).max(start);
+        if requested_start > requested_end {
+            return Ok(format!(
+                "Error: invalid range start_line={requested_start}, end_line={requested_end}. end_line must be >= start_line"
+            ));
+        }
+
+        let start = requested_start.min(total).max(1);
+        let end = requested_end.min(total).max(1);
 
         let mut output = format!("File: {path} ({total} lines total)\n");
         if start > 1 || end < total {
@@ -75,7 +83,7 @@ impl Tool for ReadFileTool {
         }
         output.push('\n');
 
-        for (i, line) in lines[start - 1..end].iter().enumerate() {
+        for (i, line) in lines[start - 1..=end - 1].iter().enumerate() {
             let line_num = start + i;
             output.push_str(&format!("{line_num}: {line}\n"));
         }
@@ -129,6 +137,55 @@ mod tests {
         assert!(!result.contains("1: a"));
         assert!(!result.contains("5: e"));
         assert!(result.contains("Showing lines 2-4"));
+    }
+
+    #[test]
+    fn read_empty_file() {
+        let f = temp_file("");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": 1,
+                "end_line": 1,
+            }))
+            .unwrap();
+
+        assert_eq!(
+            result,
+            format!("File: {} (0 lines total)\n", f.path().display())
+        );
+    }
+
+    #[test]
+    fn read_out_of_bounds_range_is_clamped() {
+        let f = temp_file("a\nb\n");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": 10,
+                "end_line": 20,
+            }))
+            .unwrap();
+
+        assert!(result.contains("2: b"));
+        assert!(!result.contains("1: a"));
+    }
+
+    #[test]
+    fn read_invalid_range_reports_error() {
+        let f = temp_file("a\nb\nc\n");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": 3,
+                "end_line": 2,
+            }))
+            .unwrap();
+
+        assert!(result.starts_with("Error: invalid range"));
     }
 
     #[test]
