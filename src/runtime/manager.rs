@@ -530,27 +530,9 @@ impl RuntimeManager {
             return;
         };
 
-        if result.is_err() {
-            let error = format!("{}", result.err().unwrap());
-            let _ = entry.events.send(RuntimeEventEnvelope {
-                request_id: request_id.to_string(),
-                event: AgentEvent::TurnFailed {
-                    session_id: session_id.to_string(),
-                    turn_id: turn_id.to_string(),
-                    model: entry.runtime.model.clone(),
-                    turn_number: 0,
-                    error,
-                },
-            });
-            entry.active_prompt = None;
-            entry.active_turn = None;
-            return;
-        }
-
-        entry.active_prompt = None;
-
-        match result.unwrap() {
-            SubmitResult::Completed { .. } => {
+        match result {
+            Ok(SubmitResult::Completed { .. }) => {
+                entry.active_prompt = None;
                 if entry
                     .active_turn
                     .as_ref()
@@ -560,7 +542,8 @@ impl RuntimeManager {
                     entry.active_turn = None;
                 }
             }
-            SubmitResult::Failed { .. } | SubmitResult::Aborted { .. } => {
+            Ok(SubmitResult::Failed { .. }) | Ok(SubmitResult::Aborted { .. }) => {
+                entry.active_prompt = None;
                 if entry
                     .active_turn
                     .as_ref()
@@ -569,6 +552,21 @@ impl RuntimeManager {
                 {
                     entry.active_turn = None;
                 }
+            }
+            Err(error) => {
+                let error = format!("{}", error);
+                let _ = entry.events.send(RuntimeEventEnvelope {
+                    request_id: request_id.to_string(),
+                    event: AgentEvent::TurnFailed {
+                        session_id: session_id.to_string(),
+                        turn_id: turn_id.to_string(),
+                        model: entry.runtime.model.clone(),
+                        turn_number: 0,
+                        error,
+                    },
+                });
+                entry.active_prompt = None;
+                entry.active_turn = None;
             }
         }
     }
