@@ -856,10 +856,33 @@ fn response_chunks(response: &str, target_parts: usize) -> Vec<String> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
+    if max == 0 {
+        return "…".to_string();
+    }
+
+    let char_count = s.chars().count();
+    if char_count <= max {
+        return s.to_string();
+    }
+
+    let truncated: String = s.chars().take(max).collect();
+    format!("{truncated}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_preserves_utf8_boundaries() {
+        let input = "🦀 test";
+        assert_eq!(truncate(input, 1), "🦀…");
+    }
+
+    #[test]
+    fn truncate_uses_ellipsis_when_truncating() {
+        assert_eq!(truncate("hello", 3), "hel…");
+        assert_eq!(truncate("hello", 5), "hello");
     }
 }
 
