@@ -1,6 +1,8 @@
 use std::fmt;
 use std::sync::mpsc;
 
+use crate::text::truncate_with_ascii_ellipsis;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
     TransportSelected {
@@ -196,15 +198,7 @@ impl fmt::Display for AgentEvent {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut end = max;
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &s[..end])
-    }
+    truncate_with_ascii_ellipsis(s, max)
 }
 
 #[cfg(test)]
@@ -219,7 +213,7 @@ mod tests {
     #[test]
     fn truncate_respects_utf8_char_boundaries() {
         let s = "A shell tool — execute commands";
-        assert_eq!(truncate(s, 15), "A shell tool ...");
+        assert_eq!(truncate(s, 15), "A shell tool — ...");
     }
 
     #[test]

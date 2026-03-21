@@ -12,6 +12,7 @@ use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter, Transport};
 use crate::store::{NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
+use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::ToolRegistry;
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
@@ -856,17 +857,7 @@ fn response_chunks(response: &str, target_parts: usize) -> Vec<String> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if max == 0 {
-        return "…".to_string();
-    }
-
-    let char_count = s.chars().count();
-    if char_count <= max {
-        return s.to_string();
-    }
-
-    let truncated: String = s.chars().take(max).collect();
-    format!("{truncated}…")
+    truncate_with_ascii_ellipsis(s, max)
 }
 
 #[cfg(test)]
@@ -876,12 +867,12 @@ mod tests {
     #[test]
     fn truncate_preserves_utf8_boundaries() {
         let input = "🦀 test";
-        assert_eq!(truncate(input, 1), "🦀…");
+        assert_eq!(truncate(input, 1), "🦀...");
     }
 
     #[test]
     fn truncate_uses_ellipsis_when_truncating() {
-        assert_eq!(truncate("hello", 3), "hel…");
+        assert_eq!(truncate("hello", 3), "hel...");
         assert_eq!(truncate("hello", 5), "hello");
     }
 }
