@@ -80,6 +80,7 @@ pub struct SelectedSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "type")]
 pub enum UiEvent {
     #[serde(rename = "state.snapshot")]

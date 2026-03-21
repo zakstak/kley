@@ -787,7 +787,7 @@ async fn load_turns(state: &WebAppState, session_id: &str) -> Result<Vec<Turn>> 
 
 fn turns_to_transcript(turns: &[Turn]) -> Vec<TranscriptEntry> {
     turns
-        .into_iter()
+        .iter()
         .map(|turn| TranscriptEntry {
             turn_number: turn.turn_number,
             kind: turn.kind.clone(),
