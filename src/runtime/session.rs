@@ -419,6 +419,8 @@ impl<'a> SessionRuntime<'a> {
             "role": "user",
             "content": input,
         }));
+        let (context_used_chars, context_max_chars) =
+            context_usage_chars(&self.history, self.compact_config.threshold_chars);
 
         if self.abort_signal.load(Ordering::Relaxed) {
             return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
@@ -429,6 +431,8 @@ impl<'a> SessionRuntime<'a> {
             turn_id: turn_id.clone(),
             model: self.model.clone(),
             turn_number,
+            context_used_chars,
+            context_max_chars,
         });
         self.events.emit(AgentEvent::MessageStarted {
             session_id: self.session.id.clone(),
@@ -642,13 +646,6 @@ impl<'a> SessionRuntime<'a> {
                     message_id: message_id.clone(),
                     content: response.clone(),
                 });
-                self.events.emit(AgentEvent::TurnCompleted {
-                    session_id: self.session.id.clone(),
-                    turn_id: turn_id.clone(),
-                    model: self.model.clone(),
-                    turn_number,
-                    message_id: message_id.clone(),
-                });
 
                 self.with_store(|store| {
                     Turn::append(
@@ -677,6 +674,18 @@ impl<'a> SessionRuntime<'a> {
                     "role": "assistant",
                     "content": response.clone(),
                 }));
+
+                let (context_used_chars, context_max_chars) =
+                    context_usage_chars(&self.history, self.compact_config.threshold_chars);
+                self.events.emit(AgentEvent::TurnCompleted {
+                    session_id: self.session.id.clone(),
+                    turn_id: turn_id.clone(),
+                    model: self.model.clone(),
+                    turn_number,
+                    message_id: message_id.clone(),
+                    context_used_chars,
+                    context_max_chars,
+                });
 
                 Ok(SubmitResult::Completed {
                     turn_id,
@@ -879,6 +888,11 @@ mod tests {
 
 fn build_input_items(history: &[serde_json::Value]) -> Vec<serde_json::Value> {
     history.to_vec()
+}
+
+fn context_usage_chars(history: &[serde_json::Value], max_chars: usize) -> (usize, usize) {
+    let used_chars = crate::compact::estimate_history_chars(history);
+    (used_chars, max_chars.max(1))
 }
 
 pub fn history_items_from_turns(turns: &[Turn]) -> Vec<serde_json::Value> {

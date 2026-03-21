@@ -4,6 +4,7 @@ use axum::{
     response::{Html, IntoResponse},
 };
 
+use crate::compact::CompactConfig;
 use crate::web::protocol::PROTOCOL_VERSION;
 
 #[derive(Template)]
@@ -11,6 +12,7 @@ use crate::web::protocol::PROTOCOL_VERSION;
 struct ShellTemplate {
     ws_path: &'static str,
     protocol_version: u32,
+    context_max_chars: usize,
 }
 
 const BINDERY_ICON: &str = include_str!("../../assets/bindery-icon.svg");
@@ -19,6 +21,7 @@ pub async fn root() -> Result<Html<String>, (StatusCode, &'static str)> {
     ShellTemplate {
         ws_path: "/ws",
         protocol_version: PROTOCOL_VERSION,
+        context_max_chars: CompactConfig::default().threshold_chars,
     }
     .render()
     .map(Html)
