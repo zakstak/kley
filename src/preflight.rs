@@ -632,9 +632,18 @@ mod tests {
 
     #[test]
     fn report_rendering_includes_summary_and_failure_guidance() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path();
+        let work_dir = repo_root.join("nested/worktree");
+        let manifest_path = repo_root.join("Cargo.toml");
+
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::write(&manifest_path, "[package]\nname = 'kley'\n").unwrap();
+        fs::write(repo_root.join("self-improve.sh"), "#!/usr/bin/env bash\n").unwrap();
+
         let env = RuntimeEnv {
             in_docker: false,
-            current_dir: PathBuf::from("/workspace"),
+            current_dir: work_dir.clone(),
             current_exe: PathBuf::from("/tmp/kley"),
         };
         let expected_kley_help_command = resolve_launcher(&env).help_command();
@@ -741,17 +750,12 @@ mod tests {
             ),
         ]);
 
-        let env = RuntimeEnv {
-            in_docker: false,
-            current_dir: PathBuf::from("/workspace"),
-            current_exe: PathBuf::from("/tmp/kley"),
-        };
         let report = build_report(&runner, &env);
         let mut rendered = Vec::new();
         report.write_to(&mut rendered).unwrap();
         let text = String::from_utf8(rendered).unwrap();
 
-        assert!(text.contains("── Running from: /workspace ──"));
+        assert!(text.contains(&format!("── Running from: {} ──", work_dir.display())));
         assert!(text.contains("   GitHub:    saga-agent"));
         assert!(text.contains("   Remote:    (none reachable)"));
         assert!(text.contains("  ✗ can fetch from a remote"));
