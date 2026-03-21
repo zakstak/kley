@@ -251,7 +251,7 @@ fn self_improve_script_requires_docker_preflight_gate() {
 }
 
 #[test]
-fn docker_session_self_improve_uses_standard_container_entrypoint() {
+fn docker_session_self_improve_uses_standard_container_entrypoint_and_rebuilds_afterward() {
     let script = docker_session_script();
 
     assert!(
@@ -265,6 +265,27 @@ fn docker_session_self_improve_uses_standard_container_entrypoint() {
     assert!(
         !script.contains("--entrypoint bash"),
         "expected docker-session.sh to preserve the normal container entrypoint"
+    );
+
+    for required in [
+        "docker compose run --rm --build \"$SERVICE_NAME\" \"$@\"",
+        "docker compose build \"$SERVICE_NAME\"",
+        "build_status=$?",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected docker-session.sh to contain {required:?}"
+        );
+    }
+
+    assert_ordered_markers(
+        &script,
+        &[
+            "set -- self-improve.sh \"$@\"",
+            "docker compose run --rm --build \"$SERVICE_NAME\" \"$@\"",
+            "docker compose build \"$SERVICE_NAME\"",
+        ],
+        "docker-session self-improve flow",
     );
 }
 
