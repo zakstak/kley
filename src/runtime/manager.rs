@@ -322,13 +322,15 @@ impl RuntimeManager {
             });
         }
 
+        let (baseline_used_chars, baseline_max_chars) = entry.last_context_usage.unwrap_or((0, 1));
+
         entry.active_turn = Some(ActiveTurnReplay {
             request_id,
             turn_id,
             message_id,
             content: String::new(),
-            context_used_chars: 0,
-            context_max_chars: 1,
+            context_used_chars: baseline_used_chars,
+            context_max_chars: baseline_max_chars.max(1),
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -339,9 +341,7 @@ impl RuntimeManager {
     pub fn context_usage_chars(&self, session_id: &str) -> Option<(usize, usize)> {
         let sessions = self.lock_sessions();
         let entry = sessions.get(session_id)?;
-        if let Some(active_turn) = &entry.active_turn
-            && active_turn.context_used_chars > 0
-        {
+        if let Some(active_turn) = &entry.active_turn {
             return Some((
                 active_turn.context_used_chars,
                 active_turn.context_max_chars,
