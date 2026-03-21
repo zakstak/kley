@@ -99,15 +99,17 @@ impl Tool for ShellTool {
                 // Count total lines before truncation
                 let total_lines = combined.lines().count();
 
-                // Truncate if too large
+                // Truncate if too large.
                 let output_text = if combined.len() > MAX_OUTPUT_BYTES {
                     let half = MAX_OUTPUT_BYTES / 2;
-                    let head = &combined[..half];
-                    let tail = &combined[combined.len() - half..];
-                    format!(
-                        "{head}\n\n... ({} bytes truncated) ...\n\n{tail}",
-                        combined.len() - MAX_OUTPUT_BYTES
-                    )
+                    let head_end = char_boundary_before_or_at(&combined, half);
+                    let tail_start = char_boundary_at_or_after(&combined, combined.len() - half);
+                    let output_bytes = head_end + (combined.len() - tail_start);
+                    let truncated_bytes = combined.len().saturating_sub(output_bytes);
+
+                    let head = &combined[..head_end];
+                    let tail = &combined[tail_start..];
+                    format!("{head}\n\n... ({truncated_bytes} bytes truncated) ...\n\n{tail}")
                 } else {
                     combined
                 };
@@ -120,6 +122,26 @@ impl Tool for ShellTool {
             Err(e) => Ok(format!("Error: failed to execute command: {e}")),
         }
     }
+}
+
+/// Return the greatest byte index <= `limit` that is a char boundary.
+fn char_boundary_before_or_at(s: &str, limit: usize) -> usize {
+    s.char_indices()
+        .map(|(idx, _)| idx)
+        .chain(std::iter::once(s.len()))
+        .filter(|&idx| idx <= limit)
+        .max()
+        .unwrap_or_default()
+}
+
+/// Return the smallest byte index >= `start` that is a char boundary.
+fn char_boundary_at_or_after(s: &str, start: usize) -> usize {
+    let start = start.min(s.len());
+    s.char_indices()
+        .map(|(idx, _)| idx)
+        .chain(std::iter::once(s.len()))
+        .find(|&idx| idx >= start)
+        .unwrap_or(s.len())
 }
 
 #[cfg(test)]
@@ -169,5 +191,22 @@ mod tests {
             .execute(serde_json::json!({"command": "true"}))
             .unwrap();
         assert!(result.contains("Duration:"));
+    }
+
+    #[test]
+    fn shell_truncates_unicode_output_without_panic() {
+        let tool = ShellTool::new();
+        // "界" is 3 bytes in UTF-8. With odd-length multibyte output,
+        // naive byte slicing by midpoint can panic with "byte index not on char boundary".
+        let unicode_count = 35_001;
+        let result = tool
+            .execute(serde_json::json!({
+                "command": format!("python3 -c 'print(\"界\" * {unicode_count})'"),
+            }))
+            .unwrap();
+
+        assert!(result.contains("... ("));
+        assert!(result.contains("Exit code: 0"));
+        assert!(result.contains("界"));
     }
 }

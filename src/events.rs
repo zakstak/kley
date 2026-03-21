@@ -199,7 +199,32 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_keeps_short_strings() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_respects_utf8_char_boundaries() {
+        let s = "A shell tool — execute commands";
+        assert_eq!(truncate(s, 15), "A shell tool ...");
+    }
+
+    #[test]
+    fn truncate_handles_zero_max() {
+        assert_eq!(truncate("hello", 0), "...");
     }
 }
 
