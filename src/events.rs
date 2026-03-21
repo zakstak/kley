@@ -63,6 +63,8 @@ pub enum AgentEvent {
         tool_name: String,
         output_preview: String,
         success: bool,
+        context_used_chars: usize,
+        context_max_chars: usize,
     },
     TurnCompleted {
         session_id: String,
