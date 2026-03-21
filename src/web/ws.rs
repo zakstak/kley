@@ -14,7 +14,7 @@ use crate::compact::{CompactConfig, estimate_history_chars};
 use crate::events::AgentEvent;
 use crate::runtime::{
     AbortTurnError, ActiveTurnReplay, AttachControllerError, RuntimeEventEnvelope,
-    SubmitPromptError, SubmitPromptOutcome, history_items_from_turns,
+    SubmitPromptError, SubmitPromptOutcome,
 };
 use crate::store::{self, NewSession, Session, Turn};
 
@@ -528,7 +528,13 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
         .runtime_manager
         .active_turn(session_id)
         .map(active_turn_snapshot);
-    let context_usage = estimate_context_usage(&turns, active_turn.as_ref());
+    let context_usage = if let Some((used_chars, max_chars)) =
+        state.runtime_manager.context_usage_chars(session_id)
+    {
+        context_usage_from_chars(used_chars, max_chars)
+    } else {
+        estimate_persisted_context_usage(&turns)
+    };
 
     Ok(StateSnapshotData {
         protocol_version: PROTOCOL_VERSION,
@@ -541,28 +547,19 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
     })
 }
 
-fn estimate_context_usage(
-    turns: &[Turn],
-    active_turn: Option<&ActiveTurnSnapshot>,
-) -> ContextUsage {
-    let mut history_items = history_items_from_turns(turns);
-    if let Some(active) = active_turn
-        && !active.content.is_empty()
-    {
-        history_items.push(json!({
-            "type": "message",
-            "role": "assistant",
-            "content": active.content,
-        }));
-    }
-
-    let used_chars = estimate_history_chars(&history_items);
+fn estimate_persisted_context_usage(turns: &[Turn]) -> ContextUsage {
+    let used_chars = estimate_history_chars(&crate::runtime::history_items_from_turns(turns));
     let max_chars = CompactConfig::default().threshold_chars;
-    let percent_used = ((used_chars.saturating_mul(100)) / max_chars.max(1)).min(100) as u8;
+    context_usage_from_chars(used_chars, max_chars)
+}
+
+fn context_usage_from_chars(used_chars: usize, max_chars: usize) -> ContextUsage {
+    let clamped_max = max_chars.max(1);
+    let percent_used = ((used_chars.saturating_mul(100)) / clamped_max).min(100) as u8;
 
     ContextUsage {
         used_chars,
-        max_chars,
+        max_chars: clamped_max,
         percent_used,
     }
 }

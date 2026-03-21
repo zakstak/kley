@@ -27,6 +27,8 @@ pub struct ActiveTurnReplay {
     pub turn_id: String,
     pub message_id: String,
     pub content: String,
+    pub context_used_chars: usize,
+    pub context_max_chars: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +214,7 @@ struct ManagedSession {
     settings: Option<String>,
     controller_id: Option<String>,
     active_turn: Option<ActiveTurnReplay>,
+    last_context_usage: Option<(usize, usize)>,
     active_prompt: Option<ActivePrompt>,
     events: broadcast::Sender<RuntimeEventEnvelope>,
 }
@@ -246,6 +249,7 @@ impl RuntimeManager {
                 settings: session.settings.clone(),
                 controller_id: None,
                 active_turn: None,
+                last_context_usage: None,
                 active_prompt: None,
                 events: broadcast::channel(256).0,
             });
@@ -318,8 +322,24 @@ impl RuntimeManager {
             turn_id,
             message_id,
             content: String::new(),
+            context_used_chars: 0,
+            context_max_chars: 1,
         });
         Ok(())
+    }
+
+    pub fn context_usage_chars(&self, session_id: &str) -> Option<(usize, usize)> {
+        let sessions = self.lock_sessions();
+        let entry = sessions.get(session_id)?;
+        if let Some(active_turn) = &entry.active_turn
+            && active_turn.context_used_chars > 0
+        {
+            return Some((
+                active_turn.context_used_chars,
+                active_turn.context_max_chars,
+            ));
+        }
+        entry.last_context_usage
     }
 
     pub fn active_turn(&self, session_id: &str) -> Option<ActiveTurnReplay> {
@@ -474,6 +494,38 @@ impl RuntimeManager {
             && let Some(active_turn) = entry.active_turn.as_mut()
         {
             active_turn.content.push_str(delta);
+            active_turn.context_used_chars =
+                active_turn.context_used_chars.saturating_add(delta.len());
+            entry.last_context_usage = Some((
+                active_turn.context_used_chars,
+                active_turn.context_max_chars,
+            ));
+        }
+
+        if let AgentEvent::TurnStarted {
+            turn_id,
+            context_used_chars,
+            context_max_chars,
+            ..
+        } = &event
+            && let Some(active_turn) = entry.active_turn.as_mut()
+            && &active_turn.turn_id == turn_id
+        {
+            active_turn.context_used_chars = *context_used_chars;
+            active_turn.context_max_chars = (*context_max_chars).max(1);
+            entry.last_context_usage = Some((
+                active_turn.context_used_chars,
+                active_turn.context_max_chars,
+            ));
+        }
+
+        if let AgentEvent::TurnCompleted {
+            context_used_chars,
+            context_max_chars,
+            ..
+        } = &event
+        {
+            entry.last_context_usage = Some((*context_used_chars, (*context_max_chars).max(1)));
         }
 
         let _ = entry.events.send(RuntimeEventEnvelope {

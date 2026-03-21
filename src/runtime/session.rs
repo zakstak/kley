@@ -419,6 +419,17 @@ impl<'a> SessionRuntime<'a> {
             "role": "user",
             "content": input,
         }));
+
+        crate::compact::maybe_compact(
+            &self.resolved,
+            &self.model,
+            &mut self.history,
+            &self.compact_config,
+            &self.events,
+        )
+        .await
+        .ok();
+
         let (context_used_chars, context_max_chars) =
             context_usage_chars(&self.history, self.compact_config.threshold_chars);
 
