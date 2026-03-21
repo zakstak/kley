@@ -459,6 +459,7 @@ impl<'a> SessionRuntime<'a> {
         });
 
         self.active_turn = true;
+        let mut aggregated_usage: Option<TokenUsage> = None;
         let final_text = loop {
             crate::compact::maybe_compact(
                 &self.resolved,
@@ -535,11 +536,15 @@ impl<'a> SessionRuntime<'a> {
             };
 
             match result {
-                Ok((TurnResult::Text(text), usage)) => break Ok((text, usage)),
+                Ok((TurnResult::Text(text), usage)) => {
+                    merge_token_usage(&mut aggregated_usage, usage);
+                    break Ok((text, aggregated_usage.clone()));
+                }
                 Ok((TurnResult::Aborted, _)) => {
                     return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
                 }
-                Ok((TurnResult::ToolCalls(calls), _)) => {
+                Ok((TurnResult::ToolCalls(calls), usage)) => {
+                    merge_token_usage(&mut aggregated_usage, usage);
                     for call in &calls {
                         if self.abort_signal.load(Ordering::Relaxed) {
                             return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
@@ -599,25 +604,12 @@ impl<'a> SessionRuntime<'a> {
                             None => (format!("Error: unknown tool '{}'", call.name), false),
                         };
 
+                        let output_preview =
+                            truncate(output.lines().next().unwrap_or("(empty)"), 80);
                         self.emit_runtime_event(RuntimeEvent::ToolCallCompleted {
                             call_id: call.call_id.clone(),
                             name: call.name.clone(),
-                            output_preview: truncate(
-                                output.lines().next().unwrap_or("(empty)"),
-                                80,
-                            ),
-                        });
-                        self.events.emit(AgentEvent::ToolCallCompleted {
-                            session_id: self.session.id.clone(),
-                            turn_id: turn_id.clone(),
-                            message_id: message_id.clone(),
-                            tool_call_id: call.call_id.clone(),
-                            tool_name: call.name.clone(),
-                            output_preview: truncate(
-                                output.lines().next().unwrap_or("(empty)"),
-                                80,
-                            ),
-                            success,
+                            output_preview: output_preview.clone(),
                         });
 
                         self.with_store(|store| {
@@ -651,6 +643,20 @@ impl<'a> SessionRuntime<'a> {
                             "call_id": call.call_id,
                             "output": output,
                         }));
+
+                        let (context_used_chars, context_max_chars) =
+                            context_usage_chars(&self.history, self.compact_config.threshold_chars);
+                        self.events.emit(AgentEvent::ToolCallCompleted {
+                            session_id: self.session.id.clone(),
+                            turn_id: turn_id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: call.call_id.clone(),
+                            tool_name: call.name.clone(),
+                            output_preview,
+                            success,
+                            context_used_chars,
+                            context_max_chars,
+                        });
                     }
                     continue;
                 }
@@ -1669,6 +1675,19 @@ impl UsagePayload {
             }),
             _ => None,
         }
+    }
+}
+
+fn merge_token_usage(aggregate: &mut Option<TokenUsage>, usage: Option<TokenUsage>) {
+    let Some(usage) = usage else {
+        return;
+    };
+    if let Some(current) = aggregate.as_mut() {
+        current.input_tokens = current.input_tokens.saturating_add(usage.input_tokens);
+        current.output_tokens = current.output_tokens.saturating_add(usage.output_tokens);
+        current.total_tokens = current.total_tokens.saturating_add(usage.total_tokens);
+    } else {
+        *aggregate = Some(usage);
     }
 }
 

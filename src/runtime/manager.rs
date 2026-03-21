@@ -532,6 +532,21 @@ impl RuntimeManager {
             ));
         }
 
+        if let AgentEvent::ToolCallCompleted {
+            context_used_chars,
+            context_max_chars,
+            ..
+        } = &event
+            && let Some(active_turn) = entry.active_turn.as_mut()
+        {
+            active_turn.context_used_chars = *context_used_chars;
+            active_turn.context_max_chars = (*context_max_chars).max(1);
+            entry.last_context_usage = Some((
+                active_turn.context_used_chars,
+                active_turn.context_max_chars,
+            ));
+        }
+
         if let AgentEvent::TurnStarted {
             turn_id,
             context_used_chars,
