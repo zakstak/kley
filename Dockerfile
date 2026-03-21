@@ -38,7 +38,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     rm -rf /var/lib/apt/lists/*
 
 # Install gitleaks for secret scanning
-RUN curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+RUN GITLEAKS_VERSION="$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep -oE '"tag_name":\s*"v[^"]+"' | cut -d '"' -f4)" && \
+    curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION#v}_linux_x64.tar.gz" \
       | tar xz -C /usr/local/bin gitleaks
 
 # Install Rust toolchain + rust-analyzer LSP
@@ -46,13 +47,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 RUN /root/.cargo/bin/rustup component add rust-analyzer
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install Node.js 20 LTS via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.26.1
-RUN curl -fsSL https://go.dev/dl/go1.26.1.linux-amd64.tar.gz \
+RUN GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text | head -n1)" && \
+    curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" \
       | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
