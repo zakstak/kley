@@ -12,5 +12,6 @@ pub mod preflight;
 pub mod runtime;
 pub mod skills;
 pub mod store;
+mod text;
 pub mod tools;
 pub mod web;
