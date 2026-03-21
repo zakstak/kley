@@ -1136,6 +1136,7 @@ async fn send_openai(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_openai_ws(
     auth: &ResolvedAuth,
     model: &str,
@@ -1306,6 +1307,7 @@ async fn send_openai_ws(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_openai_sse(
     auth: &ResolvedAuth,
     model: &str,
@@ -1405,6 +1407,7 @@ async fn send_openai_sse(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_openai_sse_block_with_tools(
     block: &str,
     full_response: &mut String,
