@@ -425,6 +425,7 @@ impl SelfImproveManager {
 
             let outcome = match (active.stop_requested, exit_code) {
                 (true, _) => "stopped".to_string(),
+                (_, _) if active.latest_status == "blocked" => "failed".to_string(),
                 (_, Some(0)) => "success".to_string(),
                 _ => "failed".to_string(),
             };
@@ -447,7 +448,11 @@ impl SelfImproveManager {
 
             (
                 record,
-                format!("run finished outcome={} exit_code={:?}", outcome, exit_code),
+                if active.latest_status == "blocked" {
+                    active.latest_detail
+                } else {
+                    format!("run finished outcome={} exit_code={:?}", outcome, exit_code)
+                },
             )
         };
 
@@ -887,6 +892,48 @@ mod tests {
         assert_eq!(
             active.log_tail,
             vec!["error: decryption failed".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_run_preserves_blocked_failure_detail_on_clean_exit() {
+        let manager = SelfImproveManager::new();
+        let mut events = manager.subscribe();
+
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.active = Some(ActiveRunState {
+                run_id: "self-improve-1".to_string(),
+                pid: 42,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                max_cycles: 5,
+                turns_per_cycle: 30,
+                stop_requested: false,
+                latest_status: "blocked".to_string(),
+                latest_detail: "error: decryption failed".to_string(),
+                log_tail: VecDeque::from(vec![
+                    "STATUS: blocked".to_string(),
+                    "[stderr] error: decryption failed".to_string(),
+                ]),
+            });
+        }
+
+        manager.finalize_run("self-improve-1", Some(0)).await;
+
+        let snapshot = manager.snapshot().await;
+        assert!(snapshot.active_run.is_none());
+        assert_eq!(snapshot.history[0].outcome, "failed");
+
+        let mut terminal_status = None;
+        while let Ok(event) = events.try_recv() {
+            if let SelfImproveEvent::Status { status, detail, .. } = event {
+                terminal_status = Some((status, detail));
+            }
+        }
+
+        assert_eq!(
+            terminal_status,
+            Some(("failed".to_string(), "error: decryption failed".to_string(),))
         );
     }
 }

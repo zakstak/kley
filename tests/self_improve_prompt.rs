@@ -18,6 +18,11 @@ fn docker_entrypoint_script() -> String {
     fs::read_to_string(path).expect("docker-entrypoint.sh should be readable")
 }
 
+fn docker_compose_manifest() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker-compose.yml");
+    fs::read_to_string(path).expect("docker-compose.yml should be readable")
+}
+
 fn assert_ordered_markers(script: &str, markers: &[&str], context: &str) {
     let mut cursor = 0;
     for marker in markers {
@@ -296,6 +301,16 @@ fn docker_session_self_improve_uses_standard_container_entrypoint_and_rebuilds_a
             "docker compose build \"$SERVICE_NAME\"",
         ],
         "docker-session self-improve flow",
+    );
+}
+
+#[test]
+fn docker_compose_forwards_age_work_factor_into_container_env() {
+    let compose = docker_compose_manifest();
+
+    assert!(
+        compose.contains("KLEY_AGE_MAX_WORK_FACTOR=${KLEY_AGE_MAX_WORK_FACTOR:-}"),
+        "expected docker-compose.yml to forward KLEY_AGE_MAX_WORK_FACTOR into the container"
     );
 }
 
