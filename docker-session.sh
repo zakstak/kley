@@ -52,17 +52,6 @@ run_docker_child() {
 	return "$status"
 }
 
-compose_run_args() {
-	local -a args=(docker compose run --rm --build)
-
-	if [ -n "${KLEY_AGE_MAX_WORK_FACTOR:-}" ]; then
-		args+=(-e "KLEY_AGE_MAX_WORK_FACTOR=${KLEY_AGE_MAX_WORK_FACTOR}")
-	fi
-
-	args+=("$SERVICE_NAME" "$@")
-	printf '%s\0' "${args[@]}"
-}
-
 if [ "$#" -eq 0 ]; then
 	set -- chat
 fi
@@ -78,16 +67,28 @@ elif [ "$1" = "self-improve.sh" ]; then
 fi
 
 if [ "$REBUILD_AFTER_RUN" -eq 0 ]; then
-	mapfile -d '' -t docker_args < <(compose_run_args "$@")
-	exec "${docker_args[@]}"
+	if [ -n "${KLEY_AGE_MAX_WORK_FACTOR:-}" ]; then
+		exec docker compose run --rm --build \
+			-e "KLEY_AGE_MAX_WORK_FACTOR=${KLEY_AGE_MAX_WORK_FACTOR}" \
+			"$SERVICE_NAME" "$@"
+	fi
+
+	exec docker compose run --rm --build "$SERVICE_NAME" "$@"
 fi
 
 trap 'forward_signal TERM 143' TERM
 trap 'forward_signal INT 130' INT
 
 run_status=0
-mapfile -d '' -t docker_args < <(compose_run_args "$@")
-if run_docker_child "${docker_args[@]}"; then
+if [ -n "${KLEY_AGE_MAX_WORK_FACTOR:-}" ]; then
+	if run_docker_child docker compose run --rm --build \
+		-e "KLEY_AGE_MAX_WORK_FACTOR=${KLEY_AGE_MAX_WORK_FACTOR}" \
+		"$SERVICE_NAME" "$@"; then
+		:
+	else
+		run_status=$?
+	fi
+elif run_docker_child docker compose run --rm --build "$SERVICE_NAME" "$@"; then
 	:
 else
 	run_status=$?
