@@ -99,6 +99,7 @@ pub struct SelfImproveActiveRun {
     pub turns_per_cycle: u32,
     pub stop_requested: bool,
     pub latest_status: String,
+    pub latest_detail: String,
     pub log_tail: Vec<String>,
 }
 

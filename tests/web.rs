@@ -183,6 +183,62 @@ mod web {
     }
 
     #[tokio::test]
+    async fn root_self_improve_panel_supports_retrospective_status_detail() {
+        let response = kley::web::router::app_with_state(test_state())
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            html.contains("const statusDetail = item && item.status_detail"),
+            "expected self-improve panel to read retrospective status detail"
+        );
+        assert!(
+            html.contains("if (statusDetail)"),
+            "expected self-improve panel to guard optional status detail rendering"
+        );
+        assert!(
+            html.contains("detail.textContent = statusDetail"),
+            "expected self-improve panel to render retrospective status detail as text"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_self_improve_panel_supports_live_status_detail_rendering() {
+        let response = kley::web::router::app_with_state(test_state())
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            html.contains("self-improve-detail"),
+            "expected self-improve panel to include a live detail node"
+        );
+        assert!(
+            html.contains("frame.error && frame.error.message"),
+            "expected self-improve panel to render response error messages"
+        );
+        assert!(
+            html.contains("renderSelfImproveStatus(frame.status || 'running', frame.detail || '')"),
+            "expected self-improve panel to render live self-improve status detail"
+        );
+        assert!(
+            html.contains("typeof running.latest_detail === 'string' ? running.latest_detail : state.selfImproveDetail"),
+            "expected self-improve panel to restore live detail from active snapshots"
+        );
+    }
+
+    #[tokio::test]
     async fn root_serves_bindery_icon() {
         let response = kley::web::router::app_with_state(test_state())
             .oneshot(
@@ -842,6 +898,29 @@ mod web {
         assert_eq!(response["request_id"], "req-self-get-1");
         assert!(response["data"]["history"].is_array());
         assert!(response["data"]["recent_logs"].is_array());
+    }
+
+    #[tokio::test]
+    async fn self_improve_start_response_includes_active_run_latest_detail() {
+        let server = spawn_server().await;
+        let mut socket = connect_ws_path(server.addr, "/ws/self-improve").await;
+
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"self_improve.start","request_id":"req-self-start-1","max_cycles":1,"turns_per_cycle":1}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let response = recv_json(&mut socket).await;
+        assert_eq!(response["type"], "response.ok");
+        assert_eq!(response["request_id"], "req-self-start-1");
+        assert_eq!(response["data"]["active_run"]["latest_status"], "starting");
+        assert!(response["data"]["active_run"]["latest_detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with("started self-improve pid=")));
     }
 
     #[tokio::test]

@@ -72,7 +72,14 @@ struct ActiveRunState {
     turns_per_cycle: u32,
     stop_requested: bool,
     latest_status: String,
+    latest_detail: String,
     log_tail: VecDeque<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedStatusLine {
+    status: String,
+    detail: Option<String>,
 }
 
 impl SelfImproveManager {
@@ -105,6 +112,7 @@ impl SelfImproveManager {
                     turns_per_cycle: active.turns_per_cycle,
                     stop_requested: active.stop_requested,
                     latest_status: active.latest_status.clone(),
+                    latest_detail: active.latest_detail.clone(),
                     log_tail: active.log_tail.iter().cloned().collect(),
                 }),
                 inner.history.clone(),
@@ -113,7 +121,7 @@ impl SelfImproveManager {
 
         let (recent_logs, retrospectives) = self.load_artifacts();
         SelfImproveSnapshotData {
-            available: Path::new("/.dockerenv").exists(),
+            available: self.launch_supported(),
             active_run,
             history,
             recent_logs,
@@ -126,13 +134,6 @@ impl SelfImproveManager {
         max_cycles: Option<u32>,
         turns_per_cycle: Option<u32>,
     ) -> Result<SelfImproveSnapshotData, SelfImproveError> {
-        if !Path::new("/.dockerenv").exists() {
-            return Err(SelfImproveError::new(
-                "unsupported_environment",
-                "self-improve requires Docker; run web server in-container",
-            ));
-        }
-
         let cycles = max_cycles
             .unwrap_or(DEFAULT_MAX_CYCLES)
             .clamp(1, MAX_CYCLES);
@@ -140,7 +141,7 @@ impl SelfImproveManager {
             .unwrap_or(DEFAULT_TURNS_PER_CYCLE)
             .clamp(1, MAX_TURNS_PER_CYCLE);
 
-        let (run_id, child, pid) = {
+        let (run_id, child, start_detail) = {
             let mut inner = self.inner.lock().await;
             if inner.active.is_some() {
                 return Err(SelfImproveError::new(
@@ -152,16 +153,7 @@ impl SelfImproveManager {
             let run_id = format!("self-improve-{}", inner.next_run_seq);
             inner.next_run_seq += 1;
 
-            let mut child = Command::new("setsid");
-            child
-                .arg("bash")
-                .arg("self-improve.sh")
-                .arg(cycles.to_string())
-                .current_dir(&self.repo_root)
-                .env("MAX_TURN_PER_CYCLE", turns.to_string())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .stdin(std::process::Stdio::null());
+            let mut child = self.spawn_command(cycles, turns)?;
 
             let child = child.spawn().map_err(|err| {
                 SelfImproveError::new("process_spawn_failed", format!("failed to start: {err}"))
@@ -170,6 +162,7 @@ impl SelfImproveManager {
             let pid = child.id().ok_or_else(|| {
                 SelfImproveError::new("process_spawn_failed", "started process without pid")
             })?;
+            let start_detail = format!("started self-improve pid={pid}");
 
             inner.active = Some(ActiveRunState {
                 run_id: run_id.clone(),
@@ -179,16 +172,17 @@ impl SelfImproveManager {
                 turns_per_cycle: turns,
                 stop_requested: false,
                 latest_status: "starting".to_string(),
+                latest_detail: start_detail.clone(),
                 log_tail: VecDeque::new(),
             });
 
-            (run_id, child, pid)
+            (run_id, child, start_detail)
         };
 
         let _ = self.events.send(SelfImproveEvent::Status {
             run_id: run_id.clone(),
             status: "starting".to_string(),
-            detail: format!("started self-improve pid={pid}"),
+            detail: start_detail,
         });
         self.broadcast_snapshot().await;
 
@@ -213,6 +207,7 @@ impl SelfImproveManager {
             active.latest_status = "stopping".to_string();
             (active.pid, active.run_id.clone())
         };
+        let stop_detail = format!("sent SIGTERM to process group -{pid}");
 
         let process_group = OsString::from(format!("-{pid}"));
         let status = Command::new("kill")
@@ -250,10 +245,19 @@ impl SelfImproveManager {
             }
         }
 
+        {
+            let mut inner = self.inner.lock().await;
+            if let Some(active) = inner.active.as_mut()
+                && active.run_id == run_id
+            {
+                active.latest_detail = stop_detail.clone();
+            }
+        }
+
         let _ = self.events.send(SelfImproveEvent::Status {
             run_id,
             status: "stopping".to_string(),
-            detail: format!("sent SIGTERM to process group -{pid}"),
+            detail: stop_detail,
         });
         self.broadcast_snapshot().await;
         Ok(self.snapshot().await)
@@ -366,8 +370,20 @@ impl SelfImproveManager {
             }
 
             if let Some(parsed) = parse_status_line(&line) {
-                active.latest_status = parsed.clone();
-                status_update = Some(parsed);
+                let detail = parsed
+                    .detail
+                    .clone()
+                    .or_else(|| {
+                        if parsed.status == "blocked" {
+                            recent_status_detail(&active.log_tail)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "status parsed from script output".to_string());
+                active.latest_status = parsed.status.clone();
+                active.latest_detail = detail.clone();
+                status_update = Some((parsed.status, detail));
             }
         }
 
@@ -376,11 +392,11 @@ impl SelfImproveManager {
             line,
         });
 
-        if let Some(status) = status_update {
+        if let Some((status, detail)) = status_update {
             let _ = self.events.send(SelfImproveEvent::Status {
                 run_id: run_id.to_string(),
                 status,
-                detail: "status parsed from script output".to_string(),
+                detail,
             });
         }
     }
@@ -443,6 +459,38 @@ impl SelfImproveManager {
         let retros = read_retrospectives(&log_dir.join("retrospectives.jsonl"), MAX_RETROSPECTIVES);
         (logs, retros)
     }
+
+    fn launch_supported(&self) -> bool {
+        Path::new("/.dockerenv").exists() || self.repo_root.join("docker-session.sh").is_file()
+    }
+
+    fn spawn_command(&self, cycles: u32, turns_per_cycle: u32) -> Result<Command, SelfImproveError> {
+        let mut command = Command::new("setsid");
+        command.arg("bash");
+
+        if Path::new("/.dockerenv").exists() {
+            command.arg("self-improve.sh");
+        } else {
+            let launcher = self.repo_root.join("docker-session.sh");
+            if !launcher.is_file() {
+                return Err(SelfImproveError::new(
+                    "unsupported_environment",
+                    "self-improve unavailable: missing docker-session.sh launcher",
+                ));
+            }
+            command.arg("docker-session.sh").arg("self-improve.sh");
+        }
+
+        command
+            .arg(cycles.to_string())
+            .current_dir(&self.repo_root)
+            .env("MAX_TURN_PER_CYCLE", turns_per_cycle.to_string())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null());
+
+        Ok(command)
+    }
 }
 
 impl Default for SelfImproveManager {
@@ -451,9 +499,86 @@ impl Default for SelfImproveManager {
     }
 }
 
-fn parse_status_line(line: &str) -> Option<String> {
-    line.strip_prefix("STATUS: ")
-        .map(|value| value.trim().to_string())
+fn parse_status_line(line: &str) -> Option<ParsedStatusLine> {
+    let value = line.strip_prefix("STATUS: ")?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let status_end = value.find(char::is_whitespace).unwrap_or(value.len());
+    let status = value[..status_end].trim();
+    if status.is_empty() {
+        return None;
+    }
+
+    let detail = value[status_end..].trim();
+    Some(ParsedStatusLine {
+        status: status.to_string(),
+        detail: (!detail.is_empty()).then(|| detail.to_string()),
+    })
+}
+
+fn recent_status_detail(log_tail: &VecDeque<String>) -> Option<String> {
+    let candidates: Vec<String> = log_tail
+        .iter()
+        .filter_map(|line| normalize_status_detail_line(line))
+        .collect();
+
+    let candidate = candidates
+        .iter()
+        .rev()
+        .find(|line| is_error_like(line))
+        .cloned()
+        .or_else(|| {
+            candidates
+                .iter()
+                .rev()
+                .find(|line| !line.starts_with("STATUS: "))
+                .cloned()
+        })?;
+
+    Some(truncate_status_detail(&candidate))
+}
+
+fn normalize_status_detail_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(
+        trimmed
+            .strip_prefix("[stderr] ")
+            .unwrap_or(trimmed)
+            .trim()
+            .to_string(),
+    )
+}
+
+fn is_error_like(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.starts_with("error ")
+        || lower.starts_with("fatal:")
+        || lower.starts_with("panic:")
+        || lower.contains(" failed")
+        || lower.ends_with(" failed")
+        || lower.contains("failure")
+        || lower.contains("panicked at")
+        || lower.contains("denied")
+}
+
+fn truncate_status_detail(line: &str) -> String {
+    const MAX_CHARS: usize = 160;
+
+    let trimmed = line.trim();
+    let mut chars = trimmed.chars();
+    let truncated: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn list_recent_log_files(log_dir: &Path, max_items: usize) -> Vec<String> {
@@ -491,4 +616,87 @@ fn read_retrospectives(path: &Path, max_items: usize) -> Vec<Value> {
     }
     values.reverse();
     values
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_status_line_extracts_status_and_detail() {
+        assert_eq!(
+            parse_status_line("STATUS: blocked auth bootstrap failed"),
+            Some(ParsedStatusLine {
+                status: "blocked".to_string(),
+                detail: Some("auth bootstrap failed".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_status_line_supports_status_without_detail() {
+        assert_eq!(
+            parse_status_line("STATUS: success"),
+            Some(ParsedStatusLine {
+                status: "success".to_string(),
+                detail: None,
+            })
+        );
+    }
+
+    #[test]
+    fn recent_status_detail_prefers_error_like_line() {
+        let log_tail = VecDeque::from(vec![
+            "progress update".to_string(),
+            "fatal: authentication failed for https://example.com/repo.git".to_string(),
+            "Try refreshing your credentials.".to_string(),
+            "STATUS: blocked".to_string(),
+        ]);
+
+        assert_eq!(
+            recent_status_detail(&log_tail),
+            Some("fatal: authentication failed for https://example.com/repo.git".to_string())
+        );
+    }
+
+    #[test]
+    fn recent_status_detail_falls_back_to_last_non_status_line() {
+        let log_tail = VecDeque::from(vec![
+            "working".to_string(),
+            "[stderr] waiting for retry budget".to_string(),
+            "STATUS: blocked".to_string(),
+        ]);
+
+        assert_eq!(
+            recent_status_detail(&log_tail),
+            Some("waiting for retry budget".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_includes_latest_detail_for_active_run() {
+        let manager = SelfImproveManager::new();
+
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.active = Some(ActiveRunState {
+                run_id: "self-improve-1".to_string(),
+                pid: 42,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                max_cycles: 5,
+                turns_per_cycle: 30,
+                stop_requested: false,
+                latest_status: "blocked".to_string(),
+                latest_detail: "error: decryption failed".to_string(),
+                log_tail: VecDeque::from(vec!["error: decryption failed".to_string()]),
+            });
+        }
+
+        let snapshot = manager.snapshot().await;
+        let active = snapshot.active_run.expect("active run should be present");
+
+        assert_eq!(active.latest_status, "blocked");
+        assert_eq!(active.latest_detail, "error: decryption failed");
+        assert_eq!(active.log_tail, vec!["error: decryption failed".to_string()]);
+    }
 }

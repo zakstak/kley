@@ -135,21 +135,102 @@ impl SecretBackend for VaultBackend {
 pub struct AgeFileBackend {
     path: PathBuf,
     passphrase: SecretString,
+    max_work_factor: u8,
+}
+
+const DEFAULT_AGE_MAX_WORK_FACTOR: u8 = 20;
+const MAX_ALLOWED_AGE_WORK_FACTOR: u8 = 20;
+const AGE_MAX_WORK_FACTOR_ENV: &str = "KLEY_AGE_MAX_WORK_FACTOR";
+
+fn ensure_supported_age_max_work_factor(max_work_factor: u8) {
+    assert!((1..=MAX_ALLOWED_AGE_WORK_FACTOR).contains(&max_work_factor));
 }
 
 impl AgeFileBackend {
     #[allow(dead_code)]
     pub fn new(path: PathBuf, passphrase: SecretString) -> Self {
-        Self { path, passphrase }
+        Self::with_max_work_factor(path, passphrase, DEFAULT_AGE_MAX_WORK_FACTOR)
+    }
+
+    #[allow(dead_code)]
+    pub fn with_max_work_factor(path: PathBuf, passphrase: SecretString, max_work_factor: u8) -> Self {
+        ensure_supported_age_max_work_factor(max_work_factor);
+        Self {
+            path,
+            passphrase,
+            max_work_factor,
+        }
     }
 
     /// Prompt for a passphrase interactively.
-    pub fn open_interactive(path: PathBuf, prompt: &str) -> Result<Self> {
+    pub fn open_interactive(path: PathBuf, prompt: &str, max_work_factor: u8) -> Result<Self> {
         let pp = rpassword::prompt_password(prompt).context("failed to read passphrase")?;
-        Ok(Self {
+        Ok(Self::with_max_work_factor(
             path,
-            passphrase: SecretString::from(pp),
-        })
+            SecretString::from(pp),
+            max_work_factor,
+        ))
+    }
+}
+
+fn parse_age_max_work_factor_from_env() -> Result<Option<u8>> {
+    let raw = match std::env::var(AGE_MAX_WORK_FACTOR_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{AGE_MAX_WORK_FACTOR_ENV} must be valid UTF-8")
+        }
+    };
+
+    parse_age_max_work_factor_from_str(&raw)
+}
+
+fn parse_age_max_work_factor_from_str(raw: &str) -> Result<Option<u8>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let value: u8 = raw
+        .parse()
+        .with_context(|| format!("{AGE_MAX_WORK_FACTOR_ENV} must be an integer"))?;
+    if !(1..=MAX_ALLOWED_AGE_WORK_FACTOR).contains(&value) {
+        anyhow::bail!(
+            "{AGE_MAX_WORK_FACTOR_ENV} must be between 1 and {MAX_ALLOWED_AGE_WORK_FACTOR}"
+        );
+    }
+
+    Ok(Some(value))
+}
+
+fn configured_age_max_work_factor() -> Result<u8> {
+    Ok(parse_age_max_work_factor_from_env()?.unwrap_or(DEFAULT_AGE_MAX_WORK_FACTOR))
+}
+
+fn decrypt_with_passphrase(
+    passphrase: SecretString,
+    encrypted: &[u8],
+    max_work_factor: u8,
+) -> std::result::Result<Vec<u8>, age::DecryptError> {
+    let mut identity = age::scrypt::Identity::new(passphrase);
+    identity.set_max_work_factor(max_work_factor);
+    age::decrypt(&identity, encrypted)
+}
+
+fn map_decrypt_error(err: age::DecryptError, max_work_factor: u8) -> anyhow::Error {
+    match err {
+        age::DecryptError::ExcessiveWork { required, .. } => {
+            if required <= MAX_ALLOWED_AGE_WORK_FACTOR {
+                anyhow::anyhow!(
+                    "decryption failed: credentials.age requires scrypt work factor {required}, but Kley allows up to {max_work_factor}; set {AGE_MAX_WORK_FACTOR_ENV}={required} if you trust this file, or recreate credentials.age with current Kley defaults"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "decryption failed: credentials.age requires scrypt work factor {required}, which exceeds Kley's supported maximum of {MAX_ALLOWED_AGE_WORK_FACTOR}; recreate credentials.age with current Kley defaults"
+                )
+            }
+        }
+        other => anyhow::anyhow!("decryption failed (wrong passphrase?): {other}"),
     }
 }
 
@@ -157,9 +238,12 @@ impl SecretBackend for AgeFileBackend {
     fn load(&self) -> Result<Option<Credentials>> {
         match std::fs::read(&self.path) {
             Ok(encrypted) => {
-                let identity = age::scrypt::Identity::new(self.passphrase.clone());
-                let decrypted = age::decrypt(&identity, &encrypted)
-                    .map_err(|e| anyhow::anyhow!("decryption failed (wrong passphrase?): {e}"))?;
+                let decrypted = decrypt_with_passphrase(
+                    self.passphrase.clone(),
+                    &encrypted,
+                    self.max_work_factor,
+                )
+                .map_err(|err| map_decrypt_error(err, self.max_work_factor))?;
                 let creds: Credentials = serde_json::from_slice(&decrypted)
                     .context("failed to parse decrypted credentials")?;
                 Ok(Some(creds))
@@ -246,10 +330,15 @@ impl CredentialStore {
                 backend_name: "vault".into(),
             }),
             CredentialBackendSelection::AgeFile { path, prompt } => {
+                let max_work_factor = configured_age_max_work_factor()?;
                 let backend = if let Ok(pp) = std::env::var("KLEY_PASSPHRASE") {
-                    AgeFileBackend::new(path, SecretString::from(pp))
+                    AgeFileBackend::with_max_work_factor(
+                        path,
+                        SecretString::from(pp),
+                        max_work_factor,
+                    )
                 } else {
-                    AgeFileBackend::open_interactive(path, prompt)?
+                    AgeFileBackend::open_interactive(path, prompt, max_work_factor)?
                 };
                 Ok(Self {
                     backend: Box::new(backend),
@@ -519,6 +608,32 @@ mod tests {
 
         writer.save(&sample_openai_creds()).unwrap();
         assert!(reader.load().is_err());
+    }
+
+    #[test]
+    fn parse_age_max_work_factor_accepts_empty_as_unset() {
+        assert_eq!(parse_age_max_work_factor_from_str("   ").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_age_max_work_factor_rejects_values_above_supported_max() {
+        let err = parse_age_max_work_factor_from_str("21").unwrap_err().to_string();
+        assert!(err.contains("must be between 1 and 20"));
+    }
+
+    #[test]
+    fn map_decrypt_error_does_not_suggest_impossible_override() {
+        let err = map_decrypt_error(
+            age::DecryptError::ExcessiveWork {
+                required: 21,
+                target: 20,
+            },
+            20,
+        )
+        .to_string();
+
+        assert!(err.contains("exceeds Kley's supported maximum of 20"));
+        assert!(!err.contains("KLEY_AGE_MAX_WORK_FACTOR=21"));
     }
 
     // ── Behavioral: CredentialStore resolves providers correctly ─────────────

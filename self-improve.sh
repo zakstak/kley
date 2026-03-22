@@ -438,7 +438,13 @@ EOF
   fi
 
   # Parse the status from the log
-  status=$(grep -oP '(?<=^STATUS: )\S+' "$log_file" | tail -1 || echo "unknown")
+  status=$({
+    grep -oP '(?<=^STATUS: )\S+' "$log_file" | tail -n 1
+  } || true)
+  if [ -z "$status" ]; then
+    echo "⚠  Log for cycle $cycle has no STATUS line; treating as blocked." >&2
+    status=blocked
+  fi
 
   if append_retrospective_record \
     "$log_file" \
