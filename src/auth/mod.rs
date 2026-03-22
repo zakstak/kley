@@ -153,7 +153,11 @@ impl AgeFileBackend {
     }
 
     #[allow(dead_code)]
-    pub fn with_max_work_factor(path: PathBuf, passphrase: SecretString, max_work_factor: u8) -> Self {
+    pub fn with_max_work_factor(
+        path: PathBuf,
+        passphrase: SecretString,
+        max_work_factor: u8,
+    ) -> Self {
         ensure_supported_age_max_work_factor(max_work_factor);
         Self {
             path,
@@ -617,7 +621,9 @@ mod tests {
 
     #[test]
     fn parse_age_max_work_factor_rejects_values_above_supported_max() {
-        let err = parse_age_max_work_factor_from_str("21").unwrap_err().to_string();
+        let err = parse_age_max_work_factor_from_str("21")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("must be between 1 and 20"));
     }
 

@@ -918,9 +918,11 @@ mod web {
         assert_eq!(response["type"], "response.ok");
         assert_eq!(response["request_id"], "req-self-start-1");
         assert_eq!(response["data"]["active_run"]["latest_status"], "starting");
-        assert!(response["data"]["active_run"]["latest_detail"]
-            .as_str()
-            .is_some_and(|detail| detail.starts_with("started self-improve pid=")));
+        assert!(
+            response["data"]["active_run"]["latest_detail"]
+                .as_str()
+                .is_some_and(|detail| detail.starts_with("started self-improve pid="))
+        );
     }
 
     #[tokio::test]

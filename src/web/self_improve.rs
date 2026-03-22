@@ -464,7 +464,11 @@ impl SelfImproveManager {
         Path::new("/.dockerenv").exists() || self.repo_root.join("docker-session.sh").is_file()
     }
 
-    fn spawn_command(&self, cycles: u32, turns_per_cycle: u32) -> Result<Command, SelfImproveError> {
+    fn spawn_command(
+        &self,
+        cycles: u32,
+        turns_per_cycle: u32,
+    ) -> Result<Command, SelfImproveError> {
         let mut command = Command::new("setsid");
         command.arg("bash");
 
@@ -697,6 +701,9 @@ mod tests {
 
         assert_eq!(active.latest_status, "blocked");
         assert_eq!(active.latest_detail, "error: decryption failed");
-        assert_eq!(active.log_tail, vec!["error: decryption failed".to_string()]);
+        assert_eq!(
+            active.log_tail,
+            vec!["error: decryption failed".to_string()]
+        );
     }
 }
