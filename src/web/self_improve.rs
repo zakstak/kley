@@ -9,9 +9,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-use super::protocol::{
-    SelfImproveActiveRun, SelfImproveRunRecord, SelfImproveSnapshotData,
-};
+use super::protocol::{SelfImproveActiveRun, SelfImproveRunRecord, SelfImproveSnapshotData};
 
 const DEFAULT_MAX_CYCLES: u32 = 5;
 const DEFAULT_TURNS_PER_CYCLE: u32 = 30;
@@ -25,7 +23,10 @@ const MAX_RETROSPECTIVES: usize = 30;
 #[derive(Debug, Clone)]
 pub enum SelfImproveEvent {
     Snapshot(SelfImproveSnapshotData),
-    LogLine { run_id: String, line: String },
+    LogLine {
+        run_id: String,
+        line: String,
+    },
     Status {
         run_id: String,
         status: String,
@@ -418,11 +419,7 @@ impl SelfImproveManager {
 
             (
                 record,
-                format!(
-                    "run finished outcome={} exit_code={:?}",
-                    outcome,
-                    exit_code
-                ),
+                format!("run finished outcome={} exit_code={:?}", outcome, exit_code),
             )
         };
 
@@ -435,7 +432,9 @@ impl SelfImproveManager {
     }
 
     async fn broadcast_snapshot(&self) {
-        let _ = self.events.send(SelfImproveEvent::Snapshot(self.snapshot().await));
+        let _ = self
+            .events
+            .send(SelfImproveEvent::Snapshot(self.snapshot().await));
     }
 
     fn load_artifacts(&self) -> (Vec<String>, Vec<Value>) {
@@ -447,7 +446,8 @@ impl SelfImproveManager {
 }
 
 fn parse_status_line(line: &str) -> Option<String> {
-    line.strip_prefix("STATUS: ").map(|value| value.trim().to_string())
+    line.strip_prefix("STATUS: ")
+        .map(|value| value.trim().to_string())
 }
 
 fn list_recent_log_files(log_dir: &Path, max_items: usize) -> Vec<String> {
