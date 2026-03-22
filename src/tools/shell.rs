@@ -17,6 +17,7 @@ const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KB
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct ShellTool {
+    #[allow(dead_code)] // Used by with_timeout() constructor; execute() will use this in future
     timeout: Duration,
 }
 

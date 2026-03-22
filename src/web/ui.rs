@@ -1,6 +1,6 @@
 use askama::Template;
 use axum::{
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{Html, IntoResponse},
 };
 
@@ -12,6 +12,7 @@ use crate::web::protocol::PROTOCOL_VERSION;
 struct ShellTemplate {
     ws_path: &'static str,
     protocol_version: u32,
+    #[allow(dead_code)] // Read by Askama template codegen
     context_max_chars: usize,
 }
 

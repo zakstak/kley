@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! SQLite-backed persistence for sessions and turns.
 
 mod schema;
