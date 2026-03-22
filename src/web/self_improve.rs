@@ -445,6 +445,12 @@ impl SelfImproveManager {
     }
 }
 
+impl Default for SelfImproveManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn parse_status_line(line: &str) -> Option<String> {
     line.strip_prefix("STATUS: ")
         .map(|value| value.trim().to_string())
