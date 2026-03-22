@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Kley — minimal coding agent library.
 //!
 //! This library exposes the core modules so they can be used by both the
@@ -9,6 +8,7 @@ pub mod auth;
 pub mod compact;
 pub mod events;
 pub mod preflight;
+pub mod provider;
 pub mod runtime;
 pub mod skills;
 pub mod store;

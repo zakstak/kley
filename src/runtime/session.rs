@@ -1,50 +1,24 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
-use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use tokio_tungstenite::tungstenite;
+use anyhow::Result;
 use uuid::Uuid;
 
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
-use crate::events::{AgentEvent, EventEmitter, Transport};
+use crate::events::{AgentEvent, EventEmitter};
+use crate::provider::{
+    Provider, SendContext, TokenUsage, TurnResult, merge_token_usage,
+};
 use crate::store::{NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::ToolRegistry;
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
 const DEFAULT_ZAI_MODEL: &str = "glm-4.7";
-const RESPONSES_WS_BETA_HEADER: &str = "responses_websockets=2026-02-06";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolCall {
-    pub call_id: String,
-    pub name: String,
-    pub arguments: String,
-}
-
-#[derive(Debug)]
-enum TurnResult {
-    Text(String),
-    ToolCalls(Vec<ToolCall>),
-    Aborted,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TokenUsage {
-    input_tokens: usize,
-    output_tokens: usize,
-    total_tokens: usize,
-}
+/// Re-export Message from the ZAI provider for backwards compatibility.
+pub use crate::provider::zai::Message;
 
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
@@ -126,7 +100,7 @@ pub struct SessionRuntime<'a> {
     session: Session,
     history: Vec<serde_json::Value>,
     turn_number: usize,
-    ws_disabled: AtomicBool,
+    provider: Box<dyn Provider>,
     registry: ToolRegistry,
     instructions: String,
     hooks: RuntimeHooks,
@@ -244,6 +218,7 @@ impl<'a> SessionRuntime<'a> {
             });
         }
 
+        let provider = create_provider(&resolved.provider);
         Ok(Self {
             store: RuntimeStore::Borrowed(store),
             events,
@@ -253,7 +228,7 @@ impl<'a> SessionRuntime<'a> {
             session,
             history,
             turn_number: existing_turns.len(),
-            ws_disabled: AtomicBool::new(false),
+            provider,
             registry,
             instructions,
             abort_signal,
@@ -331,6 +306,7 @@ impl<'a> SessionRuntime<'a> {
             });
         }
 
+        let provider = create_provider(&resolved.provider);
         Ok(Self {
             store: RuntimeStore::Shared(shared_store),
             events,
@@ -340,7 +316,7 @@ impl<'a> SessionRuntime<'a> {
             session,
             history,
             turn_number: existing_turns.len(),
-            ws_disabled: AtomicBool::new(false),
+            provider,
             registry,
             instructions,
             abort_signal,
@@ -493,64 +469,41 @@ impl<'a> SessionRuntime<'a> {
                 return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
             }
 
+            // Extract references from self before creating the closure, so the
+            // closure doesn't capture &SessionRuntime (which contains non-Sync
+            // rusqlite::Connection).
+            let hooks = &self.hooks;
+            let events = &self.events;
+            let session_id = &self.session.id;
             let output_hook = |delta: &str| {
-                self.emit_output_delta(delta);
-                self.events.emit(AgentEvent::MessageDelta {
-                    session_id: self.session.id.clone(),
+                if let Some(hook) = &hooks.on_output_delta {
+                    hook(delta);
+                }
+                events.emit(AgentEvent::MessageDelta {
+                    session_id: session_id.clone(),
                     turn_id: turn_id.clone(),
                     message_id: message_id.clone(),
                     delta: delta.to_string(),
                 });
             };
 
-            let result = match self.resolved.provider.as_str() {
-                "openai" => {
-                    let mut token_usage = None;
-                    send_openai(
-                        &self.resolved,
-                        OpenaiRequestContext {
-                            model: &self.model,
-                            session_id: &self.session.id,
-                            turn_id: &turn_id,
-                            history: &self.history,
-                            registry: &self.registry,
-                            instructions: &self.instructions,
-                            ws_disabled: &self.ws_disabled,
-                            abort_signal: &self.abort_signal,
-                            events: &self.events,
-                            output_hook: Some(&output_hook),
-                        },
-                        &mut token_usage,
-                    )
+            let result = {
+                let mut token_usage = None;
+                let ctx = SendContext {
+                    model: &self.model,
+                    session_id: &self.session.id,
+                    turn_id: &turn_id,
+                    history: &self.history,
+                    registry: &self.registry,
+                    instructions: &self.instructions,
+                    abort_signal: &self.abort_signal,
+                    events: &self.events,
+                    output_hook: Some(&output_hook),
+                };
+                self.provider
+                    .send(&self.resolved, ctx, &mut token_usage)
                     .await
                     .map(|result| (result, token_usage))
-                }
-                "zai" => {
-                    let mut token_usage = None;
-                    self.events.emit(AgentEvent::TransportSelected {
-                        session_id: Some(self.session.id.clone()),
-                        turn_id: Some(turn_id.clone()),
-                        provider: self.resolved.provider.clone(),
-                        transport: Transport::Sse,
-                    });
-                    send_zai_sse(
-                        &self.resolved,
-                        &self.model,
-                        &messages_from_history(&self.history),
-                        &self.abort_signal,
-                        Some(&output_hook),
-                        &mut token_usage,
-                    )
-                    .await
-                    .map(|result| (result, token_usage))
-                }
-                "test" => match test_provider_result(&self.history) {
-                    TurnResult::ToolCalls(calls) => Ok((TurnResult::ToolCalls(calls), None)),
-                    _ => run_test_provider(&self.history, Some(&output_hook), &self.abort_signal)
-                        .await
-                        .map(|result| (result, None)),
-                },
-                other => anyhow::bail!("unsupported provider in runtime: {other}"),
             };
 
             match result {
@@ -802,136 +755,83 @@ fn restore_compact_threshold_from_settings(compact_config: &mut CompactConfig, s
     }
 }
 
-fn test_provider_response(history: &[serde_json::Value]) -> String {
-    let latest_user = history.iter().rev().find_map(|item| {
-        let item_type = item.get("type")?.as_str()?;
-        if item_type == "message" && item.get("role")?.as_str()? == "user" {
-            item.get("content")?.as_str().map(String::from)
-        } else {
-            None
-        }
-    });
-
-    match latest_user {
-        Some(user) => format!("Test assistant reply: {user}"),
-        None => "Test assistant reply".to_string(),
-    }
-}
-
-fn test_provider_result(history: &[serde_json::Value]) -> TurnResult {
-    let latest_type = history
-        .last()
-        .and_then(|item| item.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-
-    if latest_type == "function_call_output" {
-        return TurnResult::Text(test_provider_response(history));
-    }
-
-    let latest_user = history.iter().rev().find_map(|item| {
-        let item_type = item.get("type")?.as_str()?;
-        if item_type == "message" && item.get("role")?.as_str()? == "user" {
-            item.get("content")?.as_str().map(String::from)
-        } else {
-            None
-        }
-    });
-
-    if latest_user
-        .as_deref()
-        .unwrap_or_default()
-        .to_lowercase()
-        .contains("tool")
-    {
-        return TurnResult::ToolCalls(vec![ToolCall {
-            call_id: format!("call-{}", Uuid::new_v4()),
-            name: "unknown_tool".to_string(),
-            arguments: "{}".to_string(),
-        }]);
-    }
-
-    TurnResult::Text(test_provider_response(history))
-}
-
-async fn run_test_provider(
-    history: &[serde_json::Value],
-    output_hook: Option<&dyn Fn(&str)>,
-    abort_signal: &AtomicBool,
-) -> Result<TurnResult> {
-    let response = test_provider_response(history);
-    let latest_user = latest_test_user_prompt(history).unwrap_or_default();
-    let slow_stream = latest_user.contains("hold-open") || latest_user.contains("abortable");
-
-    if !slow_stream {
-        if let Some(hook) = output_hook {
-            hook(&response);
-        }
-        return Ok(TurnResult::Text(response));
-    }
-
-    let delay_ms = if latest_user.contains("hold-open") {
-        150
-    } else {
-        25
-    };
-
-    for chunk in response_chunks(&response, 4) {
-        if abort_signal.load(Ordering::Relaxed) {
-            return Ok(TurnResult::Aborted);
-        }
-        if let Some(hook) = output_hook {
-            hook(&chunk);
-        }
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-    }
-
-    if latest_user.contains("hold-open") {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-
-    if abort_signal.load(Ordering::Relaxed) {
-        return Ok(TurnResult::Aborted);
-    }
-
-    Ok(TurnResult::Text(response))
-}
-
-async fn wait_for_abort_signal(abort_signal: &AtomicBool) {
-    while !abort_signal.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-fn latest_test_user_prompt(history: &[serde_json::Value]) -> Option<String> {
-    history.iter().rev().find_map(|item| {
-        let item_type = item.get("type")?.as_str()?;
-        if item_type == "message" && item.get("role")?.as_str()? == "user" {
-            item.get("content")?
-                .as_str()
-                .map(|content| content.to_lowercase())
-        } else {
-            None
-        }
-    })
-}
-
-fn response_chunks(response: &str, target_parts: usize) -> Vec<String> {
-    let words: Vec<&str> = response.split_inclusive(' ').collect();
-    if words.len() <= 1 || target_parts <= 1 {
-        return vec![response.to_string()];
-    }
-
-    let chunk_size = words.len().div_ceil(target_parts);
-    words
-        .chunks(chunk_size.max(1))
-        .map(|chunk| chunk.concat())
-        .collect()
-}
-
 fn truncate(s: &str, max: usize) -> String {
     truncate_with_ascii_ellipsis(s, max)
 }
+
+/// Create a boxed provider for the given provider name.
+fn create_provider(provider_name: &str) -> Box<dyn Provider> {
+    match provider_name {
+        "openai" => Box::new(crate::provider::openai::OpenAiProvider::new()),
+        "zai" => Box::new(crate::provider::zai::ZaiProvider::new()),
+        "test" => Box::new(crate::provider::test::TestProvider::new()),
+        _ => Box::new(crate::provider::openai::OpenAiProvider::new()),
+    }
+}
+
+fn context_usage_chars(history: &[serde_json::Value], max_chars: usize) -> (usize, usize) {
+    let used_chars = crate::compact::estimate_history_chars(history);
+    (used_chars, max_chars.max(1))
+}
+
+pub fn history_items_from_turns(turns: &[Turn]) -> Vec<serde_json::Value> {
+    let mut items = Vec::new();
+    for t in turns {
+        match t.kind.as_str() {
+            "function_call" => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t.content) {
+                    items.push(serde_json::json!({
+                        "type": "function_call",
+                        "call_id": v.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "name": v.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "arguments": v.get("arguments").and_then(|v| v.as_str()).unwrap_or(""),
+                    }));
+                }
+            }
+            "function_call_output" => {
+                let parsed = serde_json::from_str::<serde_json::Value>(&t.content)
+                    .unwrap_or_else(|_| serde_json::json!({ "output": t.content }));
+                let call_id = parsed
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let output = parsed
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&t.content)
+                    .to_string();
+                items.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                }));
+            }
+            _ => {
+                items.push(serde_json::json!({
+                    "type": "message",
+                    "role": t.role,
+                    "content": t.content,
+                }));
+            }
+        }
+    }
+    items
+}
+
+pub fn history_from_turns(turns: &[Turn]) -> Vec<Message> {
+    turns
+        .iter()
+        .map(|t| Message {
+            role: t.role.clone(),
+            content: t.content.clone(),
+        })
+        .collect()
+}
+
+/// Re-export public SSE parsers for backwards compatibility.
+pub use crate::provider::openai::process_openai_sse_block;
+pub use crate::provider::zai::process_zai_sse_line;
 
 #[cfg(test)]
 mod tests {
@@ -1020,786 +920,4 @@ mod tests {
         restore_compact_threshold_from_settings(&mut compact, &session);
         assert_eq!(compact.threshold_chars, 777);
     }
-}
-
-fn build_input_items(history: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    history.to_vec()
-}
-
-fn context_usage_chars(history: &[serde_json::Value], max_chars: usize) -> (usize, usize) {
-    let used_chars = crate::compact::estimate_history_chars(history);
-    (used_chars, max_chars.max(1))
-}
-
-pub fn history_items_from_turns(turns: &[Turn]) -> Vec<serde_json::Value> {
-    let mut items = Vec::new();
-    for t in turns {
-        match t.kind.as_str() {
-            "function_call" => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t.content) {
-                    items.push(serde_json::json!({
-                        "type": "function_call",
-                        "call_id": v.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
-                        "name": v.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                        "arguments": v.get("arguments").and_then(|v| v.as_str()).unwrap_or(""),
-                    }));
-                }
-            }
-            "function_call_output" => {
-                let parsed = serde_json::from_str::<serde_json::Value>(&t.content)
-                    .unwrap_or_else(|_| serde_json::json!({ "output": t.content }));
-                let call_id = parsed
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let output = parsed
-                    .get("output")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&t.content)
-                    .to_string();
-                items.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": output,
-                }));
-            }
-            _ => {
-                items.push(serde_json::json!({
-                    "type": "message",
-                    "role": t.role,
-                    "content": t.content,
-                }));
-            }
-        }
-    }
-    items
-}
-
-fn messages_from_history(history: &[serde_json::Value]) -> Vec<Message> {
-    history
-        .iter()
-        .filter_map(|item| {
-            let item_type = item.get("type")?.as_str()?;
-            match item_type {
-                "message" => Some(Message {
-                    role: item.get("role")?.as_str()?.to_string(),
-                    content: item.get("content")?.as_str()?.to_string(),
-                }),
-                "function_call_output" => Some(Message {
-                    role: "assistant".to_string(),
-                    content: format!(
-                        "[Tool result: {}]",
-                        item.get("output")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("(empty)")
-                    ),
-                }),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-pub fn history_from_turns(turns: &[Turn]) -> Vec<Message> {
-    turns
-        .iter()
-        .map(|t| Message {
-            role: t.role.clone(),
-            content: t.content.clone(),
-        })
-        .collect()
-}
-
-#[derive(Deserialize)]
-struct ResponseEvent {
-    r#type: String,
-    #[serde(default)]
-    delta: Option<String>,
-    #[serde(default)]
-    item: Option<OutputItem>,
-    #[serde(default)]
-    call_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OutputItem {
-    r#type: Option<String>,
-    #[serde(default)]
-    call_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ChatCompletionsRequest {
-    model: String,
-    messages: Vec<Message>,
-    stream: bool,
-}
-
-#[derive(Deserialize)]
-struct SseChunk {
-    choices: Option<Vec<SseChoice>>,
-    #[serde(default)]
-    usage: Option<UsagePayload>,
-}
-
-#[derive(Deserialize)]
-struct SseChoice {
-    delta: Option<SseDelta>,
-}
-
-#[derive(Deserialize)]
-struct SseDelta {
-    content: Option<String>,
-}
-
-struct OpenaiRequestContext<'a> {
-    model: &'a str,
-    session_id: &'a str,
-    turn_id: &'a str,
-    history: &'a [serde_json::Value],
-    registry: &'a ToolRegistry,
-    instructions: &'a str,
-    ws_disabled: &'a AtomicBool,
-    abort_signal: &'a AtomicBool,
-    events: &'a EventEmitter,
-    output_hook: Option<&'a dyn Fn(&str)>,
-}
-
-async fn send_openai(
-    auth: &ResolvedAuth,
-    ctx: OpenaiRequestContext<'_>,
-    token_usage: &mut Option<TokenUsage>,
-) -> Result<TurnResult> {
-    if ctx.ws_disabled.load(Ordering::Relaxed) {
-        ctx.events.emit(AgentEvent::TransportSelected {
-            session_id: Some(ctx.session_id.to_string()),
-            turn_id: Some(ctx.turn_id.to_string()),
-            provider: "openai".into(),
-            transport: Transport::Sse,
-        });
-        return send_openai_sse(
-            auth,
-            ctx.model,
-            ctx.history,
-            ctx.registry,
-            ctx.instructions,
-            ctx.abort_signal,
-            ctx.output_hook,
-            token_usage,
-        )
-        .await;
-    }
-
-    ctx.events.emit(AgentEvent::TransportSelected {
-        session_id: Some(ctx.session_id.to_string()),
-        turn_id: Some(ctx.turn_id.to_string()),
-        provider: "openai".into(),
-        transport: Transport::WebSocket,
-    });
-
-    match send_openai_ws(
-        auth,
-        ctx.model,
-        ctx.history,
-        ctx.registry,
-        ctx.instructions,
-        ctx.abort_signal,
-        ctx.output_hook,
-        token_usage,
-    )
-    .await
-    {
-        Ok(response) => Ok(response),
-        Err(err) => {
-            let reason = format!("{err:#}");
-            ctx.ws_disabled.store(true, Ordering::Relaxed);
-            ctx.events.emit(AgentEvent::TransportFallback {
-                session_id: Some(ctx.session_id.to_string()),
-                turn_id: Some(ctx.turn_id.to_string()),
-                from: Transport::WebSocket,
-                to: Transport::Sse,
-                reason,
-            });
-            send_openai_sse(
-                auth,
-                ctx.model,
-                ctx.history,
-                ctx.registry,
-                ctx.instructions,
-                ctx.abort_signal,
-                ctx.output_hook,
-                token_usage,
-            )
-            .await
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_openai_ws(
-    auth: &ResolvedAuth,
-    model: &str,
-    history: &[serde_json::Value],
-    registry: &ToolRegistry,
-    instructions: &str,
-    abort_signal: &AtomicBool,
-    output_hook: Option<&dyn Fn(&str)>,
-    token_usage: &mut Option<TokenUsage>,
-) -> Result<TurnResult> {
-    if abort_signal.load(Ordering::Relaxed) {
-        return Ok(TurnResult::Aborted);
-    }
-
-    let ws_url = if let Some(stripped) = auth.base_url.strip_prefix("http://") {
-        format!("ws://{stripped}/responses")
-    } else if let Some(stripped) = auth.base_url.strip_prefix("https://") {
-        format!("wss://{stripped}/responses")
-    } else {
-        format!("{}/responses", auth.base_url)
-    };
-
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut request = ws_url
-        .into_client_request()
-        .context("failed to build WebSocket request")?;
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {}", auth.api_key)
-            .parse()
-            .context("invalid auth header value")?,
-    );
-    if let Some(account_id) = &auth.account_id {
-        request.headers_mut().insert(
-            "ChatGPT-Account-ID",
-            account_id.parse().context("invalid account id header")?,
-        );
-    }
-    request.headers_mut().insert(
-        "OpenAI-Beta",
-        RESPONSES_WS_BETA_HEADER
-            .parse()
-            .context("invalid beta header value")?,
-    );
-
-    let (mut ws, _response) = tokio::select! {
-        _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
-        result = tokio_tungstenite::connect_async(request) => {
-            result.context("WebSocket connect failed")?
-        }
-    };
-
-    let tools = registry.to_api_tools();
-    let mut create_payload = serde_json::json!({
-        "type": "response.create",
-        "model": model,
-        "instructions": instructions,
-        "input": build_input_items(history),
-        "stream": true,
-        "store": false,
-        "tool_choice": "auto"
-    });
-    if !tools.is_empty() {
-        create_payload["tools"] = serde_json::json!(tools);
-    }
-
-    tokio::select! {
-        _ = wait_for_abort_signal(abort_signal) => {
-            let _ = ws.close(None).await;
-            return Ok(TurnResult::Aborted);
-        }
-        result = ws.send(tungstenite::Message::Text(create_payload.to_string())) => {
-            result.context("failed to send response.create")?;
-        }
-    }
-
-    let mut full_response = String::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut current_call_args = String::new();
-    let mut current_call_id = String::new();
-    let mut current_call_name = String::new();
-
-    loop {
-        let Some(msg) = (tokio::select! {
-            _ = wait_for_abort_signal(abort_signal) => {
-                let _ = ws.close(None).await;
-                return Ok(TurnResult::Aborted);
-            }
-            msg = ws.next() => msg
-        }) else {
-            break;
-        };
-        let msg = msg.context("WebSocket read error")?;
-        match msg {
-            tungstenite::Message::Text(text) => {
-                if abort_signal.load(Ordering::Relaxed) {
-                    let _ = ws.close(None).await;
-                    return Ok(TurnResult::Aborted);
-                }
-                let event: ResponseEvent = match serde_json::from_str(&text) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-
-                match event.r#type.as_str() {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = event.delta {
-                            if let Some(hook) = output_hook {
-                                hook(&delta);
-                            }
-                            full_response.push_str(&delta);
-                        }
-                    }
-                    "response.output_item.added" => {
-                        if let Some(item) = &event.item
-                            && item.r#type.as_deref() == Some("function_call")
-                        {
-                            current_call_id = item.call_id.clone().unwrap_or_default();
-                            current_call_name = item.name.clone().unwrap_or_default();
-                            current_call_args.clear();
-                        }
-                    }
-                    "response.function_call_arguments.delta" => {
-                        if let Some(delta) = event.delta {
-                            current_call_args.push_str(&delta);
-                        }
-                    }
-                    "response.function_call_arguments.done" => {
-                        tool_calls.push(ToolCall {
-                            call_id: event.call_id.unwrap_or_else(|| current_call_id.clone()),
-                            name: event.name.unwrap_or_else(|| current_call_name.clone()),
-                            arguments: event.arguments.unwrap_or_else(|| current_call_args.clone()),
-                        });
-                        current_call_args.clear();
-                        current_call_id.clear();
-                        current_call_name.clear();
-                    }
-                    "response.completed" => {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                            *token_usage = parse_token_usage(&value);
-                        }
-                        break;
-                    }
-                    "error" => {
-                        let err_value: serde_json::Value =
-                            serde_json::from_str(&text).unwrap_or_default();
-                        let err_msg = err_value
-                            .get("error")
-                            .and_then(|e| e.get("message"))
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("unknown error");
-                        anyhow::bail!("OpenAI WebSocket error: {err_msg}");
-                    }
-                    _ => {}
-                }
-            }
-            tungstenite::Message::Close(_) => break,
-            _ => {}
-        }
-    }
-
-    let _ = ws.close(None).await;
-
-    if !tool_calls.is_empty() {
-        Ok(TurnResult::ToolCalls(tool_calls))
-    } else {
-        Ok(TurnResult::Text(full_response))
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_openai_sse(
-    auth: &ResolvedAuth,
-    model: &str,
-    history: &[serde_json::Value],
-    registry: &ToolRegistry,
-    instructions: &str,
-    abort_signal: &AtomicBool,
-    output_hook: Option<&dyn Fn(&str)>,
-    token_usage: &mut Option<TokenUsage>,
-) -> Result<TurnResult> {
-    if abort_signal.load(Ordering::Relaxed) {
-        return Ok(TurnResult::Aborted);
-    }
-
-    let url = format!("{}/responses", auth.base_url);
-    let tools = registry.to_api_tools();
-    let mut body = serde_json::json!({
-        "model": model,
-        "instructions": instructions,
-        "input": build_input_items(history),
-        "stream": true,
-        "store": false,
-        "tool_choice": "auto"
-    });
-    if !tools.is_empty() {
-        body["tools"] = serde_json::json!(tools);
-    }
-
-    let client = reqwest::Client::new();
-    let mut req = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", auth.api_key))
-        .header("Content-Type", "application/json");
-    if let Some(account_id) = &auth.account_id {
-        req = req.header("ChatGPT-Account-ID", account_id);
-    }
-    let resp = tokio::select! {
-        _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
-        result = req.json(&body).send() => result.context("SSE request failed")?,
-    };
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("OpenAI SSE error: {status}\n{body}");
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut full_response = String::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut current_call_args = String::new();
-    let mut current_call_id = String::new();
-    let mut current_call_name = String::new();
-    let mut buffer = String::new();
-
-    loop {
-        let Some(chunk) = (tokio::select! {
-            _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
-            chunk = stream.next() => chunk,
-        }) else {
-            break;
-        };
-        let chunk = chunk.context("stream error")?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        let mut done = false;
-        while let Some(block_end) = buffer.find("\n\n") {
-            if abort_signal.load(Ordering::Relaxed) {
-                return Ok(TurnResult::Aborted);
-            }
-            let block = buffer[..block_end].to_string();
-            buffer = buffer[block_end + 2..].to_string();
-
-            if process_openai_sse_block_with_tools(
-                &block,
-                &mut full_response,
-                &mut tool_calls,
-                &mut current_call_args,
-                &mut current_call_id,
-                &mut current_call_name,
-                output_hook,
-                token_usage,
-            )? {
-                done = true;
-                break;
-            }
-        }
-
-        if done {
-            break;
-        }
-    }
-
-    if !tool_calls.is_empty() {
-        Ok(TurnResult::ToolCalls(tool_calls))
-    } else {
-        Ok(TurnResult::Text(full_response))
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_openai_sse_block_with_tools(
-    block: &str,
-    full_response: &mut String,
-    tool_calls: &mut Vec<ToolCall>,
-    current_call_args: &mut String,
-    current_call_id: &mut String,
-    current_call_name: &mut String,
-    output_hook: Option<&dyn Fn(&str)>,
-    token_usage: &mut Option<TokenUsage>,
-) -> Result<bool> {
-    let mut event_type = String::new();
-    let mut data = String::new();
-    for line in block.lines() {
-        if let Some(t) = line.strip_prefix("event: ") {
-            event_type = t.to_string();
-        } else if let Some(d) = line.strip_prefix("data: ") {
-            data = d.to_string();
-        }
-    }
-
-    if data.is_empty() {
-        return Ok(false);
-    }
-
-    match event_type.as_str() {
-        "response.output_text.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
-                && let Some(delta) = event.delta
-            {
-                if let Some(hook) = output_hook {
-                    hook(&delta);
-                }
-                full_response.push_str(&delta);
-            }
-        }
-        "response.output_item.added" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
-                && let Some(item) = &event.item
-                && item.r#type.as_deref() == Some("function_call")
-            {
-                *current_call_id = item.call_id.clone().unwrap_or_default();
-                *current_call_name = item.name.clone().unwrap_or_default();
-                current_call_args.clear();
-            }
-        }
-        "response.function_call_arguments.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
-                && let Some(delta) = event.delta
-            {
-                current_call_args.push_str(&delta);
-            }
-        }
-        "response.function_call_arguments.done" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                tool_calls.push(ToolCall {
-                    call_id: event.call_id.unwrap_or_else(|| current_call_id.clone()),
-                    name: event.name.unwrap_or_else(|| current_call_name.clone()),
-                    arguments: event.arguments.unwrap_or_else(|| current_call_args.clone()),
-                });
-                current_call_args.clear();
-                current_call_id.clear();
-                current_call_name.clear();
-            }
-        }
-        "response.completed" => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-                *token_usage = parse_token_usage(&value);
-            }
-            return Ok(true);
-        }
-        "error" => {
-            let err_value: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
-            let err_msg = err_value
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            anyhow::bail!("OpenAI SSE error: {err_msg}");
-        }
-        _ => {}
-    }
-
-    Ok(false)
-}
-
-pub fn process_openai_sse_block(block: &str, full_response: &mut String) -> Result<bool> {
-    let mut dummy_calls = Vec::new();
-    let mut dummy_args = String::new();
-    let mut dummy_id = String::new();
-    let mut dummy_name = String::new();
-    let mut dummy_usage = None;
-    process_openai_sse_block_with_tools(
-        block,
-        full_response,
-        &mut dummy_calls,
-        &mut dummy_args,
-        &mut dummy_id,
-        &mut dummy_name,
-        None,
-        &mut dummy_usage,
-    )
-}
-
-async fn send_zai_sse(
-    auth: &ResolvedAuth,
-    model: &str,
-    messages: &[Message],
-    abort_signal: &AtomicBool,
-    output_hook: Option<&dyn Fn(&str)>,
-    token_usage: &mut Option<TokenUsage>,
-) -> Result<TurnResult> {
-    if abort_signal.load(Ordering::Relaxed) {
-        return Ok(TurnResult::Aborted);
-    }
-
-    let url = format!("{}/chat/completions", auth.base_url);
-    let body = ChatCompletionsRequest {
-        model: model.to_string(),
-        messages: messages.to_vec(),
-        stream: true,
-    };
-
-    let resp = tokio::select! {
-        _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
-        result = reqwest::Client::new()
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", auth.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send() => result.context("ZAI request failed")?,
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("ZAI API error: {status}\n{body}");
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut full_response = String::new();
-    let mut buffer = String::new();
-
-    loop {
-        let Some(chunk) = (tokio::select! {
-            _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
-            chunk = stream.next() => chunk,
-        }) else {
-            break;
-        };
-        let chunk = chunk.context("stream error")?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        let mut done = false;
-        while let Some(line_end) = buffer.find('\n') {
-            if abort_signal.load(Ordering::Relaxed) {
-                return Ok(TurnResult::Aborted);
-            }
-            let line = buffer[..line_end].trim().to_string();
-            buffer = buffer[line_end + 1..].to_string();
-
-            if process_zai_sse_line_with_hook(&line, &mut full_response, output_hook, token_usage)?
-            {
-                done = true;
-                break;
-            }
-        }
-
-        if done {
-            break;
-        }
-    }
-
-    Ok(TurnResult::Text(full_response))
-}
-
-fn process_zai_sse_line_with_hook(
-    line: &str,
-    full_response: &mut String,
-    output_hook: Option<&dyn Fn(&str)>,
-    token_usage: &mut Option<TokenUsage>,
-) -> Result<bool> {
-    if line.is_empty() || line.starts_with(':') {
-        return Ok(false);
-    }
-
-    if let Some(data) = line.strip_prefix("data: ") {
-        if data == "[DONE]" {
-            return Ok(true);
-        }
-
-        if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
-            if let Some(usage) = chunk.usage {
-                *token_usage = usage.into_token_usage();
-            }
-            if let Some(choices) = chunk.choices {
-                for choice in choices {
-                    if let Some(delta) = choice.delta
-                        && let Some(content) = delta.content
-                    {
-                        if let Some(hook) = output_hook {
-                            hook(&content);
-                        }
-                        full_response.push_str(&content);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-pub fn process_zai_sse_line(line: &str, full_response: &mut String) -> Result<bool> {
-    let mut dummy_usage = None;
-    process_zai_sse_line_with_hook(line, full_response, None, &mut dummy_usage)
-}
-
-#[derive(Deserialize)]
-struct UsageEnvelope {
-    #[serde(default)]
-    usage: Option<UsagePayload>,
-    #[serde(default)]
-    response: Option<UsageEnvelopeResponse>,
-}
-
-#[derive(Deserialize)]
-struct UsageEnvelopeResponse {
-    #[serde(default)]
-    usage: Option<UsagePayload>,
-}
-
-#[derive(Deserialize)]
-struct UsagePayload {
-    #[serde(default)]
-    input_tokens: Option<usize>,
-    #[serde(default)]
-    output_tokens: Option<usize>,
-    #[serde(default)]
-    prompt_tokens: Option<usize>,
-    #[serde(default)]
-    completion_tokens: Option<usize>,
-    #[serde(default)]
-    total_tokens: Option<usize>,
-}
-
-impl UsagePayload {
-    fn into_token_usage(self) -> Option<TokenUsage> {
-        let input = self.input_tokens.or(self.prompt_tokens);
-        let output = self.output_tokens.or(self.completion_tokens);
-        let total = self.total_tokens.or_else(|| match (input, output) {
-            (Some(i), Some(o)) => Some(i + o),
-            _ => None,
-        });
-        match (input, output, total) {
-            (Some(input_tokens), Some(output_tokens), Some(total_tokens)) => Some(TokenUsage {
-                input_tokens,
-                output_tokens,
-                total_tokens,
-            }),
-            _ => None,
-        }
-    }
-}
-
-fn merge_token_usage(aggregate: &mut Option<TokenUsage>, usage: Option<TokenUsage>) {
-    let Some(usage) = usage else {
-        return;
-    };
-    if let Some(current) = aggregate.as_mut() {
-        current.input_tokens = current.input_tokens.saturating_add(usage.input_tokens);
-        current.output_tokens = current.output_tokens.saturating_add(usage.output_tokens);
-        current.total_tokens = current.total_tokens.saturating_add(usage.total_tokens);
-    } else {
-        *aggregate = Some(usage);
-    }
-}
-
-fn parse_token_usage(value: &serde_json::Value) -> Option<TokenUsage> {
-    let envelope = serde_json::from_value::<UsageEnvelope>(value.clone()).ok()?;
-    envelope
-        .usage
-        .and_then(UsagePayload::into_token_usage)
-        .or_else(|| {
-            envelope
-                .response
-                .and_then(|response| response.usage)
-                .and_then(UsagePayload::into_token_usage)
-        })
 }
