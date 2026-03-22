@@ -158,6 +158,10 @@ mod web {
             "data-testid=\"tool-card\"",
             "data-testid=\"inspector-panel\"",
             "data-testid=\"status-pill\"",
+            "self-improve-panel",
+            "self-improve-start",
+            "self-improve-stop",
+            "self-improve-restart",
         ] {
             assert!(html.contains(marker), "missing marker: {marker}");
         }
@@ -805,6 +809,59 @@ mod web {
                 "turn.completed",
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn self_improve_socket_sends_bootstrap_snapshot() {
+        let server = spawn_server().await;
+        let mut socket = connect_ws_path(server.addr, "/ws/self-improve").await;
+
+        let frame = recv_json(&mut socket).await;
+        assert_eq!(frame["type"], "self_improve.snapshot");
+        assert!(frame["data"]["history"].is_array());
+        assert!(frame["data"]["recent_logs"].is_array());
+        assert!(frame["data"]["retrospectives"].is_array());
+    }
+
+    #[tokio::test]
+    async fn self_improve_get_returns_snapshot_payload() {
+        let server = spawn_server().await;
+        let mut socket = connect_ws_path(server.addr, "/ws/self-improve").await;
+
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"self_improve.get","request_id":"req-self-get-1"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let response = recv_json(&mut socket).await;
+        assert_eq!(response["type"], "response.ok");
+        assert_eq!(response["request_id"], "req-self-get-1");
+        assert!(response["data"]["history"].is_array());
+        assert!(response["data"]["recent_logs"].is_array());
+    }
+
+    #[tokio::test]
+    async fn self_improve_socket_rejects_chat_commands() {
+        let server = spawn_server().await;
+        let mut socket = connect_ws_path(server.addr, "/ws/self-improve").await;
+
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"state.get","request_id":"req-self-bad-1"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let response = recv_json(&mut socket).await;
+        assert_eq!(response["type"], "response.error");
+        assert_eq!(response["request_id"], "req-self-bad-1");
+        assert_eq!(response["error"]["code"], "invalid_command");
     }
 
     #[tokio::test]

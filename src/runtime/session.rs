@@ -188,7 +188,7 @@ impl<'a> SessionRuntime<'a> {
         model_override: Option<&str>,
         resume_session_id: Option<&str>,
         events: EventEmitter,
-        compact_config: CompactConfig,
+        mut compact_config: CompactConfig,
         registry: ToolRegistry,
         instructions: String,
         hooks: RuntimeHooks,
@@ -201,6 +201,7 @@ impl<'a> SessionRuntime<'a> {
         let session = match resume_session_id {
             Some(id) => {
                 let s = Session::get(store, id)?;
+                restore_compact_threshold_from_settings(&mut compact_config, &s);
                 if let Some(hook) = &hooks.on_event {
                     hook(RuntimeEvent::SessionResumed {
                         session_id: s.id.clone(),
@@ -268,7 +269,7 @@ impl<'a> SessionRuntime<'a> {
         model_override: Option<&str>,
         resume_session_id: Option<&str>,
         events: EventEmitter,
-        compact_config: CompactConfig,
+        mut compact_config: CompactConfig,
         registry: ToolRegistry,
         instructions: String,
         hooks: RuntimeHooks,
@@ -285,6 +286,7 @@ impl<'a> SessionRuntime<'a> {
         let session = match resume_session_id {
             Some(id) => {
                 let s = Session::get(&store_guard, id)?;
+                restore_compact_threshold_from_settings(&mut compact_config, &s);
                 if let Some(hook) = &hooks.on_event {
                     hook(RuntimeEvent::SessionResumed {
                         session_id: s.id.clone(),
@@ -790,6 +792,16 @@ impl<'a> SessionRuntime<'a> {
     }
 }
 
+fn restore_compact_threshold_from_settings(compact_config: &mut CompactConfig, session: &Session) {
+    if let Some(settings) = &session.settings
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(settings)
+        && let Some(threshold) = json.get("compact_threshold").and_then(|v| v.as_u64())
+        && let Ok(threshold_chars) = usize::try_from(threshold)
+    {
+        compact_config.threshold_chars = threshold_chars.max(1);
+    }
+}
+
 fn test_provider_response(history: &[serde_json::Value]) -> String {
     let latest_user = history.iter().rev().find_map(|item| {
         let item_type = item.get("type")?.as_str()?;
@@ -924,6 +936,9 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::truncate;
+    use super::*;
+    use crate::events::event_channel;
+    use crate::store::Session;
 
     #[test]
     fn truncate_preserves_utf8_boundaries() {
@@ -935,6 +950,75 @@ mod tests {
     fn truncate_uses_ellipsis_when_truncating() {
         assert_eq!(truncate("hello", 3), "hel...");
         assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn resume_restores_compact_threshold_from_session_settings() {
+        let store = Store::open_memory().unwrap();
+        let session = Session::create(
+            &store,
+            NewSession {
+                model: "test-model".to_string(),
+                provider: "test".to_string(),
+            },
+        )
+        .unwrap();
+        Session::update_settings(
+            &store,
+            &session.id,
+            &serde_json::json!({
+                "model": "test-model",
+                "provider": "test",
+                "compact_threshold": 12345,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (events, _rx) = event_channel();
+        let runtime = SessionRuntime::new(
+            &store,
+            ResolvedAuth {
+                provider: "test".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: "http://unused".to_string(),
+                account_id: None,
+            },
+            None,
+            Some(&session.id),
+            events,
+            CompactConfig::default(),
+            crate::tools::default_registry(std::env::current_dir().unwrap()),
+            "system".to_string(),
+            RuntimeHooks::default(),
+        )
+        .unwrap();
+
+        assert_eq!(runtime.compact_config.threshold_chars, 12_345);
+    }
+
+    #[test]
+    fn restore_compact_threshold_handles_zero_and_invalid_values() {
+        let mut compact = CompactConfig::default();
+        let mut session = Session {
+            id: "s1".to_string(),
+            model: "m".to_string(),
+            provider: "test".to_string(),
+            title: None,
+            status: SessionStatus::Active,
+            policy: None,
+            settings: Some("{\"compact_threshold\":0}".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        restore_compact_threshold_from_settings(&mut compact, &session);
+        assert_eq!(compact.threshold_chars, 1);
+
+        compact.threshold_chars = 777;
+        session.settings = Some("{\"compact_threshold\":\"nope\"}".to_string());
+        restore_compact_threshold_from_settings(&mut compact, &session);
+        assert_eq!(compact.threshold_chars, 777);
     }
 }
 
