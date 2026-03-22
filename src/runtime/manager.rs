@@ -96,6 +96,7 @@ impl RuntimeWorker {
     fn from_session(session: &Session) -> Self {
         let mut model = session.model.clone();
         let mut provider = session.provider.clone();
+        let mut compact_config = CompactConfig::default();
         if let Some(settings) = &session.settings
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(settings)
         {
@@ -104,6 +105,11 @@ impl RuntimeWorker {
             }
             if let Some(settings_provider) = json.get("provider").and_then(|v| v.as_str()) {
                 provider = settings_provider.to_string();
+            }
+            if let Some(threshold) = json.get("compact_threshold").and_then(|v| v.as_u64())
+                && let Ok(threshold_chars) = usize::try_from(threshold)
+            {
+                compact_config.threshold_chars = threshold_chars.max(1);
             }
         }
 
@@ -118,7 +124,7 @@ impl RuntimeWorker {
             provider,
             project_dir,
             instructions,
-            compact_config: CompactConfig::default(),
+            compact_config,
         }
     }
 
@@ -346,15 +352,18 @@ impl RuntimeManager {
         let sessions = self.lock_sessions();
         let entry = sessions.get(session_id)?;
         if let Some(active_turn) = &entry.active_turn {
-            if !active_turn.context_usage_initialized {
-                return None;
-            }
             return Some((
                 active_turn.context_used_chars,
                 active_turn.context_max_chars,
             ));
         }
         entry.last_context_usage
+    }
+
+    pub fn compact_threshold_chars(&self, session_id: &str) -> Option<usize> {
+        let sessions = self.lock_sessions();
+        let entry = sessions.get(session_id)?;
+        Some(entry.runtime.compact_config.threshold_chars.max(1))
     }
 
     pub fn token_usage(
@@ -797,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn active_turn_context_is_unknown_until_turn_started() {
+    fn active_turn_context_uses_baseline_before_turn_started() {
         let store = crate::store::Store::open_memory().expect("failed to open in-memory store");
         let session = Session::create(
             &store,
@@ -822,7 +831,10 @@ mod tests {
             )
             .expect("failed to start active turn");
 
-        assert!(manager.context_usage_chars(&session.id).is_none());
+        assert_eq!(
+            manager.context_usage_chars(&session.id),
+            Some((0, CompactConfig::default().threshold_chars))
+        );
     }
 
     #[test]

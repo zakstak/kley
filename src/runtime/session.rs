@@ -209,13 +209,21 @@ impl<'a> SessionRuntime<'a> {
                 s
             }
             None => {
-                let s = Session::create(
+                let mut s = Session::create(
                     store,
                     NewSession {
                         model: model.clone(),
                         provider: resolved.provider.clone(),
                     },
                 )?;
+                let settings_json = serde_json::json!({
+                    "model": model.clone(),
+                    "provider": resolved.provider.clone(),
+                    "compact_threshold": compact_config.threshold_chars,
+                })
+                .to_string();
+                Session::update_settings(store, &s.id, &settings_json)?;
+                s.settings = Some(settings_json);
                 if let Some(hook) = &hooks.on_event {
                     hook(RuntimeEvent::SessionCreated {
                         session_id: s.id.clone(),
@@ -285,13 +293,21 @@ impl<'a> SessionRuntime<'a> {
                 s
             }
             None => {
-                let s = Session::create(
+                let mut s = Session::create(
                     &store_guard,
                     NewSession {
                         model: model.clone(),
                         provider: resolved.provider.clone(),
                     },
                 )?;
+                let settings_json = serde_json::json!({
+                    "model": model.clone(),
+                    "provider": resolved.provider.clone(),
+                    "compact_threshold": compact_config.threshold_chars,
+                })
+                .to_string();
+                Session::update_settings(&store_guard, &s.id, &settings_json)?;
+                s.settings = Some(settings_json);
                 if let Some(hook) = &hooks.on_event {
                     hook(RuntimeEvent::SessionCreated {
                         session_id: s.id.clone(),
