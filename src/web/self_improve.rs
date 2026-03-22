@@ -425,6 +425,7 @@ impl SelfImproveManager {
 
             let outcome = match (active.stop_requested, exit_code) {
                 (true, _) => "stopped".to_string(),
+                (_, _) if active.latest_status == "blocked" => "failed".to_string(),
                 (_, Some(0)) => "success".to_string(),
                 _ => "failed".to_string(),
             };
@@ -895,7 +896,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_run_preserves_blocked_failure_detail() {
+    async fn finalize_run_preserves_blocked_failure_detail_on_clean_exit() {
         let manager = SelfImproveManager::new();
         let mut events = manager.subscribe();
 
@@ -917,7 +918,7 @@ mod tests {
             });
         }
 
-        manager.finalize_run("self-improve-1", Some(1)).await;
+        manager.finalize_run("self-improve-1", Some(0)).await;
 
         let snapshot = manager.snapshot().await;
         assert!(snapshot.active_run.is_none());
