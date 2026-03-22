@@ -756,12 +756,11 @@ async fn handle_socket(
                 }
             }
             self_improve_event = next_self_improve_event(&mut self_improve_events, &state.self_improve_manager) => {
-                if let Some(event) = self_improve_event {
-                    if let Some(ui_event) = self_improve_event_to_ui_event(event) {
-                        if send_event(&mut socket, ui_event).await.is_err() {
-                            break;
-                        }
-                    }
+                if let Some(event) = self_improve_event
+                    && let Some(ui_event) = self_improve_event_to_ui_event(event)
+                    && send_event(&mut socket, ui_event).await.is_err()
+                {
+                    break;
                 }
             }
         }
@@ -792,14 +791,12 @@ async fn next_self_improve_event(
     manager: &SelfImproveManager,
 ) -> Option<SelfImproveEvent> {
     match receiver.as_mut() {
-        Some(rx) => loop {
-            match rx.recv().await {
-                Ok(event) => return Some(event),
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    return Some(SelfImproveEvent::Snapshot(manager.snapshot().await));
-                }
-                Err(broadcast::error::RecvError::Closed) => return None,
+        Some(rx) => match rx.recv().await {
+            Ok(event) => Some(event),
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                Some(SelfImproveEvent::Snapshot(manager.snapshot().await))
             }
+            Err(broadcast::error::RecvError::Closed) => None,
         },
         None => pending().await,
     }
