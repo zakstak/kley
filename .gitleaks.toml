@@ -1,0 +1,34 @@
+[extend]
+useDefault = true
+
+# Pragma default gitleaks configuration.
+# Target repos can override by placing their own .gitleaks.toml at repo root.
+# See: https://github.com/gitleaks/gitleaks#configuration
+
+# Common allowlists for non-secret patterns that trip false positives
+[[allowlists]]
+description = "Example/placeholder API keys in docs and tests"
+regexTarget = "match"
+regexes = [
+  '''EXAMPLE[_-]?API[_-]?KEY''',
+  '''test[_-]?api[_-]?key''',
+  '''sk-[a-zA-Z0-9]{6}\.{3}''',
+]
+
+[[allowlists]]
+description = "AI model name patterns mistaken for API keys"
+regexTarget = "match"
+regexes = [
+  '''claude-[a-z]+-\d+-\d{8}''',
+  '''gpt-\d+[a-z-]*''',
+  '''gemini-[a-z0-9-]+''',
+]
+
+[allowlist]
+paths = [
+  '''(^|/)\.gitleaks\.toml$''',
+  '''(^|/)go\.sum$''',
+  '''(^|/)Cargo\.lock$''',
+  '''(^|/)bun\.lock$''',
+  '''(^|/)package-lock\.json$''',
+]
