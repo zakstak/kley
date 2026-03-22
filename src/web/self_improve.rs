@@ -78,6 +78,10 @@ struct ActiveRunState {
     log_tail: VecDeque<String>,
 }
 
+fn has_local_self_improve_script(repo_root: &Path) -> bool {
+    repo_root.join("self-improve.sh").is_file()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedStatusLine {
     status: String,
@@ -485,7 +489,7 @@ impl SelfImproveManager {
     where
         F: FnOnce(&Path) -> bool,
     {
-        if Path::new("/.dockerenv").exists() {
+        if has_local_self_improve_script(&self.repo_root) {
             return true;
         }
 
@@ -513,8 +517,8 @@ impl SelfImproveManager {
         let mut command = Command::new("setsid");
         command.arg("bash");
 
-        if Path::new("/.dockerenv").exists() {
-            command.arg("self-improve.sh");
+        if has_local_self_improve_script(&self.repo_root) {
+            command.arg("./self-improve.sh");
         } else {
             let launcher = self.repo_root.join("docker-session.sh");
             if !launcher.is_file() {
@@ -817,13 +821,13 @@ mod tests {
     }
 
     #[test]
-    fn launch_supported_is_false_on_host_without_runnable_docker() {
+    fn launch_supported_prefers_local_script_without_docker() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
-            temp_dir.path().join("docker-session.sh"),
+            temp_dir.path().join("self-improve.sh"),
             "#!/usr/bin/env bash\n",
         )
-        .expect("launcher should be written");
+        .expect("local self-improve script should be writable");
 
         let manager = SelfImproveManager {
             inner: Arc::new(Mutex::new(InnerState {
@@ -835,8 +839,14 @@ mod tests {
             repo_root: temp_dir.path().to_path_buf(),
         };
 
-        assert!(!manager.launch_supported_with(|_| false));
-        assert!(manager.launch_supported_with(|_| true));
+        let command = manager
+            .spawn_command_with(3, 15, |_| false)
+            .expect("should run local self-improve script directly");
+
+        assert!(manager.launch_supported_with(|_| false));
+        let debug = format!("{command:?}");
+        assert!(debug.contains("./self-improve.sh"));
+        assert!(!debug.contains("docker-session.sh"));
     }
 
     #[test]
