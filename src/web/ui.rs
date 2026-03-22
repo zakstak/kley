@@ -1,6 +1,6 @@
 use askama::Template;
 use axum::{
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{Html, IntoResponse},
 };
 

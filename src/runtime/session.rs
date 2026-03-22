@@ -7,9 +7,7 @@ use uuid::Uuid;
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter};
-use crate::provider::{
-    Provider, SendContext, TokenUsage, TurnResult, merge_token_usage,
-};
+use crate::provider::{Provider, SendContext, TokenUsage, TurnResult, merge_token_usage};
 use crate::store::{NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::ToolRegistry;
