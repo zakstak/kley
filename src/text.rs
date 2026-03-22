@@ -15,6 +15,7 @@ pub fn truncate_with_ascii_ellipsis(input: &str, max_chars: usize) -> String {
     truncate_with_suffix(input, max_chars, "...")
 }
 
+#[cfg(test)]
 pub fn truncate_with_unicode_ellipsis(input: &str, max_chars: usize) -> String {
     truncate_with_suffix(input, max_chars, "…")
 }
