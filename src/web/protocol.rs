@@ -155,6 +155,7 @@ pub enum UiEvent {
         request_id: String,
         session_id: String,
         turn_id: String,
+        context_usage: ContextUsage,
     },
     #[serde(rename = "turn.failed")]
     TurnFailed {

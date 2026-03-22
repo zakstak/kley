@@ -1000,6 +1000,11 @@ fn runtime_event_to_ui_event(
         AgentEvent::TurnCompleted {
             session_id,
             turn_id,
+            context_used_chars,
+            context_max_chars,
+            input_tokens,
+            output_tokens,
+            total_tokens,
             ..
         } => Some(UiEvent::TurnCompleted {
             event_id: format!("evt-{}", Uuid::new_v4()),
@@ -1007,6 +1012,13 @@ fn runtime_event_to_ui_event(
             request_id: request_id.to_string(),
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
+            context_usage: context_usage_from_chars(
+                *context_used_chars,
+                *context_max_chars,
+                *input_tokens,
+                *output_tokens,
+                *total_tokens,
+            ),
         }),
         AgentEvent::TurnFailed {
             session_id,

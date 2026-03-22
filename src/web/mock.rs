@@ -296,6 +296,14 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
         request_id: request_id.to_string(),
         session_id: session_id.to_string(),
         turn_id,
+        context_usage: ContextUsage {
+            used_chars: 120_000,
+            max_chars: 800_000,
+            percent_used: 15,
+            input_tokens: Some(2200),
+            output_tokens: Some(300),
+            total_tokens: Some(2500),
+        },
     });
 
     events
