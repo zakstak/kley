@@ -543,7 +543,11 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
             total_tokens,
         )
     } else {
-        estimate_persisted_context_usage(&turns)
+        let compact_threshold = state
+            .runtime_manager
+            .compact_threshold_chars(session_id)
+            .unwrap_or_else(|| CompactConfig::default().threshold_chars);
+        estimate_persisted_context_usage(&turns, compact_threshold)
     };
 
     Ok(StateSnapshotData {
@@ -557,10 +561,14 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
     })
 }
 
-fn estimate_persisted_context_usage(turns: &[Turn]) -> ContextUsage {
+fn estimate_persisted_context_usage(turns: &[Turn], compact_threshold: usize) -> ContextUsage {
     let history_items = crate::runtime::history_items_from_turns(turns);
-    let used_chars = estimate_effective_history_chars(&history_items, &CompactConfig::default());
-    let max_chars = CompactConfig::default().threshold_chars;
+    let compact_config = CompactConfig {
+        threshold_chars: compact_threshold.max(1),
+        ..CompactConfig::default()
+    };
+    let used_chars = estimate_effective_history_chars(&history_items, &compact_config);
+    let max_chars = compact_config.threshold_chars;
     let trailing_assistant = turns
         .last()
         .filter(|turn| turn.role == "assistant" && turn.kind == "message");
@@ -1161,7 +1169,8 @@ mod tests {
             &history_items,
             &CompactConfig::default(),
         );
-        let usage = estimate_persisted_context_usage(&turns);
+        let usage =
+            estimate_persisted_context_usage(&turns, CompactConfig::default().threshold_chars);
 
         assert_eq!(usage.used_chars, expected_chars);
         assert!(usage.used_chars < raw_chars);
@@ -1175,11 +1184,31 @@ mod tests {
         assistant.tokens_out = Some(30);
 
         let turns = vec![assistant, make_turn("message", "user", "follow-up")];
-        let usage = estimate_persisted_context_usage(&turns);
+        let usage =
+            estimate_persisted_context_usage(&turns, CompactConfig::default().threshold_chars);
 
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, None);
         assert_eq!(usage.total_tokens, None);
+    }
+
+    #[test]
+    fn persisted_context_usage_honors_custom_threshold() {
+        let turns: Vec<Turn> = (0..25)
+            .map(|index| Turn {
+                turn_number: (index + 1) as i64,
+                ..make_turn(
+                    "message",
+                    "user",
+                    &format!("message-{index}-{}", "x".repeat(8_000)),
+                )
+            })
+            .collect();
+
+        let usage = estimate_persisted_context_usage(&turns, 120_000);
+
+        assert_eq!(usage.max_chars, 120_000);
+        assert!(usage.percent_used <= 100);
     }
 }
 
