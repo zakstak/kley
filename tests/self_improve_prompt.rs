@@ -331,3 +331,60 @@ fn docker_entrypoint_dispatches_self_improve_through_bootstrap() {
         );
     }
 }
+
+#[test]
+fn self_improve_prompt_enforces_quality_guardrails() {
+    let script = self_improve_script();
+
+    // Value pre-check (Branch B)
+    for required in [
+        "## Value pre-check",
+        "Would a senior engineer mass-approve this",
+        "manufacturing an edge case to have something to fix",
+        "not contrived edge cases",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected self-improve prompt to contain {required:?}"
+        );
+    }
+
+    // History awareness (Branch C)
+    for required in [
+        "## History awareness",
+        "gh pr list --repo zakstak/kley --state all --limit 20",
+        "Review recent PR history",
+        "overlaps with a recent PR",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected self-improve prompt to contain {required:?}"
+        );
+    }
+
+    // Diff size guardrails (Branch A)
+    for required in [
+        "## Diff size guardrails",
+        "Maximum 200 added lines excluding test files",
+        "Maximum 5 changed files",
+        "Enforce diff size guardrails",
+        "git diff --numstat",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected self-improve prompt to contain {required:?}"
+        );
+    }
+
+    // Expanded disallowed work (Branch B + C)
+    for required in [
+        "Edge-case hardening for code paths with no evidence of real-world exercise",
+        "Panic guards for conditions that require multiple simultaneous failures",
+        "Variations or re-attempts of previously submitted PRs",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected self-improve prompt to contain {required:?}"
+        );
+    }
+}

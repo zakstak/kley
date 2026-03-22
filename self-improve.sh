@@ -172,13 +172,23 @@ If you cannot meet this bar confidently, report `no-safe-change`.
 ## Priorities
 Choose the highest-value item from this order:
 1. Existing failing validation on `main`
-2. Reproducible correctness bugs
-3. Missing regression tests near risky logic
-4. Panic/error-handling holes, especially `unwrap()` / `expect()` in library code
+2. Reproducible correctness bugs that affect user-visible behavior or developer workflow
+3. Changes that improve a code path exercised during normal usage (not contrived edge cases)
+4. Missing regression tests near risky logic that has actually caused or nearly caused failures
 5. Harness/workflow/script failures or concrete missing capabilities (including tools) observed in prior runs or reproducible locally, with deterministic local validation
-6. Small measurable improvements to reliability or maintainability
+6. Panic/error-handling holes, but only when the panic is reachable through normal operation (not multi-fault hypotheticals)
+7. Small measurable improvements to reliability or maintainability
 
 Prompt wording changes, comment changes, and docs-only changes are last resort and usually not acceptable.
+
+## Value pre-check
+Before creating a branch, pass this self-test. If any answer is unfavorable, report `no-safe-change`.
+
+1. Would a senior engineer mass-approve this, or would they comment "who cares?"
+2. Does this change affect a code path that has actually been exercised in production, testing, or normal development? If you cannot point to evidence of real exercise, the answer is no.
+3. Am I solving a real problem I observed, or am I manufacturing an edge case to have something to fix?
+
+Be honest. The goal is meaningful improvement, not completing a cycle.
 
 ## Disallowed low-value work
 These are worse than `no-safe-change` unless directly required by a substantive fix:
@@ -193,6 +203,26 @@ These are worse than `no-safe-change` unless directly required by a substantive 
 - Prompt-only tweaks with no deterministic validation
 - Dependency bumps without a concrete failing reason
 - Any change whose benefit cannot be demonstrated locally
+- Edge-case hardening for code paths with no evidence of real-world exercise
+- Panic guards for conditions that require multiple simultaneous failures to trigger
+- Defensive fixes for hypothetical scenarios not demonstrated by actual tests, logs, or usage
+- Variations or re-attempts of previously submitted PRs (even closed or rejected ones)
+- Fixes in the same code area or addressing the same pattern as a PR submitted within the last 20 PRs
+
+## History awareness
+Before selecting candidates, review your own recent PR history to avoid repeating work.
+- Run `gh pr list --repo zakstak/kley --state all --limit 20 --json title,headRefName,state` at the start of each cycle.
+- Do not address the same area, problem, or code path as any recent PR.
+- Do not submit a fix that is a variation of, follow-up to, or retry of a previous fix.
+- If your best candidate overlaps with a recent PR, choose a different candidate or report `no-safe-change`.
+- This rule applies regardless of whether the previous PR was merged, closed, or is still open.
+
+## Diff size guardrails
+Oversized PRs are a review burden and a sign the change is not atomic enough.
+- Maximum 200 added lines excluding test files. If your fix needs more, scope it down or report `no-safe-change`.
+- Maximum 5 changed files. If you are touching more, the change is not focused enough — break it up or pick a simpler target.
+- Before committing, run `git diff --stat` and count added lines outside `tests/` and `**/tests/**`. If either limit is exceeded, unstage everything, discard the branch, and report `no-safe-change`.
+- These limits apply to the total diff, not individual commits.
 
 ## Non-negotiable rules
 - One improvement per branch/PR. Do not bundle unrelated changes.
@@ -262,12 +292,17 @@ This retrospective informs future cycles. It does not lower the quality bar for 
    - If `gh auth status` succeeds, refresh the HTTPS credential helper with `gh auth setup-git` before any HTTPS fallback path.
    - `git pull --ff-only "$REMOTE" "$BASE_BRANCH"`
 
-3. Inspect the current state.
+3. Review recent PR history.
+   - Run `gh pr list --repo zakstak/kley --state all --limit 20 --json title,headRefName,state`.
+   - Note which code areas and problem types have already been addressed.
+   - Any candidate that overlaps with a recent PR is disqualified.
+
+4. Inspect the current state.
    - Review relevant code in `src/`, `tests/`, scripts, workflows, and `.agents/`.
    - Look for failing checks, risky code paths, missing tests, and reproducible defects.
    - If `main` is already failing validation, fixing that failure is the top priority.
 
-4. Select candidates.
+5. Select candidates.
     - Identify 2-3 possible improvements.
     - When the evidence points to a concrete missing capability, include a tool/capability improvement among the candidates.
     - Choose the one with the best combination of:
@@ -276,26 +311,26 @@ This retrospective informs future cycles. It does not lower the quality bar for 
      - local testability
    - Do not choose the easiest change just to complete a cycle.
 
-5. Capture before-evidence.
+6. Capture before-evidence.
    - Run the smallest deterministic command/test/check that demonstrates the current problem.
    - Save the exact command and its result for the PR/status report.
    - If no before-evidence is possible, do not proceed.
 
-6. Create a branch from the selected base branch.
+7. Create a branch from the selected base branch.
    - `git switch -c improve/<short-slug>`
    - If that branch name already exists, choose a unique one.
    - If `BASE_BRANCH` is not `main`, record it with `git config branch."$(git branch --show-current)".gh-merge-base "$BASE_BRANCH"` so `gh` keeps the stack pointed at the right parent.
 
-7. Implement the smallest complete fix.
+8. Implement the smallest complete fix.
    - Keep the change focused and atomic.
    - Add or update tests as required.
    - Avoid unrelated cleanup.
 
-8. Validate the specific fix first.
+9. Validate the specific fix first.
    - Re-run the before-evidence command/check and confirm the after-state.
    - Run the new or modified tests directly when helpful.
 
-9. Run full validation before committing.
+10. Run full validation before committing.
    - `cargo fmt`
    - `cargo fmt --check`
    - `cargo clippy -- -D warnings`
@@ -304,66 +339,42 @@ This retrospective informs future cycles. It does not lower the quality bar for 
    - Plus targeted checks for changed non-Rust files
    - For changed shell scripts: `bash -n <script>`
 
-10. Review the diff.
+11. Review the diff.
     - `git diff --check`
     - `git diff --stat`
     - Confirm there are no accidental files or unrelated edits.
     - If the diff looks trivial or weakly justified, do not commit it.
 
-11. Commit with a descriptive conventional commit message.
+
+12. Enforce diff size guardrails.
+     - Count added lines outside test files: `git diff --numstat | grep -v -E '(^tests/|/tests/)' | awk '{s+=$1} END {print s+0}'`
+     - Count changed files: `git diff --name-only | wc -l`
+     - If added lines > 200 or changed files > 5, the change is too large. Unstage, discard the branch, and report `no-safe-change`.
+13. Commit with a descriptive conventional commit message.
     - Format: `type(scope): subject`
 
-12. Push the branch.
+14. Push the branch.
     - Try SSH first, then HTTPS fallback:
       - `git push -u origin HEAD || git push -u upstream HEAD`
 
-13. Open a PR non-interactively.
+15. Open a PR non-interactively.
     - Use: `gh pr create --repo zakstak/kley --base "$BASE_BRANCH" --head improve/<slug> --title "<title>" --body "<body>"`
     - Do not rely on implicit base selection or only on `gh pr create --fill`.
 
-14. PR body requirements
-The PR body must include these sections:
+16. PR body requirements
+Keep PR descriptions concise. Aim for under 20 lines total. Do not pad with unnecessary detail.
 
-Problem
-- What concrete issue/gap existed?
+**Problem** — 1-2 sentences. What was broken or missing?
 
-Why this matters
-- Why is this worth reviewer time?
+**Changes** — Bullet list of what changed. One line per file or logical unit.
 
-Before
-- Exact command(s) used to reproduce or demonstrate the issue
-- Short summary of the result
+**Before / After** — The exact command and result, before and after. 2-4 lines max.
 
-Changes
-- What was changed?
+**Validation** — `cargo fmt --check` / `cargo clippy` / `cargo test` / `cargo build --release`: pass or fail. Plus any targeted checks.
 
-Tests added/changed
-- List the new or modified tests
-- State what bug/path they protect
+Omit "Why this matters", "Risks / follow-up", and other padding sections unless genuinely necessary. If SQL or harness files changed, add one line explaining the impact.
 
-After
-- Exact command(s) re-run after the change
-- Short summary of the result
-
-Full validation
-- `cargo fmt --check`
-- `cargo clippy -- -D warnings`
-- `cargo test`
-- `cargo build --release`
-- any targeted non-Rust checks
-
-Risks / follow-up
-- Remaining risk and the best next improvement
-
-If SQL or store code changed:
-- Explain query/index impact
-
-If harness/prompt/workflow files changed:
-- Explain the concrete failure mode addressed
-- Explain how the change affects future runs
-- Explain how it was validated locally without recursion
-
-15. Switch back to `main` when the worktree is clean.
+17. Switch back to `main` when the worktree is clean.
 
 ## Failure handling
 - If validation fails because of your change, fix it before proceeding.
