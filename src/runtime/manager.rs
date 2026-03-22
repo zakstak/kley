@@ -29,6 +29,7 @@ pub struct ActiveTurnReplay {
     pub content: String,
     pub context_used_chars: usize,
     pub context_max_chars: usize,
+    pub context_usage_initialized: bool,
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
     pub total_tokens: Option<usize>,
@@ -322,7 +323,9 @@ impl RuntimeManager {
             });
         }
 
-        let (baseline_used_chars, baseline_max_chars) = entry.last_context_usage.unwrap_or((0, 1));
+        let (baseline_used_chars, baseline_max_chars) = entry
+            .last_context_usage
+            .unwrap_or((0, CompactConfig::default().threshold_chars));
 
         entry.active_turn = Some(ActiveTurnReplay {
             request_id,
@@ -331,6 +334,7 @@ impl RuntimeManager {
             content: String::new(),
             context_used_chars: baseline_used_chars,
             context_max_chars: baseline_max_chars.max(1),
+            context_usage_initialized: false,
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -342,6 +346,9 @@ impl RuntimeManager {
         let sessions = self.lock_sessions();
         let entry = sessions.get(session_id)?;
         if let Some(active_turn) = &entry.active_turn {
+            if !active_turn.context_usage_initialized {
+                return None;
+            }
             return Some((
                 active_turn.context_used_chars,
                 active_turn.context_max_chars,
@@ -523,13 +530,19 @@ impl RuntimeManager {
         if let AgentEvent::MessageDelta { delta, .. } = &event
             && let Some(active_turn) = entry.active_turn.as_mut()
         {
+            let prior_chars = assistant_message_context_chars(&active_turn.content);
             active_turn.content.push_str(delta);
-            active_turn.context_used_chars =
-                active_turn.context_used_chars.saturating_add(delta.len());
-            entry.last_context_usage = Some((
-                active_turn.context_used_chars,
-                active_turn.context_max_chars,
-            ));
+            if active_turn.context_usage_initialized {
+                let updated_chars = assistant_message_context_chars(&active_turn.content);
+                active_turn.context_used_chars = active_turn
+                    .context_used_chars
+                    .saturating_sub(prior_chars)
+                    .saturating_add(updated_chars);
+                entry.last_context_usage = Some((
+                    active_turn.context_used_chars,
+                    active_turn.context_max_chars,
+                ));
+            }
         }
 
         if let AgentEvent::ToolCallCompleted {
@@ -541,6 +554,7 @@ impl RuntimeManager {
         {
             active_turn.context_used_chars = *context_used_chars;
             active_turn.context_max_chars = (*context_max_chars).max(1);
+            active_turn.context_usage_initialized = true;
             entry.last_context_usage = Some((
                 active_turn.context_used_chars,
                 active_turn.context_max_chars,
@@ -558,6 +572,7 @@ impl RuntimeManager {
         {
             active_turn.context_used_chars = *context_used_chars;
             active_turn.context_max_chars = (*context_max_chars).max(1);
+            active_turn.context_usage_initialized = true;
             active_turn.input_tokens = None;
             active_turn.output_tokens = None;
             active_turn.total_tokens = None;
@@ -660,6 +675,18 @@ impl RuntimeManager {
             }
         }
     }
+}
+
+fn assistant_message_context_chars(content: &str) -> usize {
+    if content.is_empty() {
+        return 0;
+    }
+
+    crate::compact::estimate_history_chars(&[serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": content,
+    })])
 }
 
 #[cfg(test)]
@@ -766,6 +793,108 @@ mod tests {
                     "message-1".to_string(),
                 )
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn active_turn_context_is_unknown_until_turn_started() {
+        let store = crate::store::Store::open_memory().expect("failed to open in-memory store");
+        let session = Session::create(
+            &store,
+            NewSession {
+                model: "test-model".to_string(),
+                provider: "test".to_string(),
+            },
+        )
+        .expect("failed to create session");
+
+        let manager = RuntimeManager::new();
+        manager
+            .attach_controller(&session, "controller-1")
+            .expect("failed to attach controller");
+
+        manager
+            .start_active_turn(
+                &session.id,
+                "request-id".to_string(),
+                "turn-1".to_string(),
+                "message-1".to_string(),
+            )
+            .expect("failed to start active turn");
+
+        assert!(manager.context_usage_chars(&session.id).is_none());
+    }
+
+    #[test]
+    fn message_delta_uses_serialized_assistant_message_size() {
+        let store = crate::store::Store::open_memory().expect("failed to open in-memory store");
+        let session = Session::create(
+            &store,
+            NewSession {
+                model: "test-model".to_string(),
+                provider: "test".to_string(),
+            },
+        )
+        .expect("failed to create session");
+
+        let manager = RuntimeManager::new();
+        manager
+            .attach_controller(&session, "controller-1")
+            .expect("failed to attach controller");
+        manager
+            .start_active_turn(
+                &session.id,
+                "request-id".to_string(),
+                "turn-1".to_string(),
+                "message-1".to_string(),
+            )
+            .expect("failed to start active turn");
+
+        manager.publish_runtime_event(
+            &session.id,
+            "request-id",
+            AgentEvent::TurnStarted {
+                session_id: session.id.clone(),
+                turn_id: "turn-1".to_string(),
+                model: "test-model".to_string(),
+                turn_number: 1,
+                context_used_chars: 100,
+                context_max_chars: 1000,
+            },
+        );
+
+        manager.publish_runtime_event(
+            &session.id,
+            "request-id",
+            AgentEvent::MessageDelta {
+                session_id: session.id.clone(),
+                turn_id: "turn-1".to_string(),
+                message_id: "message-1".to_string(),
+                delta: "line 1\n\"quoted\"".to_string(),
+            },
+        );
+
+        let first_expected = 100 + assistant_message_context_chars("line 1\n\"quoted\"");
+        assert_eq!(
+            manager.context_usage_chars(&session.id),
+            Some((first_expected, 1000))
+        );
+
+        manager.publish_runtime_event(
+            &session.id,
+            "request-id",
+            AgentEvent::MessageDelta {
+                session_id: session.id.clone(),
+                turn_id: "turn-1".to_string(),
+                message_id: "message-1".to_string(),
+                delta: " plus more".to_string(),
+            },
+        );
+
+        let second_expected = 100 + assistant_message_context_chars("line 1\n\"quoted\" plus more");
+        assert_eq!(
+            manager.context_usage_chars(&session.id),
+            Some((second_expected, 1000))
         );
     }
 }

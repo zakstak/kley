@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::compact::{CompactConfig, estimate_history_chars};
+use crate::compact::{CompactConfig, estimate_effective_history_chars};
 use crate::events::AgentEvent;
 use crate::runtime::{
     AbortTurnError, ActiveTurnReplay, AttachControllerError, RuntimeEventEnvelope,
@@ -558,16 +558,16 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
 }
 
 fn estimate_persisted_context_usage(turns: &[Turn]) -> ContextUsage {
-    let used_chars = estimate_history_chars(&crate::runtime::history_items_from_turns(turns));
+    let history_items = crate::runtime::history_items_from_turns(turns);
+    let used_chars = estimate_effective_history_chars(&history_items, &CompactConfig::default());
     let max_chars = CompactConfig::default().threshold_chars;
-    let latest_assistant = turns
-        .iter()
-        .rev()
-        .find(|turn| turn.role == "assistant" && turn.kind == "message");
-    let input_tokens = latest_assistant
+    let trailing_assistant = turns
+        .last()
+        .filter(|turn| turn.role == "assistant" && turn.kind == "message");
+    let input_tokens = trailing_assistant
         .and_then(|turn| turn.tokens_in)
         .and_then(|value| usize::try_from(value).ok());
-    let output_tokens = latest_assistant
+    let output_tokens = trailing_assistant
         .and_then(|turn| turn.tokens_out)
         .and_then(|value| usize::try_from(value).ok());
     let total_tokens = match (input_tokens, output_tokens) {
@@ -1120,6 +1120,67 @@ fn session_busy_error(err: AttachControllerError) -> ResponseError {
 
 fn ts_now() -> String {
     Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_turn(kind: &str, role: &str, content: &str) -> Turn {
+        Turn {
+            id: 1,
+            session_id: "sess-1".to_string(),
+            kind: kind.to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            model: None,
+            tokens_in: None,
+            tokens_out: None,
+            turn_number: 1,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn persisted_context_usage_uses_compaction_aware_estimate() {
+        let turns: Vec<Turn> = (0..30)
+            .map(|index| Turn {
+                turn_number: (index + 1) as i64,
+                ..make_turn(
+                    "message",
+                    "user",
+                    &format!("message-{index}-{}", "x".repeat(40_000)),
+                )
+            })
+            .collect();
+
+        let history_items = crate::runtime::history_items_from_turns(&turns);
+        let raw_chars = crate::compact::estimate_history_chars(&history_items);
+        let expected_chars = crate::compact::estimate_effective_history_chars(
+            &history_items,
+            &CompactConfig::default(),
+        );
+        let usage = estimate_persisted_context_usage(&turns);
+
+        assert_eq!(usage.used_chars, expected_chars);
+        assert!(usage.used_chars < raw_chars);
+        assert_eq!(usage.max_chars, CompactConfig::default().threshold_chars);
+    }
+
+    #[test]
+    fn persisted_context_usage_drops_tokens_when_tail_is_not_assistant() {
+        let mut assistant = make_turn("message", "assistant", "done");
+        assistant.tokens_in = Some(120);
+        assistant.tokens_out = Some(30);
+
+        let turns = vec![assistant, make_turn("message", "user", "follow-up")];
+        let usage = estimate_persisted_context_usage(&turns);
+
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.total_tokens, None);
+    }
 }
 
 async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {

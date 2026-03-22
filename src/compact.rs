@@ -39,6 +39,31 @@ pub fn estimate_history_chars(history: &[serde_json::Value]) -> usize {
         .sum()
 }
 
+pub fn estimate_effective_history_chars(
+    history: &[serde_json::Value],
+    config: &CompactConfig,
+) -> usize {
+    let raw_chars = estimate_history_chars(history);
+    if raw_chars <= config.threshold_chars || history.len() <= config.keep_recent {
+        return raw_chars;
+    }
+
+    let split_at = history.len() - config.keep_recent;
+    let old_items = &history[..split_at];
+    let recent_items = &history[split_at..];
+    let old_chars = estimate_history_chars(old_items);
+    let recent_chars = estimate_history_chars(recent_items);
+    let summary_placeholder = serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": format!(
+            "{SUMMARY_PREFIX}\n\n[Recovered compacted history estimate for {split_at} earlier items ({old_chars} serialized chars).]"
+        ),
+    });
+
+    recent_chars + estimate_history_chars(&[summary_placeholder])
+}
+
 /// Check whether the history exceeds the compaction threshold.
 pub fn needs_compaction(history: &[serde_json::Value], threshold: usize) -> bool {
     estimate_history_chars(history) > threshold
@@ -284,6 +309,23 @@ mod tests {
     fn test_empty_history_no_compaction() {
         let history: Vec<serde_json::Value> = vec![];
         assert!(!needs_compaction(&history, 0));
+    }
+
+    #[test]
+    fn test_estimate_effective_history_chars_reduces_large_history() {
+        let history: Vec<serde_json::Value> = (0..30)
+            .map(|i| make_history_item(&format!("message-{i}-{}", "x".repeat(50))))
+            .collect();
+        let config = CompactConfig {
+            threshold_chars: 100,
+            keep_recent: 10,
+        };
+
+        let raw_chars = estimate_history_chars(&history);
+        let effective_chars = estimate_effective_history_chars(&history, &config);
+
+        assert!(effective_chars < raw_chars);
+        assert!(effective_chars > estimate_history_chars(&history[20..]));
     }
 
     #[tokio::test]
