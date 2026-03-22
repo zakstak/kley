@@ -3,8 +3,8 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::protocol::{
-    ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary,
-    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
+    ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession, SelfImproveSnapshotData,
+    SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -173,6 +173,26 @@ async fn handle_socket(mut socket: WebSocket) {
                     return;
                 }
             }
+            WebCommand::SelfImproveGet { request_id } => {
+                let data = serde_json::to_value(mock_self_improve_snapshot()).unwrap();
+                if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            WebCommand::SelfImproveStart { request_id, .. }
+            | WebCommand::SelfImproveStop { request_id }
+            | WebCommand::SelfImproveRestart { request_id, .. } => {
+                let data = serde_json::to_value(mock_self_improve_snapshot()).unwrap();
+                if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
     }
 }
@@ -207,6 +227,17 @@ fn snapshot_data() -> StateSnapshotData {
             output_tokens: None,
             total_tokens: None,
         },
+        self_improve: mock_self_improve_snapshot(),
+    }
+}
+
+fn mock_self_improve_snapshot() -> SelfImproveSnapshotData {
+    SelfImproveSnapshotData {
+        available: true,
+        active_run: None,
+        history: Vec::new(),
+        recent_logs: vec!["cycle-1-20260101T000000.log".to_string()],
+        retrospectives: Vec::new(),
     }
 }
 
@@ -230,6 +261,7 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
             request_id: request_id.to_string(),
             session_id: session_id.to_string(),
             turn_id: turn_id.clone(),
+            context_usage: mock_context_usage(12),
         },
         UiEvent::MessageStarted {
             event_id: format!("evt-message-started-{index:04}"),
@@ -287,6 +319,7 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
             tool_call_id,
             tool_name: "read".to_string(),
             success: true,
+            context_usage: mock_context_usage(34),
         });
     }
 
@@ -311,6 +344,19 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
 
 fn ts(second: u8) -> String {
     format!("2026-01-01T00:00:{second:02}Z")
+}
+
+fn mock_context_usage(percent_used: u8) -> ContextUsage {
+    let max_chars = 800_000usize;
+    let used_chars = (max_chars.saturating_mul(usize::from(percent_used))) / 100;
+    ContextUsage {
+        used_chars,
+        max_chars,
+        percent_used,
+        input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+    }
 }
 
 async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {

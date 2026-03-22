@@ -22,6 +22,7 @@ use super::protocol::{
     ActiveTurnSnapshot, ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession,
     SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
+use super::self_improve::{SelfImproveError, SelfImproveEvent, SelfImproveManager};
 use super::state::WebAppState;
 
 const DEFAULT_WEB_MODEL: &str = "test-model";
@@ -38,6 +39,155 @@ pub async fn ws_handler(
     State(state): State<WebAppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state, query.session_id))
+}
+
+pub async fn ws_self_improve_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<WebAppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_self_improve_socket(socket, state))
+}
+
+async fn handle_self_improve_socket(mut socket: WebSocket, state: WebAppState) {
+    let mut events = Some(state.self_improve_manager.subscribe());
+    let initial = state.self_improve_manager.snapshot().await;
+    if send_event(
+        &mut socket,
+        UiEvent::SelfImproveSnapshot {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            data: initial,
+        },
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            maybe_message = socket.recv() => {
+                let Some(Ok(message)) = maybe_message else {
+                    break;
+                };
+                let Message::Text(text) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                    continue;
+                };
+
+                let raw: Value = match serde_json::from_str(&text) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        if send_response(
+                            &mut socket,
+                            WebResponse::Error {
+                                request_id: "unknown".to_string(),
+                                error: invalid_command_error("invalid command payload"),
+                            },
+                        ).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+                let request_id = raw
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let command: WebCommand = match serde_json::from_value(raw) {
+                    Ok(command) => command,
+                    Err(_) => {
+                        if send_response(
+                            &mut socket,
+                            WebResponse::Error {
+                                request_id,
+                                error: invalid_command_error("unsupported command"),
+                            },
+                        ).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+                let response = match command {
+                    WebCommand::SelfImproveGet { request_id } => WebResponse::Ok {
+                        request_id,
+                        data: serde_json::to_value(state.self_improve_manager.snapshot().await)
+                            .unwrap_or_else(|_| json!({})),
+                    },
+                    WebCommand::SelfImproveStart {
+                        request_id,
+                        max_cycles,
+                        turns_per_cycle,
+                    } => match state.self_improve_manager.start(max_cycles, turns_per_cycle).await {
+                        Ok(snapshot) => WebResponse::Ok {
+                            request_id,
+                            data: serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+                        },
+                        Err(err) => WebResponse::Error {
+                            request_id,
+                            error: self_improve_error(err),
+                        },
+                    },
+                    WebCommand::SelfImproveStop { request_id } => {
+                        match state.self_improve_manager.stop().await {
+                            Ok(snapshot) => WebResponse::Ok {
+                                request_id,
+                                data: serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+                            },
+                            Err(err) => WebResponse::Error {
+                                request_id,
+                                error: self_improve_error(err),
+                            },
+                        }
+                    }
+                    WebCommand::SelfImproveRestart {
+                        request_id,
+                        max_cycles,
+                        turns_per_cycle,
+                    } => match state
+                        .self_improve_manager
+                        .restart(max_cycles, turns_per_cycle)
+                        .await
+                    {
+                        Ok(snapshot) => WebResponse::Ok {
+                            request_id,
+                            data: serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+                        },
+                        Err(err) => WebResponse::Error {
+                            request_id,
+                            error: self_improve_error(err),
+                        },
+                    },
+                    _ => WebResponse::Error {
+                        request_id: command.request_id().to_string(),
+                        error: invalid_command_error(
+                            "self-improve socket only accepts self_improve.* commands",
+                        ),
+                    },
+                };
+
+                if send_response(&mut socket, response).await.is_err() {
+                    break;
+                }
+            }
+            event = next_self_improve_event(&mut events, &state.self_improve_manager) => {
+                if let Some(event) = event
+                    && let Some(ui_event) = self_improve_event_to_ui_event(event)
+                    && send_event(&mut socket, ui_event).await.is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 async fn handle_socket(
@@ -67,6 +217,7 @@ async fn handle_socket(
         };
 
     let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
+    let mut self_improve_events = Some(state.self_improve_manager.subscribe());
 
     if send_bootstrap_event(&mut socket, &state, &active_session.id)
         .await
@@ -461,6 +612,132 @@ async fn handle_socket(
                             }
                         }
                     }
+                    WebCommand::SelfImproveGet { request_id } => {
+                        let snapshot = state.self_improve_manager.snapshot().await;
+                        if send_response(
+                            &mut socket,
+                            WebResponse::Ok {
+                                request_id,
+                                data: serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    WebCommand::SelfImproveStart {
+                        request_id,
+                        max_cycles,
+                        turns_per_cycle,
+                    } => match state
+                        .self_improve_manager
+                        .start(max_cycles, turns_per_cycle)
+                        .await
+                    {
+                        Ok(snapshot) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Ok {
+                                    request_id,
+                                    data: serde_json::to_value(snapshot)
+                                        .unwrap_or_else(|_| json!({})),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: self_improve_error(err),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    },
+                    WebCommand::SelfImproveStop { request_id } => {
+                        match state.self_improve_manager.stop().await {
+                            Ok(snapshot) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: serde_json::to_value(snapshot)
+                                            .unwrap_or_else(|_| json!({})),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: self_improve_error(err),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::SelfImproveRestart {
+                        request_id,
+                        max_cycles,
+                        turns_per_cycle,
+                    } => match state
+                        .self_improve_manager
+                        .restart(max_cycles, turns_per_cycle)
+                        .await
+                    {
+                        Ok(snapshot) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Ok {
+                                    request_id,
+                                    data: serde_json::to_value(snapshot)
+                                        .unwrap_or_else(|_| json!({})),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: self_improve_error(err),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    },
                 }
             }
             runtime_event = next_runtime_event(&mut runtime_events) => {
@@ -475,6 +752,15 @@ async fn handle_socket(
 
                     if send_event(&mut socket, ui_event).await.is_err() {
                         break;
+                    }
+                }
+            }
+            self_improve_event = next_self_improve_event(&mut self_improve_events, &state.self_improve_manager) => {
+                if let Some(event) = self_improve_event {
+                    if let Some(ui_event) = self_improve_event_to_ui_event(event) {
+                        if send_event(&mut socket, ui_event).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -494,6 +780,24 @@ async fn next_runtime_event(
             match rx.recv().await {
                 Ok(event) => return Some(event),
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        },
+        None => pending().await,
+    }
+}
+
+async fn next_self_improve_event(
+    receiver: &mut Option<broadcast::Receiver<SelfImproveEvent>>,
+    manager: &SelfImproveManager,
+) -> Option<SelfImproveEvent> {
+    match receiver.as_mut() {
+        Some(rx) => loop {
+            match rx.recv().await {
+                Ok(event) => return Some(event),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    return Some(SelfImproveEvent::Snapshot(manager.snapshot().await));
+                }
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         },
@@ -549,6 +853,7 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
             .unwrap_or_else(|| CompactConfig::default().threshold_chars);
         estimate_persisted_context_usage(&turns, compact_threshold)
     };
+    let self_improve = state.self_improve_manager.snapshot().await;
 
     Ok(StateSnapshotData {
         protocol_version: PROTOCOL_VERSION,
@@ -558,6 +863,7 @@ async fn snapshot_data(state: &WebAppState, session_id: &str) -> Result<StateSna
         transcript,
         active_turn,
         context_usage,
+        self_improve,
     })
 }
 
@@ -609,6 +915,22 @@ fn context_usage_from_chars(
         output_tokens,
         total_tokens,
     }
+}
+
+fn context_usage_from_event(
+    used_chars: usize,
+    max_chars: usize,
+    input_tokens: Option<usize>,
+    output_tokens: Option<usize>,
+    total_tokens: Option<usize>,
+) -> ContextUsage {
+    context_usage_from_chars(
+        used_chars,
+        max_chars,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    )
 }
 
 fn active_turn_snapshot(active: ActiveTurnReplay) -> ActiveTurnSnapshot {
@@ -925,6 +1247,8 @@ fn runtime_event_to_ui_event(
         AgentEvent::TurnStarted {
             session_id,
             turn_id,
+            context_used_chars,
+            context_max_chars,
             ..
         } => Some(UiEvent::TurnStarted {
             event_id: format!("evt-{}", Uuid::new_v4()),
@@ -932,6 +1256,13 @@ fn runtime_event_to_ui_event(
             request_id: request_id.to_string(),
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
+            context_usage: context_usage_from_event(
+                *context_used_chars,
+                *context_max_chars,
+                None,
+                None,
+                None,
+            ),
         }),
         AgentEvent::MessageStarted {
             session_id,
@@ -994,6 +1325,8 @@ fn runtime_event_to_ui_event(
             tool_call_id,
             tool_name,
             success,
+            context_used_chars,
+            context_max_chars,
             ..
         } => Some(UiEvent::ToolCompleted {
             event_id: format!("evt-{}", Uuid::new_v4()),
@@ -1004,6 +1337,13 @@ fn runtime_event_to_ui_event(
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
             success: *success,
+            context_usage: context_usage_from_event(
+                *context_used_chars,
+                *context_max_chars,
+                None,
+                None,
+                None,
+            ),
         }),
         AgentEvent::TurnCompleted {
             session_id,
@@ -1020,7 +1360,7 @@ fn runtime_event_to_ui_event(
             request_id: request_id.to_string(),
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
-            context_usage: context_usage_from_chars(
+            context_usage: context_usage_from_event(
                 *context_used_chars,
                 *context_max_chars,
                 *input_tokens,
@@ -1123,6 +1463,41 @@ fn session_busy_error(err: AttachControllerError) -> ResponseError {
                 "active_controller_id": active_controller_id,
             })),
         },
+    }
+}
+
+fn self_improve_error(err: SelfImproveError) -> ResponseError {
+    ResponseError {
+        code: err.code.to_string(),
+        message: err.message,
+        details: None,
+    }
+}
+
+fn self_improve_event_to_ui_event(event: SelfImproveEvent) -> Option<UiEvent> {
+    match event {
+        SelfImproveEvent::Snapshot(data) => Some(UiEvent::SelfImproveSnapshot {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            data,
+        }),
+        SelfImproveEvent::LogLine { run_id, line } => Some(UiEvent::SelfImproveLog {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            run_id,
+            line,
+        }),
+        SelfImproveEvent::Status {
+            run_id,
+            status,
+            detail,
+        } => Some(UiEvent::SelfImproveStatus {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            run_id,
+            status,
+            detail,
+        }),
     }
 }
 
