@@ -24,7 +24,8 @@ regexes = [
   '''gemini-[a-z0-9-]+''',
 ]
 
-[allowlist]
+[[allowlists]]
+description = "Generated lockfiles and gitleaks config"
 paths = [
   '''(^|/)\.gitleaks\.toml$''',
   '''(^|/)go\.sum$''',
