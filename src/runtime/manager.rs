@@ -331,7 +331,7 @@ impl RuntimeManager {
 
         let (baseline_used_chars, baseline_max_chars) = entry
             .last_context_usage
-            .unwrap_or((0, CompactConfig::default().threshold_chars));
+            .unwrap_or((0, entry.runtime.compact_config.threshold_chars));
 
         entry.active_turn = Some(ActiveTurnReplay {
             request_id,
@@ -352,6 +352,9 @@ impl RuntimeManager {
         let sessions = self.lock_sessions();
         let entry = sessions.get(session_id)?;
         if let Some(active_turn) = &entry.active_turn {
+            if !active_turn.context_usage_initialized {
+                return None;
+            }
             return Some((
                 active_turn.context_used_chars,
                 active_turn.context_max_chars,
@@ -564,6 +567,7 @@ impl RuntimeManager {
             active_turn.context_used_chars = *context_used_chars;
             active_turn.context_max_chars = (*context_max_chars).max(1);
             active_turn.context_usage_initialized = true;
+            active_turn.content.clear();
             entry.last_context_usage = Some((
                 active_turn.context_used_chars,
                 active_turn.context_max_chars,
@@ -806,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn active_turn_context_uses_baseline_before_turn_started() {
+    fn active_turn_context_is_unknown_before_turn_started() {
         let store = crate::store::Store::open_memory().expect("failed to open in-memory store");
         let session = Session::create(
             &store,
@@ -831,10 +835,7 @@ mod tests {
             )
             .expect("failed to start active turn");
 
-        assert_eq!(
-            manager.context_usage_chars(&session.id),
-            Some((0, CompactConfig::default().threshold_chars))
-        );
+        assert_eq!(manager.context_usage_chars(&session.id), None);
     }
 
     #[test]
