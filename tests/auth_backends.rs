@@ -7,6 +7,19 @@ use age::secrecy::SecretString;
 
 use kley::auth::{AgeFileBackend, Credentials, OpenAiCredentials, SecretBackend, ZaiCredentials};
 
+fn write_age_file_with_work_factor(
+    path: &std::path::Path,
+    passphrase: &str,
+    work_factor: u8,
+    creds: &Credentials,
+) {
+    let plaintext = serde_json::to_string_pretty(creds).unwrap();
+    let mut recipient = age::scrypt::Recipient::new(SecretString::from(passphrase.to_owned()));
+    recipient.set_work_factor(work_factor);
+    let encrypted = age::encrypt(&recipient, plaintext.as_bytes()).unwrap();
+    std::fs::write(path, encrypted).unwrap();
+}
+
 fn sample_creds() -> Credentials {
     Credentials {
         active_provider: Some("openai".into()),
@@ -63,6 +76,44 @@ fn wrong_passphrase_rejected() {
 
     writer.save(&sample_creds()).unwrap();
     assert!(reader.load().is_err(), "wrong passphrase should fail");
+}
+
+#[test]
+fn high_work_factor_load_succeeds_when_backend_allows_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("creds.age");
+
+    write_age_file_with_work_factor(&path, "correct", 6, &sample_creds());
+
+    let backend =
+        AgeFileBackend::with_max_work_factor(path, SecretString::from("correct".to_owned()), 6);
+    let loaded = backend
+        .load()
+        .unwrap()
+        .expect("should decrypt with raised cap");
+
+    assert_eq!(loaded.active_provider.as_deref(), Some("openai"));
+}
+
+#[test]
+fn high_work_factor_load_reports_actionable_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("creds.age");
+
+    write_age_file_with_work_factor(&path, "correct", 6, &sample_creds());
+
+    let backend =
+        AgeFileBackend::with_max_work_factor(path, SecretString::from("correct".to_owned()), 4);
+    let err = backend.load().unwrap_err().to_string();
+
+    assert!(
+        err.contains("requires scrypt work factor 6"),
+        "expected work factor detail, got: {err}"
+    );
+    assert!(
+        err.contains("KLEY_AGE_MAX_WORK_FACTOR=6"),
+        "expected override guidance, got: {err}"
+    );
 }
 
 // ── Secrets are encrypted at rest ───────────────────────────────────────────

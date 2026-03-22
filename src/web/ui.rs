@@ -32,6 +32,7 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
     '  <div class="text-[10px] font-mono uppercase tracking-[0.08em] text-txt3">Self Improve</div>',
     '  <span id="self-improve-state" class="text-[10px] font-mono uppercase tracking-[0.08em] text-txt2">idle</span>',
     '</div>',
+    '<p id="self-improve-detail" class="hidden text-[11px] text-txt3"></p>',
     '<div class="grid grid-cols-2 gap-2">',
     '  <label class="text-[10px] font-mono uppercase tracking-[0.08em] text-txt3" for="self-improve-cycles">Cycles</label>',
     '  <label class="text-[10px] font-mono uppercase tracking-[0.08em] text-txt3" for="self-improve-turns">Turns</label>',
@@ -58,14 +59,18 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
   ].join('');
 
   const inspectorEvents = document.getElementById('inspector-events');
-  if (inspectorEvents) {
-    inspector.insertBefore(panel, inspectorEvents.parentElement || inspectorEvents);
+  const eventsHeading = inspector.querySelector('.panel-title.mt-4.mb-2');
+  if (eventsHeading) {
+    inspector.insertBefore(panel, eventsHeading);
+  } else if (inspectorEvents) {
+    inspector.insertBefore(panel, inspectorEvents);
   } else {
     inspector.appendChild(panel);
   }
 
   const dom = {
     state: document.getElementById('self-improve-state'),
+    detail: document.getElementById('self-improve-detail'),
     cycles: document.getElementById('self-improve-cycles'),
     turns: document.getElementById('self-improve-turns'),
     start: document.getElementById('self-improve-start'),
@@ -76,7 +81,7 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
     retros: document.getElementById('self-improve-retros'),
   };
 
-  if (!dom.state || !dom.cycles || !dom.turns || !dom.start || !dom.stop || !dom.restart || !dom.log || !dom.history || !dom.retros) {
+  if (!dom.state || !dom.detail || !dom.cycles || !dom.turns || !dom.start || !dom.stop || !dom.restart || !dom.log || !dom.history || !dom.retros) {
     return;
   }
 
@@ -86,8 +91,23 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
     reconnectDelayMs: 400,
     reconnectTimer: null,
     logTail: [],
+    selfImproveDetail: '',
     snapshot: null,
   };
+
+  function renderSelfImproveStatus(label, detail) {
+    dom.state.textContent = label || 'idle';
+    if (typeof detail === 'string') {
+      state.selfImproveDetail = detail.trim();
+    }
+    if (state.selfImproveDetail) {
+      dom.detail.textContent = state.selfImproveDetail;
+      dom.detail.classList.remove('hidden');
+    } else {
+      dom.detail.textContent = '';
+      dom.detail.classList.add('hidden');
+    }
+  }
 
   function requestId(prefix) {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -140,11 +160,20 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
       return;
     }
     retros.slice(0, 6).forEach((item, index) => {
+      const entry = document.createElement('div');
       const line = document.createElement('p');
       const status = item && item.status ? item.status : 'unknown';
       const cycle = item && item.cycle ? item.cycle : '?';
+      const statusDetail = item && item.status_detail ? String(item.status_detail).trim() : '';
       line.textContent = 'cycle ' + cycle + ': ' + status + ' (#' + (index + 1) + ')';
-      dom.retros.appendChild(line);
+      entry.appendChild(line);
+      if (statusDetail) {
+        const detail = document.createElement('p');
+        detail.className = 'text-[11px] text-txt3';
+        detail.textContent = statusDetail;
+        entry.appendChild(detail);
+      }
+      dom.retros.appendChild(entry);
     });
   }
 
@@ -152,7 +181,7 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
     state.snapshot = snapshot || null;
     const running = snapshot && snapshot.active_run;
     if (!snapshot) {
-      dom.state.textContent = 'unknown';
+      renderSelfImproveStatus('unknown', '');
       renderLog(state.logTail);
       renderHistory([]);
       renderRetros([]);
@@ -161,10 +190,13 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
     }
 
     if (running) {
-      dom.state.textContent = running.latest_status || 'running';
+      renderSelfImproveStatus(
+        running.latest_status || 'running',
+        typeof running.latest_detail === 'string' ? running.latest_detail : state.selfImproveDetail
+      );
       renderLog(running.log_tail || state.logTail);
     } else {
-      dom.state.textContent = 'idle';
+      renderSelfImproveStatus('idle', state.selfImproveDetail);
       if (state.logTail.length) {
         renderLog(state.logTail);
       } else {
@@ -200,7 +232,10 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
       return;
     }
     if (frame.type === 'response.error') {
-      dom.state.textContent = frame.error && frame.error.code ? frame.error.code : 'error';
+      renderSelfImproveStatus(
+        frame.error && frame.error.code ? frame.error.code : 'error',
+        frame.error && frame.error.message ? frame.error.message : ''
+      );
       syncButtons();
       return;
     }
@@ -213,7 +248,7 @@ const SELF_IMPROVE_PANEL: &str = r#"<script>
       return;
     }
     if (frame.type === 'self_improve.status') {
-      dom.state.textContent = frame.status || 'running';
+      renderSelfImproveStatus(frame.status || 'running', frame.detail || '');
       return;
     }
   }
