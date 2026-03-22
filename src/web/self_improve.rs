@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -19,6 +20,7 @@ const MAX_LOG_TAIL: usize = 600;
 const MAX_HISTORY: usize = 30;
 const MAX_RECENT_LOGS: usize = 30;
 const MAX_RETROSPECTIVES: usize = 30;
+const GENERIC_STATUS_DETAIL: &str = "status parsed from script output";
 
 #[derive(Debug, Clone)]
 pub enum SelfImproveEvent {
@@ -308,6 +310,10 @@ impl SelfImproveManager {
             self.append_log_line(&run_id, line).await;
         }
 
+        while let Some(line) = line_rx.recv().await {
+            self.append_log_line(&run_id, line).await;
+        }
+
         self.finalize_run(&run_id, exit_code).await;
     }
 
@@ -380,10 +386,16 @@ impl SelfImproveManager {
                             None
                         }
                     })
-                    .unwrap_or_else(|| "status parsed from script output".to_string());
+                    .unwrap_or_else(|| GENERIC_STATUS_DETAIL.to_string());
                 active.latest_status = parsed.status.clone();
                 active.latest_detail = detail.clone();
                 status_update = Some((parsed.status, detail));
+            } else if active.latest_status == "blocked"
+                && let Some(detail) = recent_status_detail(&active.log_tail)
+                && should_refresh_blocked_detail(&active.latest_detail, &detail)
+            {
+                active.latest_detail = detail.clone();
+                status_update = Some(("blocked".to_string(), detail));
             }
         }
 
@@ -461,7 +473,19 @@ impl SelfImproveManager {
     }
 
     fn launch_supported(&self) -> bool {
-        Path::new("/.dockerenv").exists() || self.repo_root.join("docker-session.sh").is_file()
+        self.launch_supported_with(docker_host_ready)
+    }
+
+    fn launch_supported_with<F>(&self, docker_ready: F) -> bool
+    where
+        F: FnOnce(&Path) -> bool,
+    {
+        if Path::new("/.dockerenv").exists() {
+            return true;
+        }
+
+        let launcher = self.repo_root.join("docker-session.sh");
+        launcher.is_file() && docker_ready(&self.repo_root)
     }
 
     fn spawn_command(
@@ -469,6 +493,18 @@ impl SelfImproveManager {
         cycles: u32,
         turns_per_cycle: u32,
     ) -> Result<Command, SelfImproveError> {
+        self.spawn_command_with(cycles, turns_per_cycle, docker_host_ready)
+    }
+
+    fn spawn_command_with<F>(
+        &self,
+        cycles: u32,
+        turns_per_cycle: u32,
+        docker_ready: F,
+    ) -> Result<Command, SelfImproveError>
+    where
+        F: FnOnce(&Path) -> bool,
+    {
         let mut command = Command::new("setsid");
         command.arg("bash");
 
@@ -480,6 +516,12 @@ impl SelfImproveManager {
                 return Err(SelfImproveError::new(
                     "unsupported_environment",
                     "self-improve unavailable: missing docker-session.sh launcher",
+                ));
+            }
+            if !docker_ready(&self.repo_root) {
+                return Err(SelfImproveError::new(
+                    "unsupported_environment",
+                    "self-improve unavailable: Docker CLI or daemon is not runnable",
                 ));
             }
             command.arg("docker-session.sh").arg("self-improve.sh");
@@ -557,6 +599,32 @@ fn normalize_status_detail_line(line: &str) -> Option<String> {
             .trim()
             .to_string(),
     )
+}
+
+fn should_refresh_blocked_detail(current: &str, candidate: &str) -> bool {
+    if candidate == current {
+        return false;
+    }
+
+    current == GENERIC_STATUS_DETAIL
+        || (!is_error_like(current) && is_error_like(candidate))
+        || current.is_empty()
+}
+
+fn docker_host_ready(repo_root: &Path) -> bool {
+    command_succeeds(repo_root, "docker", &["compose", "version"])
+        && command_succeeds(repo_root, "docker", &["info"])
+}
+
+fn command_succeeds(repo_root: &Path, program: &str, args: &[&str]) -> bool {
+    StdCommand::new(program)
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn is_error_like(line: &str) -> bool {
@@ -675,6 +743,121 @@ mod tests {
             recent_status_detail(&log_tail),
             Some("waiting for retry budget".to_string())
         );
+    }
+
+    #[test]
+    fn blocked_detail_refreshes_when_late_stderr_arrives() {
+        assert!(should_refresh_blocked_detail(
+            GENERIC_STATUS_DETAIL,
+            "error: decryption failed"
+        ));
+        assert!(should_refresh_blocked_detail(
+            "waiting for retry budget",
+            "error: decryption failed"
+        ));
+        assert!(!should_refresh_blocked_detail(
+            "error: decryption failed",
+            "error: decryption failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn append_log_line_updates_blocked_detail_when_stderr_arrives_late() {
+        let manager = SelfImproveManager::new();
+        let mut events = manager.subscribe();
+
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.active = Some(ActiveRunState {
+                run_id: "self-improve-1".to_string(),
+                pid: 42,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                max_cycles: 5,
+                turns_per_cycle: 30,
+                stop_requested: false,
+                latest_status: "starting".to_string(),
+                latest_detail: "started self-improve pid=42".to_string(),
+                log_tail: VecDeque::new(),
+            });
+        }
+
+        manager
+            .append_log_line("self-improve-1", "STATUS: blocked".to_string())
+            .await;
+        manager
+            .append_log_line(
+                "self-improve-1",
+                "[stderr] error: decryption failed".to_string(),
+            )
+            .await;
+
+        let active = manager.snapshot().await.active_run.expect("active run");
+        assert_eq!(active.latest_status, "blocked");
+        assert_eq!(active.latest_detail, "error: decryption failed");
+
+        let mut status_events = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SelfImproveEvent::Status { status, detail, .. } = event {
+                status_events.push((status, detail));
+            }
+        }
+
+        assert!(
+            status_events.contains(&("blocked".to_string(), GENERIC_STATUS_DETAIL.to_string()))
+        );
+        assert!(status_events.contains(&(
+            "blocked".to_string(),
+            "error: decryption failed".to_string()
+        )));
+    }
+
+    #[test]
+    fn launch_supported_is_false_on_host_without_runnable_docker() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            temp_dir.path().join("docker-session.sh"),
+            "#!/usr/bin/env bash\n",
+        )
+        .expect("launcher should be written");
+
+        let manager = SelfImproveManager {
+            inner: Arc::new(Mutex::new(InnerState {
+                active: None,
+                history: Vec::new(),
+                next_run_seq: 1,
+            })),
+            events: broadcast::channel(8).0,
+            repo_root: temp_dir.path().to_path_buf(),
+        };
+
+        assert!(!manager.launch_supported_with(|_| false));
+        assert!(manager.launch_supported_with(|_| true));
+    }
+
+    #[test]
+    fn spawn_command_rejects_host_without_runnable_docker() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            temp_dir.path().join("docker-session.sh"),
+            "#!/usr/bin/env bash\n",
+        )
+        .expect("launcher should be written");
+
+        let manager = SelfImproveManager {
+            inner: Arc::new(Mutex::new(InnerState {
+                active: None,
+                history: Vec::new(),
+                next_run_seq: 1,
+            })),
+            events: broadcast::channel(8).0,
+            repo_root: temp_dir.path().to_path_buf(),
+        };
+
+        let err = manager
+            .spawn_command_with(5, 30, |_| false)
+            .expect_err("docker should be required on host");
+        assert_eq!(err.code, "unsupported_environment");
+        assert!(err.message.contains("Docker CLI or daemon is not runnable"));
     }
 
     #[tokio::test]

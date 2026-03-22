@@ -874,6 +874,7 @@ mod web {
 
         let frame = recv_json(&mut socket).await;
         assert_eq!(frame["type"], "self_improve.snapshot");
+        assert!(frame["data"]["available"].is_boolean());
         assert!(frame["data"]["history"].is_array());
         assert!(frame["data"]["recent_logs"].is_array());
         assert!(frame["data"]["retrospectives"].is_array());
@@ -896,6 +897,7 @@ mod web {
         let response = recv_json(&mut socket).await;
         assert_eq!(response["type"], "response.ok");
         assert_eq!(response["request_id"], "req-self-get-1");
+        assert!(response["data"]["available"].is_boolean());
         assert!(response["data"]["history"].is_array());
         assert!(response["data"]["recent_logs"].is_array());
     }
