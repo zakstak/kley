@@ -938,35 +938,26 @@ fn force_shrink_history_for_overflow_retry(
     };
     let remove_count = target_removal.min(max_removable);
 
-    // Snap forward to the next `message` boundary so we don't split
-    // function_call / function_call_output pairs.
-    let mut adjusted = remove_count;
-    while adjusted < history.len().saturating_sub(1) {
-        let item_type = history[adjusted]
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if item_type == "message" {
-            break;
-        }
-        adjusted += 1;
-    }
-    let final_count = avoid_orphaned_tool_output(history, adjusted.min(max_removable));
+    let final_count = avoid_orphaned_tool_output(history, remove_count);
     history.drain(..final_count);
     final_count
 }
 
 fn avoid_orphaned_tool_output(history: &[serde_json::Value], remove_count: usize) -> usize {
-    if remove_count == 0 || remove_count >= history.len() {
-        return remove_count;
+    let max_removable = history.len().saturating_sub(1);
+    let mut remove_count = remove_count.min(max_removable);
+    if remove_count == 0 {
+        return 0;
     }
 
-    let candidate = &history[remove_count];
-    if candidate.get("type").and_then(|v| v.as_str()) == Some("function_call_output") {
-        remove_count.saturating_sub(1).max(1)
-    } else {
-        remove_count
+    while remove_count < max_removable
+        && history[remove_count].get("type").and_then(|v| v.as_str())
+            == Some("function_call_output")
+    {
+        remove_count += 1;
     }
+
+    remove_count
 }
 
 fn retry_compact_config(config: &CompactConfig, retry_count: usize) -> CompactConfig {
@@ -1291,12 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn force_shrink_history_for_overflow_retry_snaps_to_message_boundary() {
-        // History: [msg, msg, fn_call, fn_output, msg]
-        // With retry_count=1, target_removal = 5/4 = 1.
-        // Index 1 is "message", so it should drain exactly 1.
-        // But if target_removal lands on a fn_call, it should advance past
-        // the fn_call + fn_output pair.
+    fn force_shrink_history_for_overflow_retry_keeps_tool_exchange_progressive() {
         let mut history = vec![
             serde_json::json!({"type": "message", "role": "user", "content": "m1"}),
             serde_json::json!({"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}),
@@ -1305,15 +1291,13 @@ mod tests {
             serde_json::json!({"type": "message", "role": "user", "content": "m3"}),
         ];
 
-        // target_removal = 5/4 = 1, index 1 is fn_call -> snap to index 3 (next message)
         let removed = force_shrink_history_for_overflow_retry(&mut history, 1);
 
-        assert_eq!(removed, 3);
-        assert_eq!(history.len(), 2);
-        // First remaining item should be the assistant message
+        assert_eq!(removed, 1);
+        assert_eq!(history.len(), 4);
         assert_eq!(
-            history[0].get("content").and_then(|v| v.as_str()),
-            Some("m2")
+            history[0].get("type").and_then(|v| v.as_str()),
+            Some("function_call")
         );
     }
 
@@ -1330,26 +1314,25 @@ mod tests {
 
         let removed = force_shrink_history_for_overflow_retry(&mut history, 1);
 
-        // Should snap all the way to index 4 (the message), but keep at least 1
-        assert_eq!(removed, 4);
-        assert_eq!(history.len(), 1);
+        assert_eq!(removed, 2);
+        assert_eq!(history.len(), 3);
         assert_eq!(
-            history[0].get("content").and_then(|v| v.as_str()),
-            Some("done")
+            history[0].get("type").and_then(|v| v.as_str()),
+            Some("function_call")
         );
     }
 
     #[test]
     fn force_shrink_history_for_overflow_retry_avoids_orphaned_tool_output() {
         let mut history = vec![
-            serde_json::json!({"type": "message", "role": "user", "content": "m1"}),
             serde_json::json!({"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}),
             serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "result"}),
+            serde_json::json!({"type": "function_call", "call_id": "c2", "name": "tool", "arguments": "{}"}),
         ];
 
         let removed = force_shrink_history_for_overflow_retry(&mut history, 1);
 
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         assert_eq!(
             history[0].get("type").and_then(|v| v.as_str()),
             Some("function_call")
