@@ -936,8 +936,10 @@ fn force_shrink_history_for_overflow_retry(
         0 | 1 => (history.len() / 4).max(1),
         _ => (history.len() / 2).max(1),
     };
-    let remove_count = exchange_aligned_remove_count(history, target_removal, max_removable)
-        .unwrap_or_else(|| target_removal.min(max_removable));
+    let require_minimum_trim = retry_count >= 2;
+    let remove_count =
+        exchange_aligned_remove_count(history, target_removal, max_removable, require_minimum_trim)
+            .unwrap_or_else(|| target_removal.min(max_removable));
     history.drain(..remove_count);
     remove_count
 }
@@ -946,23 +948,26 @@ fn exchange_aligned_remove_count(
     history: &[serde_json::Value],
     target_removal: usize,
     max_removable: usize,
+    require_minimum_trim: bool,
 ) -> Option<usize> {
     let target_removal = target_removal.min(max_removable);
     if target_removal == 0 {
         return None;
     }
 
-    let previous_cut = history
-        .iter()
-        .enumerate()
-        .skip(1)
-        .take_while(|(idx, _)| *idx <= target_removal)
-        .filter(|(_, item)| is_user_message(item))
-        .map(|(idx, _)| idx)
-        .last();
+    if !require_minimum_trim {
+        let previous_cut = history
+            .iter()
+            .enumerate()
+            .skip(1)
+            .take_while(|(idx, _)| *idx <= target_removal)
+            .filter(|(_, item)| is_user_message(item))
+            .map(|(idx, _)| idx)
+            .last();
 
-    if previous_cut.is_some() {
-        return previous_cut;
+        if previous_cut.is_some() {
+            return previous_cut;
+        }
     }
 
     let next_cut = history
@@ -974,12 +979,37 @@ fn exchange_aligned_remove_count(
         .map(|(idx, _)| idx);
 
     if let Some(next_cut) = next_cut
-        && next_cut.saturating_sub(target_removal) <= target_removal.max(1)
+        && (require_minimum_trim
+            || next_cut.saturating_sub(target_removal) <= target_removal.max(1))
     {
         return Some(next_cut);
     }
 
-    Some(tool_pair_safe_remove_count(history, target_removal))
+    let fallback = tool_pair_safe_remove_count(history, target_removal);
+    if require_minimum_trim
+        && fallback < target_removal
+        && let Some(minimum_safe) =
+            safe_remove_count_at_or_after(history, target_removal, max_removable)
+    {
+        return Some(minimum_safe);
+    }
+
+    Some(fallback)
+}
+
+fn safe_remove_count_at_or_after(
+    history: &[serde_json::Value],
+    start: usize,
+    max_removable: usize,
+) -> Option<usize> {
+    let start = start.min(max_removable);
+    (start..=max_removable).find(|remove_count| {
+        history
+            .get(*remove_count)
+            .and_then(|item| item.get("type"))
+            .and_then(|value| value.as_str())
+            != Some("function_call_output")
+    })
 }
 
 fn is_user_message(item: &serde_json::Value) -> bool {
@@ -1361,5 +1391,28 @@ mod tests {
 
         assert_eq!(removed, 1);
         assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn force_shrink_history_for_final_retry_meets_minimum_target() {
+        let mut history = vec![
+            serde_json::json!({"type": "message", "role": "user", "content": "u1"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "a1"}),
+            serde_json::json!({"type": "message", "role": "user", "content": "u2"}),
+            serde_json::json!({"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"}),
+            serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "ok"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "a2"}),
+            serde_json::json!({"type": "message", "role": "user", "content": "u3"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "a3"}),
+        ];
+
+        let removed = force_shrink_history_for_overflow_retry(&mut history, 2);
+
+        assert_eq!(removed, 6);
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0].get("content").and_then(|v| v.as_str()),
+            Some("u3")
+        );
     }
 }
