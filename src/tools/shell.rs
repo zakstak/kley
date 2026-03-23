@@ -3,10 +3,12 @@
 //! Follows the codex-rs pattern: always return exit code + duration + output
 //! so the model knows whether the command succeeded.
 
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -74,46 +76,30 @@ impl Tool for ShellTool {
 
         let start = Instant::now();
 
-        let mut child = match Command::new("setsid")
-            .arg("sh")
-            .arg("-c")
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+        let (stdout_path, stdout_capture) = match create_capture_file("stdout") {
+            Ok(capture) => capture,
+            Err(err) => {
+                return Ok(format!("Error: failed to create stdout capture: {err}"));
+            }
+        };
+        let (stderr_path, stderr_capture) = match create_capture_file("stderr") {
+            Ok(capture) => capture,
+            Err(err) => {
+                let _ = fs::remove_file(&stdout_path);
+                return Ok(format!("Error: failed to create stderr capture: {err}"));
+            }
+        };
+
+        let mut child = match spawn_shell_child(command, &stdout_capture, &stderr_capture) {
             Ok(child) => child,
             Err(err) => {
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
                 return Ok(format!("Error: failed to execute command: {err}"));
             }
         };
 
         let mut timed_out = false;
-
-        let mut stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                return Ok("Error: failed to capture stdout handle".into());
-            }
-        };
-        let mut stderr = match child.stderr.take() {
-            Some(stderr) => stderr,
-            None => {
-                return Ok("Error: failed to capture stderr handle".into());
-            }
-        };
-
-        let stdout_handle = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stdout.read_to_end(&mut bytes);
-            bytes
-        });
-        let stderr_handle = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stderr.read_to_end(&mut bytes);
-            bytes
-        });
 
         loop {
             match child.try_wait() {
@@ -136,17 +122,25 @@ impl Tool for ShellTool {
         let status = match child.wait() {
             Ok(status) => status,
             Err(err) => {
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
                 return Ok(format!("Error: command did not complete: {err}"));
             }
         };
 
-        let stdout = match stdout_handle.join() {
+        drop(stdout_capture);
+        drop(stderr_capture);
+
+        let stdout = match read_and_remove_capture_file(&stdout_path) {
             Ok(bytes) => bytes,
-            Err(_) => return Ok("Error: failed to collect command stdout".into()),
+            Err(err) => {
+                let _ = fs::remove_file(&stderr_path);
+                return Ok(format!("Error: failed to collect command stdout: {err}"));
+            }
         };
-        let stderr = match stderr_handle.join() {
+        let stderr = match read_and_remove_capture_file(&stderr_path) {
             Ok(bytes) => bytes,
-            Err(_) => return Ok("Error: failed to collect command stderr".into()),
+            Err(err) => return Ok(format!("Error: failed to collect command stderr: {err}")),
         };
 
         let exit_code = status.code().unwrap_or(-1);
@@ -227,6 +221,117 @@ fn terminate_shell_process(child: &mut std::process::Child) {
     {
         let _ = child.kill();
     }
+}
+
+fn spawn_shell_child(
+    command: &str,
+    stdout_capture: &File,
+    stderr_capture: &File,
+) -> std::io::Result<Child> {
+    spawn_shell_child_with_setsid_launcher("setsid", command, stdout_capture, stderr_capture)
+}
+
+fn spawn_shell_child_with_setsid_launcher(
+    setsid_launcher: &str,
+    command: &str,
+    stdout_capture: &File,
+    stderr_capture: &File,
+) -> std::io::Result<Child> {
+    match build_setsid_spawn_command(setsid_launcher, command, stdout_capture, stderr_capture)?
+        .spawn()
+    {
+        Ok(child) => Ok(child),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            build_direct_spawn_command(command, stdout_capture, stderr_capture)?.spawn()
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn build_setsid_spawn_command(
+    setsid_launcher: &str,
+    command: &str,
+    stdout_capture: &File,
+    stderr_capture: &File,
+) -> std::io::Result<Command> {
+    let mut cmd = Command::new(setsid_launcher);
+    cmd.arg("sh").arg("-c").arg(command);
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_capture.try_clone()?))
+        .stderr(Stdio::from(stderr_capture.try_clone()?));
+
+    Ok(cmd)
+}
+
+fn build_direct_spawn_command(
+    command: &str,
+    stdout_capture: &File,
+    stderr_capture: &File,
+) -> std::io::Result<Command> {
+    let mut cmd = Command::new("sh");
+    configure_process_group(&mut cmd);
+    cmd.arg("-c").arg(command);
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_capture.try_clone()?))
+        .stderr(Stdio::from(stderr_capture.try_clone()?));
+
+    Ok(cmd)
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+fn create_capture_file(stream_name: &str) -> std::io::Result<(PathBuf, File)> {
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+
+    for attempt in 0..100u32 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = temp_dir.join(format!(
+            "kley-shell-{stream_name}-{pid}-{timestamp}-{attempt}.log"
+        ));
+
+        let mut open_options = OpenOptions::new();
+        open_options.create_new(true).write(true).read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            open_options.mode(0o600);
+        }
+
+        match open_options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "failed to allocate unique capture file",
+    ))
+}
+
+fn read_and_remove_capture_file(path: &PathBuf) -> std::io::Result<Vec<u8>> {
+    let snapshot_len = fs::metadata(path)?.len();
+    let file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(snapshot_len).read_to_end(&mut bytes)?;
+    let _ = fs::remove_file(path);
+    Ok(bytes)
 }
 
 /// Return the greatest byte index <= `limit` that is a char boundary.
@@ -364,6 +469,85 @@ mod tests {
             .unwrap();
 
         assert!(result.contains("Command timed out after"));
+        assert!(start.elapsed() < Duration::from_millis(900));
+        assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn shell_timeout_returns_when_detached_descendant_holds_output_fds() {
+        let tool = ShellTool::with_timeout(Duration::from_millis(150));
+        let start = Instant::now();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "setsid sh -c 'sleep 3; echo done' & wait"
+            }))
+            .unwrap();
+
+        assert!(result.contains("Command timed out after"));
+        assert!(start.elapsed() < Duration::from_millis(900));
+        assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn shell_falls_back_to_sh_when_setsid_launcher_missing() {
+        let (stdout_path, stdout_capture) = create_capture_file("stdout").unwrap();
+        let (stderr_path, stderr_capture) = create_capture_file("stderr").unwrap();
+
+        let mut child = spawn_shell_child_with_setsid_launcher(
+            "definitely-missing-kley-setsid-launcher",
+            "printf fallback-ok",
+            &stdout_capture,
+            &stderr_capture,
+        )
+        .unwrap();
+
+        let status = child.wait().unwrap();
+        drop(stdout_capture);
+        drop(stderr_capture);
+
+        let stdout = read_and_remove_capture_file(&stdout_path).unwrap();
+        let stderr = read_and_remove_capture_file(&stderr_path).unwrap();
+
+        assert!(status.success());
+        assert_eq!(String::from_utf8_lossy(&stdout), "fallback-ok");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn shell_fallback_process_group_still_times_out_descendants() {
+        let (stdout_path, stdout_capture) = create_capture_file("stdout").unwrap();
+        let (stderr_path, stderr_capture) = create_capture_file("stderr").unwrap();
+        let mut child = spawn_shell_child_with_setsid_launcher(
+            "definitely-missing-kley-setsid-launcher",
+            "sleep 1 & wait",
+            &stdout_capture,
+            &stderr_capture,
+        )
+        .unwrap();
+
+        let timeout = Duration::from_millis(150);
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if start.elapsed() >= timeout => {
+                    terminate_shell_process(&mut child);
+                    break;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+                Err(_) => {
+                    terminate_shell_process(&mut child);
+                    break;
+                }
+            }
+        }
+
+        let _ = child.wait();
+        drop(stdout_capture);
+        drop(stderr_capture);
+        let _ = read_and_remove_capture_file(&stdout_path);
+        let _ = read_and_remove_capture_file(&stderr_path);
+
         assert!(start.elapsed() < Duration::from_millis(900));
         assert!(start.elapsed() >= Duration::from_millis(120));
     }
