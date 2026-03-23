@@ -109,6 +109,8 @@ fix_git_mount_ownership() {
     "$WORKSPACE_DIR/.git/index" \
     "$WORKSPACE_DIR/.git/logs" \
     "$WORKSPACE_DIR/.git/refs" \
+    "$WORKSPACE_DIR/.git/worktrees" \
+    "$WORKSPACE_DIR/.sisyphus/notepads" \
     "$WORKSPACE_DIR/.git/packed-refs"
   do
     if [ -e "$path" ]; then
