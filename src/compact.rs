@@ -64,6 +64,15 @@ pub fn estimate_effective_history_chars(
     recent_chars + estimate_history_chars(&[summary_placeholder])
 }
 
+pub fn estimate_request_chars(
+    history: &[serde_json::Value],
+    instructions: &str,
+    tools: &[serde_json::Value],
+) -> usize {
+    let tool_chars = serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
+    estimate_history_chars(history) + instructions.len() + tool_chars
+}
+
 /// Check whether the history exceeds the compaction threshold.
 pub fn needs_compaction(history: &[serde_json::Value], threshold: usize) -> bool {
     estimate_history_chars(history) > threshold
@@ -94,28 +103,18 @@ pub async fn maybe_compact(
 
     let total_items = history.len();
 
-    // Don't compact if there aren't enough items to split
-    if total_items <= config.keep_recent {
+    if total_items < 2 {
         return Ok(());
     }
 
-    let split_at = total_items - config.keep_recent;
+    let keep_recent = config.keep_recent.max(1).min(total_items - 1);
+    let split_at = total_items - keep_recent;
     let old_items: Vec<serde_json::Value> = history.drain(..split_at).collect();
-    let old_chars: usize = old_items
-        .iter()
-        .map(|v| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0))
-        .sum();
-
-    eprintln!(
-        "  📦 compacting history: {total_items} items → {} kept, {split_at} summarized ({old_chars} chars)",
-        config.keep_recent
-    );
 
     // Try to summarize via model call
-    let summary = match summarize_history(auth, model, &old_items).await {
+    let summary = match summarize_history(auth, model, &old_items, config.threshold_chars).await {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("  ⚠ compaction summary failed, falling back to truncation: {e:#}");
+        Err(_e) => {
             format!(
                 "[History truncated: {split_at} earlier items removed to stay within context limits. \
                  The conversation included tool calls and responses that are no longer in context.]"
@@ -196,12 +195,13 @@ async fn summarize_history(
     auth: &ResolvedAuth,
     model: &str,
     old_items: &[serde_json::Value],
+    max_input_chars: usize,
 ) -> Result<String> {
     let serialized = serde_json::to_string(old_items).unwrap_or_default();
 
     // Truncate if the history itself is enormous (the summary call has its
     // own context limit). Keep the last portion which is most relevant.
-    let max_summary_input = 400_000; // ~100k tokens for the summary call
+    let max_summary_input = max_input_chars.clamp(32_000, 400_000);
     let input = if serialized.len() > max_summary_input {
         // Take the tail (most recent old items)
         let start = serialized.len() - max_summary_input;
@@ -326,6 +326,57 @@ mod tests {
 
         assert!(effective_chars < raw_chars);
         assert!(effective_chars > estimate_history_chars(&history[20..]));
+    }
+
+    #[test]
+    fn test_estimate_request_chars_includes_instructions_and_tools() {
+        let history = vec![make_history_item("hello")];
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "name": "dummy",
+        })];
+
+        let request_chars = estimate_request_chars(&history, "system prompt", &tools);
+
+        assert!(request_chars > estimate_history_chars(&history));
+        assert!(request_chars >= "system prompt".len());
+    }
+
+    #[tokio::test]
+    async fn test_compact_can_reduce_small_history_when_keep_recent_is_large() {
+        let mut history = vec![
+            make_history_item(&format!("old-{}", "x".repeat(400))),
+            make_history_item("recent-a"),
+            make_history_item("recent-b"),
+        ];
+
+        let config = CompactConfig {
+            threshold_chars: 100,
+            keep_recent: 20,
+        };
+
+        let (emitter, _receiver) = crate::events::event_channel();
+        let auth = ResolvedAuth {
+            provider: "openai".into(),
+            api_key: "test-key".into(),
+            base_url: "http://localhost:1".into(),
+            account_id: None,
+        };
+
+        let _ = maybe_compact(&auth, "test-model", &mut history, &config, &emitter).await;
+
+        let first = &history[0];
+        let content = first.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        assert!(content.contains("truncated") || content.contains("Context recap"));
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history[1].get("content").and_then(|c| c.as_str()),
+            Some("recent-a")
+        );
+        assert_eq!(
+            history[2].get("content").and_then(|c| c.as_str()),
+            Some("recent-b")
+        );
     }
 
     #[tokio::test]

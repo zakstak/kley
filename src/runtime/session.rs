@@ -14,6 +14,8 @@ use crate::tools::ToolRegistry;
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
 const DEFAULT_ZAI_MODEL: &str = "glm-4.7";
+const REQUEST_COMPACTION_MARGIN_CHARS: usize = 8_192;
+const CONTEXT_OVERFLOW_RETRY_LIMIT: usize = 2;
 
 /// Re-export Message from the ZAI provider for backwards compatibility.
 pub use crate::provider::zai::Message;
@@ -419,18 +421,23 @@ impl<'a> SessionRuntime<'a> {
             "content": input,
         }));
 
-        crate::compact::maybe_compact(
+        compact_history_to_budget(
             &self.resolved,
             &self.model,
             &mut self.history,
             &self.compact_config,
             &self.events,
+            &self.instructions,
+            &self.registry,
         )
-        .await
-        .ok();
+        .await;
 
-        let (context_used_chars, context_max_chars) =
-            context_usage_chars(&self.history, self.compact_config.threshold_chars);
+        let (context_used_chars, context_max_chars) = context_usage_chars(
+            &self.history,
+            self.compact_config.threshold_chars,
+            &self.instructions,
+            &self.registry,
+        );
 
         if self.abort_signal.load(Ordering::Relaxed) {
             return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
@@ -452,16 +459,18 @@ impl<'a> SessionRuntime<'a> {
 
         self.active_turn = true;
         let mut aggregated_usage: Option<TokenUsage> = None;
+        let mut context_overflow_retries = 0usize;
         let final_text = loop {
-            crate::compact::maybe_compact(
+            compact_history_to_budget(
                 &self.resolved,
                 &self.model,
                 &mut self.history,
                 &self.compact_config,
                 &self.events,
+                &self.instructions,
+                &self.registry,
             )
-            .await
-            .ok();
+            .await;
 
             if self.abort_signal.load(Ordering::Relaxed) {
                 return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
@@ -613,8 +622,12 @@ impl<'a> SessionRuntime<'a> {
                             "output": output,
                         }));
 
-                        let (context_used_chars, context_max_chars) =
-                            context_usage_chars(&self.history, self.compact_config.threshold_chars);
+                        let (context_used_chars, context_max_chars) = context_usage_chars(
+                            &self.history,
+                            self.compact_config.threshold_chars,
+                            &self.instructions,
+                            &self.registry,
+                        );
                         self.events.emit(AgentEvent::ToolCallCompleted {
                             session_id: self.session.id.clone(),
                             turn_id: turn_id.clone(),
@@ -627,6 +640,25 @@ impl<'a> SessionRuntime<'a> {
                             context_max_chars,
                         });
                     }
+                    continue;
+                }
+                Err(err)
+                    if is_context_window_error(&err)
+                        && context_overflow_retries < CONTEXT_OVERFLOW_RETRY_LIMIT =>
+                {
+                    context_overflow_retries += 1;
+                    let retry_config =
+                        retry_compact_config(&self.compact_config, context_overflow_retries);
+                    compact_history_to_budget(
+                        &self.resolved,
+                        &self.model,
+                        &mut self.history,
+                        &retry_config,
+                        &self.events,
+                        &self.instructions,
+                        &self.registry,
+                    )
+                    .await;
                     continue;
                 }
                 Err(err) => break Err(err),
@@ -677,8 +709,12 @@ impl<'a> SessionRuntime<'a> {
                     "content": response.clone(),
                 }));
 
-                let (context_used_chars, context_max_chars) =
-                    context_usage_chars(&self.history, self.compact_config.threshold_chars);
+                let (context_used_chars, context_max_chars) = context_usage_chars(
+                    &self.history,
+                    self.compact_config.threshold_chars,
+                    &self.instructions,
+                    &self.registry,
+                );
                 self.events.emit(AgentEvent::TurnCompleted {
                     session_id: self.session.id.clone(),
                     turn_id: turn_id.clone(),
@@ -767,8 +803,134 @@ fn create_provider(provider_name: &str) -> Box<dyn Provider> {
     }
 }
 
-fn context_usage_chars(history: &[serde_json::Value], max_chars: usize) -> (usize, usize) {
-    let used_chars = crate::compact::estimate_history_chars(history);
+async fn compact_history_to_budget(
+    auth: &ResolvedAuth,
+    model: &str,
+    history: &mut Vec<serde_json::Value>,
+    config: &CompactConfig,
+    events: &EventEmitter,
+    instructions: &str,
+    registry: &ToolRegistry,
+) {
+    if history.len() < 2 {
+        return;
+    }
+
+    for pass in 0..=CONTEXT_OVERFLOW_RETRY_LIMIT {
+        let request_chars = estimated_request_chars(history, instructions, registry);
+        let target_chars = config.threshold_chars.max(1);
+        if request_chars <= target_chars {
+            return;
+        }
+
+        let history_chars = crate::compact::estimate_history_chars(history);
+        if history_chars == 0 {
+            return;
+        }
+
+        let overshoot = request_chars.saturating_sub(target_chars);
+        let threshold_chars = history_chars
+            .saturating_sub(overshoot.saturating_add(REQUEST_COMPACTION_MARGIN_CHARS))
+            .max(1);
+        let keep_recent = compact_keep_recent(
+            config.keep_recent,
+            history.len(),
+            overshoot,
+            history_chars,
+            pass,
+        );
+        let pass_config = CompactConfig {
+            threshold_chars,
+            keep_recent,
+        };
+        let before_request_chars = request_chars;
+        let before_history_chars = history_chars;
+        let before_len = history.len();
+        if crate::compact::maybe_compact(auth, model, history, &pass_config, events)
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let after_request_chars = estimated_request_chars(history, instructions, registry);
+        let after_history_chars = crate::compact::estimate_history_chars(history);
+        if after_request_chars >= before_request_chars
+            && after_history_chars >= before_history_chars
+            && history.len() == before_len
+        {
+            return;
+        }
+    }
+}
+
+fn retry_compact_config(config: &CompactConfig, retry_count: usize) -> CompactConfig {
+    let threshold_chars = match retry_count {
+        0 => config.threshold_chars,
+        1 => config.threshold_chars.saturating_mul(3) / 4,
+        _ => config.threshold_chars / 2,
+    }
+    .max(1);
+    CompactConfig {
+        threshold_chars,
+        keep_recent: config.keep_recent,
+    }
+}
+
+fn compact_keep_recent(
+    base_keep_recent: usize,
+    history_len: usize,
+    overshoot: usize,
+    history_chars: usize,
+    pass: usize,
+) -> usize {
+    let max_keep_recent = history_len.saturating_sub(1).max(1);
+    let mut keep_recent = base_keep_recent.max(1).min(max_keep_recent);
+
+    if overshoot.saturating_mul(2) >= history_chars {
+        keep_recent = keep_recent.min((history_len / 2).max(1));
+    } else if overshoot.saturating_mul(4) >= history_chars {
+        keep_recent = keep_recent.min((history_len * 2 / 3).max(1));
+    } else if overshoot.saturating_mul(8) >= history_chars {
+        keep_recent = keep_recent.min((history_len * 3 / 4).max(1));
+    }
+
+    match pass {
+        0 => keep_recent,
+        1 => keep_recent.min((history_len / 2).max(1)),
+        _ => keep_recent.min((history_len / 3).max(1)),
+    }
+}
+
+fn estimated_request_chars(
+    history: &[serde_json::Value],
+    instructions: &str,
+    registry: &ToolRegistry,
+) -> usize {
+    let tools = registry.to_api_tools();
+    crate::compact::estimate_request_chars(history, instructions, &tools)
+}
+
+fn is_context_window_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}").to_ascii_lowercase();
+    [
+        "context window",
+        "input exceeds",
+        "maximum context length",
+        "too many tokens",
+        "input is too long",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn context_usage_chars(
+    history: &[serde_json::Value],
+    max_chars: usize,
+    instructions: &str,
+    registry: &ToolRegistry,
+) -> (usize, usize) {
+    let used_chars = estimated_request_chars(history, instructions, registry);
     (used_chars, max_chars.max(1))
 }
 
@@ -917,5 +1079,46 @@ mod tests {
         session.settings = Some("{\"compact_threshold\":\"nope\"}".to_string());
         restore_compact_threshold_from_settings(&mut compact, &session);
         assert_eq!(compact.threshold_chars, 777);
+    }
+
+    #[test]
+    fn retry_compact_config_tightens_budget() {
+        let base = CompactConfig {
+            threshold_chars: 800,
+            keep_recent: 20,
+        };
+
+        assert_eq!(retry_compact_config(&base, 0).threshold_chars, 800);
+        assert_eq!(retry_compact_config(&base, 1).threshold_chars, 600);
+        assert_eq!(retry_compact_config(&base, 2).threshold_chars, 400);
+    }
+
+    #[test]
+    fn context_window_error_matches_provider_messages() {
+        assert!(is_context_window_error(&anyhow::anyhow!(
+            "OpenAI SSE error: Your input exceeds the context window of this model"
+        )));
+        assert!(is_context_window_error(&anyhow::anyhow!(
+            "maximum context length exceeded"
+        )));
+        assert!(!is_context_window_error(&anyhow::anyhow!(
+            "rate limit exceeded"
+        )));
+    }
+
+    #[test]
+    fn context_usage_chars_includes_request_overhead() {
+        let history = vec![serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "hello",
+        })];
+        let registry = crate::tools::default_registry(std::env::current_dir().unwrap());
+
+        let (used_chars, max_chars) =
+            context_usage_chars(&history, 1_000, "system prompt", &registry);
+
+        assert!(used_chars > crate::compact::estimate_history_chars(&history));
+        assert_eq!(max_chars, 1_000);
     }
 }

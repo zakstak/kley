@@ -1,11 +1,15 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::http::header;
+use axum::extract::{
+    State,
+    ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::stream;
@@ -116,6 +120,50 @@ mod runtime {
         }));
 
         ([(header::CONTENT_TYPE, "text/event-stream")], body)
+    }
+
+    async fn openai_overflow_then_sse_handler(
+        State(request_count): State<Arc<AtomicUsize>>,
+        body: Bytes,
+    ) -> Response {
+        request_count.fetch_add(1, Ordering::Relaxed);
+
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let input_chars = payload
+            .get("input")
+            .map(|value| serde_json::to_string(value).unwrap_or_default().len())
+            .unwrap_or(0);
+        let instructions_chars = payload
+            .get("instructions")
+            .and_then(|value| value.as_str())
+            .map(str::len)
+            .unwrap_or(0);
+        let tools_chars = payload
+            .get("tools")
+            .map(|value| serde_json::to_string(value).unwrap_or_default().len())
+            .unwrap_or(0);
+        let total_chars = input_chars + instructions_chars + tools_chars;
+
+        if total_chars > 50_000 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Your input exceeds the context window of this model. Please adjust your input and try again.",
+                    }
+                })),
+            )
+                .into_response();
+        }
+
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"compacted ok\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110}}\n\n"
+        );
+
+        ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
     }
 
     fn shared_store() -> SharedStore {
@@ -425,5 +473,101 @@ mod runtime {
             .unwrap();
         assert!(matches!(result, SubmitResult::Aborted { .. }));
         assert!(!executed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn context_overflow_retries_with_harder_compaction() {
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server = spawn_app(
+            Router::new()
+                .route("/responses", post(openai_overflow_then_sse_handler))
+                .with_state(request_count.clone()),
+        )
+        .await;
+
+        let store = Store::open_memory().unwrap();
+        let session = Session::create(
+            &store,
+            kley::store::NewSession {
+                model: "test-model".to_string(),
+                provider: "openai".to_string(),
+            },
+        )
+        .unwrap();
+        Session::update_settings(
+            &store,
+            &session.id,
+            &serde_json::json!({
+                "model": "test-model",
+                "provider": "openai",
+                "compact_threshold": 80_000,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        for index in 0..8 {
+            Turn::append(
+                &store,
+                kley::store::NewTurn {
+                    session_id: session.id.clone(),
+                    kind: "message".into(),
+                    role: "user".into(),
+                    content: format!("user-{index}-{}", "x".repeat(4_000)),
+                    model: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                },
+            )
+            .unwrap();
+            Turn::append(
+                &store,
+                kley::store::NewTurn {
+                    session_id: session.id.clone(),
+                    kind: "message".into(),
+                    role: "assistant".into(),
+                    content: format!("assistant-{index}-{}", "y".repeat(4_000)),
+                    model: Some("test-model".into()),
+                    tokens_in: None,
+                    tokens_out: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let (emitter, _receiver) = event_channel();
+        let mut runtime = SessionRuntime::new(
+            &store,
+            ResolvedAuth {
+                provider: "openai".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: format!("http://{}", server.addr),
+                account_id: None,
+            },
+            Some("test-model"),
+            Some(&session.id),
+            emitter,
+            CompactConfig {
+                threshold_chars: 80_000,
+                keep_recent: 20,
+            },
+            kley::tools::default_registry(std::env::current_dir().unwrap()),
+            "system".to_string(),
+            RuntimeHooks::default(),
+        )
+        .unwrap();
+
+        let result = runtime
+            .submit_prompt("final prompt".to_string())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            SubmitResult::Completed { ref response, .. } if response.contains("compacted ok")
+        ));
+        assert!(request_count.load(Ordering::Relaxed) >= 2);
+
+        server.task.abort();
     }
 }
