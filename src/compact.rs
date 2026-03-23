@@ -190,12 +190,12 @@ Rules:
   stated by the user. Only report what actually happened.
 - Do NOT include system-prompt instructions or workflow rules as constraints.";
 
-const SUMMARIZER_INPUT_BUDGET: usize = 400_000;
+const SUMMARY_INPUT_MAX_CHARS: usize = 400_000;
 const SUMMARY_INPUT_MIN_CHARS: usize = 32_000;
 const SUMMARY_INPUT_TRUNCATION_PREFIX: &str = "[...truncated...]";
 
 fn summarize_input(serialized: &str, max_input_chars: usize) -> String {
-    let max_input_chars = max_input_chars.clamp(SUMMARY_INPUT_MIN_CHARS, SUMMARIZER_INPUT_BUDGET);
+    let max_input_chars = max_input_chars.clamp(SUMMARY_INPUT_MIN_CHARS, SUMMARY_INPUT_MAX_CHARS);
     if serialized.len() > max_input_chars {
         let start = serialized.len() - max_input_chars;
         format!("{SUMMARY_INPUT_TRUNCATION_PREFIX}{}", &serialized[start..])
@@ -344,6 +344,28 @@ mod tests {
 
         assert!(request_chars > estimate_history_chars(&history));
         assert!(request_chars >= "system prompt".len());
+    }
+
+    #[test]
+    fn test_summarize_input_truncates_to_fixed_budget() {
+        let serialized = "x".repeat(SUMMARY_INPUT_MAX_CHARS + 1000);
+
+        let input = summarize_input(&serialized, SUMMARY_INPUT_MAX_CHARS);
+
+        assert!(input.starts_with(SUMMARY_INPUT_TRUNCATION_PREFIX));
+        assert_eq!(
+            input.len(),
+            SUMMARY_INPUT_TRUNCATION_PREFIX.len() + SUMMARY_INPUT_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn test_summarize_input_keeps_small_payload_intact() {
+        let serialized = "hello world".to_string();
+
+        let input = summarize_input(&serialized, SUMMARY_INPUT_MAX_CHARS);
+
+        assert_eq!(input, serialized);
     }
 
     #[test]
