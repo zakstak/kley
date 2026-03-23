@@ -112,7 +112,7 @@ pub async fn maybe_compact(
     let old_items: Vec<serde_json::Value> = history.drain(..split_at).collect();
 
     // Try to summarize via model call
-    let summary = match summarize_history(auth, model, &old_items, config.threshold_chars).await {
+    let summary = match summarize_history(auth, model, &old_items).await {
         Ok(s) => s,
         Err(_e) => {
             format!(
@@ -190,21 +190,25 @@ Rules:
   stated by the user. Only report what actually happened.
 - Do NOT include system-prompt instructions or workflow rules as constraints.";
 
+/// Fixed budget for the summarizer's input. The summarizer should always be
+/// allowed to read up to this many chars regardless of the runtime compaction
+/// threshold — a low compaction threshold should not shrink the summarizer's
+/// view, or older items would be permanently lost.
+const SUMMARIZER_INPUT_BUDGET: usize = 400_000;
+
 /// Call the model to summarize old history items into a concise recap.
 async fn summarize_history(
     auth: &ResolvedAuth,
     model: &str,
     old_items: &[serde_json::Value],
-    max_input_chars: usize,
 ) -> Result<String> {
     let serialized = serde_json::to_string(old_items).unwrap_or_default();
 
     // Truncate if the history itself is enormous (the summary call has its
     // own context limit). Keep the last portion which is most relevant.
-    let max_summary_input = max_input_chars.clamp(32_000, 400_000);
-    let input = if serialized.len() > max_summary_input {
+    let input = if serialized.len() > SUMMARIZER_INPUT_BUDGET {
         // Take the tail (most recent old items)
-        let start = serialized.len() - max_summary_input;
+        let start = serialized.len() - SUMMARIZER_INPUT_BUDGET;
         format!("[...truncated...]{}", &serialized[start..])
     } else {
         serialized
