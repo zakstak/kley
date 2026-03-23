@@ -43,7 +43,15 @@ impl crate::provider::Provider for ZaiProvider {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TurnResult>> + Send + 'a>> {
         Box::pin(async move {
             let messages = messages_from_history(ctx.history);
-            send_sse(auth, ctx.model, &messages, ctx.abort_signal, ctx.output_hook, token_usage).await
+            send_sse(
+                auth,
+                ctx.model,
+                &messages,
+                ctx.abort_signal,
+                ctx.output_hook,
+                token_usage,
+            )
+            .await
         })
     }
 }

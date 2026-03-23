@@ -46,38 +46,38 @@ impl crate::provider::Provider for OpenAiProvider {
         token_usage: &'a mut Option<TokenUsage>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TurnResult>> + Send + 'a>> {
         Box::pin(async move {
-        if self.ws_disabled.load(Ordering::Relaxed) {
+            if self.ws_disabled.load(Ordering::Relaxed) {
+                ctx.events.emit(AgentEvent::TransportSelected {
+                    session_id: Some(ctx.session_id.to_string()),
+                    turn_id: Some(ctx.turn_id.to_string()),
+                    provider: "openai".into(),
+                    transport: Transport::Sse,
+                });
+                return send_sse(auth, &ctx, token_usage).await;
+            }
+
             ctx.events.emit(AgentEvent::TransportSelected {
                 session_id: Some(ctx.session_id.to_string()),
                 turn_id: Some(ctx.turn_id.to_string()),
                 provider: "openai".into(),
-                transport: Transport::Sse,
+                transport: Transport::WebSocket,
             });
-            return send_sse(auth, &ctx, token_usage).await;
-        }
 
-        ctx.events.emit(AgentEvent::TransportSelected {
-            session_id: Some(ctx.session_id.to_string()),
-            turn_id: Some(ctx.turn_id.to_string()),
-            provider: "openai".into(),
-            transport: Transport::WebSocket,
-        });
-
-        match send_ws(auth, &ctx, token_usage).await {
-            Ok(response) => Ok(response),
-            Err(err) => {
-                let reason = format!("{err:#}");
-                self.ws_disabled.store(true, Ordering::Relaxed);
-                ctx.events.emit(AgentEvent::TransportFallback {
-                    session_id: Some(ctx.session_id.to_string()),
-                    turn_id: Some(ctx.turn_id.to_string()),
-                    from: Transport::WebSocket,
-                    to: Transport::Sse,
-                    reason,
-                });
-                send_sse(auth, &ctx, token_usage).await
+            match send_ws(auth, &ctx, token_usage).await {
+                Ok(response) => Ok(response),
+                Err(err) => {
+                    let reason = format!("{err:#}");
+                    self.ws_disabled.store(true, Ordering::Relaxed);
+                    ctx.events.emit(AgentEvent::TransportFallback {
+                        session_id: Some(ctx.session_id.to_string()),
+                        turn_id: Some(ctx.turn_id.to_string()),
+                        from: Transport::WebSocket,
+                        to: Transport::Sse,
+                        reason,
+                    });
+                    send_sse(auth, &ctx, token_usage).await
+                }
             }
-        }
         })
     }
 }

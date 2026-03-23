@@ -478,14 +478,15 @@ impl SelfImproveManager {
     }
 
     fn launch_supported(&self) -> bool {
-        self.launch_supported_with(docker_host_ready)
+        self.launch_supported_with(|| Path::new("/.dockerenv").exists(), docker_host_ready)
     }
 
-    fn launch_supported_with<F>(&self, docker_ready: F) -> bool
+    fn launch_supported_with<D, I>(&self, is_docker: I, docker_ready: D) -> bool
     where
-        F: FnOnce(&Path) -> bool,
+        D: FnOnce(&Path) -> bool,
+        I: FnOnce() -> bool,
     {
-        if Path::new("/.dockerenv").exists() {
+        if is_docker() {
             return true;
         }
 
@@ -498,22 +499,29 @@ impl SelfImproveManager {
         cycles: u32,
         turns_per_cycle: u32,
     ) -> Result<Command, SelfImproveError> {
-        self.spawn_command_with(cycles, turns_per_cycle, docker_host_ready)
+        self.spawn_command_with(
+            cycles,
+            turns_per_cycle,
+            || Path::new("/.dockerenv").exists(),
+            docker_host_ready,
+        )
     }
 
-    fn spawn_command_with<F>(
+    fn spawn_command_with<D, I>(
         &self,
         cycles: u32,
         turns_per_cycle: u32,
-        docker_ready: F,
+        is_docker: I,
+        docker_ready: D,
     ) -> Result<Command, SelfImproveError>
     where
-        F: FnOnce(&Path) -> bool,
+        D: FnOnce(&Path) -> bool,
+        I: FnOnce() -> bool,
     {
         let mut command = Command::new("setsid");
         command.arg("bash");
 
-        if Path::new("/.dockerenv").exists() {
+        if is_docker() {
             command.arg("self-improve.sh");
         } else {
             let launcher = self.repo_root.join("docker-session.sh");
@@ -835,8 +843,8 @@ mod tests {
             repo_root: temp_dir.path().to_path_buf(),
         };
 
-        assert!(!manager.launch_supported_with(|_| false));
-        assert!(manager.launch_supported_with(|_| true));
+        assert!(!manager.launch_supported_with(|| false, |_| false));
+        assert!(manager.launch_supported_with(|| false, |_| true));
     }
 
     #[test]
@@ -859,7 +867,7 @@ mod tests {
         };
 
         let err = manager
-            .spawn_command_with(5, 30, |_| false)
+            .spawn_command_with(5, 30, || false, |_| false)
             .expect_err("docker should be required on host");
         assert_eq!(err.code, "unsupported_environment");
         assert!(err.message.contains("Docker CLI or daemon is not runnable"));
