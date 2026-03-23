@@ -423,6 +423,7 @@ impl<'a> SessionRuntime<'a> {
 
         compact_history_to_budget(
             &self.resolved,
+            self.provider.name(),
             &self.model,
             &mut self.history,
             &self.compact_config,
@@ -435,6 +436,7 @@ impl<'a> SessionRuntime<'a> {
         let (context_used_chars, context_max_chars) = context_usage_chars(
             &self.history,
             self.compact_config.threshold_chars,
+            self.provider.name(),
             &self.instructions,
             &self.registry,
         );
@@ -463,6 +465,7 @@ impl<'a> SessionRuntime<'a> {
         let final_text = loop {
             compact_history_to_budget(
                 &self.resolved,
+                self.provider.name(),
                 &self.model,
                 &mut self.history,
                 &self.compact_config,
@@ -625,6 +628,7 @@ impl<'a> SessionRuntime<'a> {
                         let (context_used_chars, context_max_chars) = context_usage_chars(
                             &self.history,
                             self.compact_config.threshold_chars,
+                            self.provider.name(),
                             &self.instructions,
                             &self.registry,
                         );
@@ -649,8 +653,18 @@ impl<'a> SessionRuntime<'a> {
                     context_overflow_retries += 1;
                     let retry_config =
                         retry_compact_config(&self.compact_config, context_overflow_retries);
+
+                    let before_retry_request_chars = estimated_request_chars(
+                        &self.history,
+                        self.provider.name(),
+                        &self.instructions,
+                        &self.registry,
+                    );
+                    let before_retry_len = self.history.len();
+
                     compact_history_to_budget(
                         &self.resolved,
+                        self.provider.name(),
                         &self.model,
                         &mut self.history,
                         &retry_config,
@@ -659,6 +673,29 @@ impl<'a> SessionRuntime<'a> {
                         &self.registry,
                     )
                     .await;
+
+                    let after_retry_request_chars = estimated_request_chars(
+                        &self.history,
+                        self.provider.name(),
+                        &self.instructions,
+                        &self.registry,
+                    );
+                    if after_retry_request_chars >= before_retry_request_chars
+                        && self.history.len() == before_retry_len
+                    {
+                        let removed_items = force_shrink_history_for_overflow_retry(
+                            &mut self.history,
+                            context_overflow_retries,
+                        );
+                        if removed_items > 0 {
+                            self.events.emit(AgentEvent::HistoryCompacted {
+                                session_id: Some(self.session.id.clone()),
+                                turn_id: Some(turn_id.clone()),
+                                old_items: removed_items,
+                                new_chars: crate::compact::estimate_history_chars(&self.history),
+                            });
+                        }
+                    }
                     continue;
                 }
                 Err(err) => break Err(err),
@@ -712,6 +749,7 @@ impl<'a> SessionRuntime<'a> {
                 let (context_used_chars, context_max_chars) = context_usage_chars(
                     &self.history,
                     self.compact_config.threshold_chars,
+                    self.provider.name(),
                     &self.instructions,
                     &self.registry,
                 );
@@ -805,6 +843,7 @@ fn create_provider(provider_name: &str) -> Box<dyn Provider> {
 
 async fn compact_history_to_budget(
     auth: &ResolvedAuth,
+    provider_name: &str,
     model: &str,
     history: &mut Vec<serde_json::Value>,
     config: &CompactConfig,
@@ -817,7 +856,7 @@ async fn compact_history_to_budget(
     }
 
     for pass in 0..=CONTEXT_OVERFLOW_RETRY_LIMIT {
-        let request_chars = estimated_request_chars(history, instructions, registry);
+        let request_chars = estimated_request_chars(history, provider_name, instructions, registry);
         let target_chars = config.threshold_chars.max(1);
         if request_chars <= target_chars {
             return;
@@ -853,7 +892,8 @@ async fn compact_history_to_budget(
             return;
         }
 
-        let after_request_chars = estimated_request_chars(history, instructions, registry);
+        let after_request_chars =
+            estimated_request_chars(history, provider_name, instructions, registry);
         let after_history_chars = crate::compact::estimate_history_chars(history);
         if after_request_chars >= before_request_chars
             && after_history_chars >= before_history_chars
@@ -862,6 +902,24 @@ async fn compact_history_to_budget(
             return;
         }
     }
+}
+
+fn force_shrink_history_for_overflow_retry(
+    history: &mut Vec<serde_json::Value>,
+    retry_count: usize,
+) -> usize {
+    if history.len() < 2 {
+        return 0;
+    }
+
+    let max_removable = history.len().saturating_sub(1);
+    let target_removal = match retry_count {
+        0 | 1 => (history.len() / 4).max(1),
+        _ => (history.len() / 2).max(1),
+    };
+    let remove_count = target_removal.min(max_removable);
+    history.drain(..remove_count);
+    remove_count
 }
 
 fn retry_compact_config(config: &CompactConfig, retry_count: usize) -> CompactConfig {
@@ -904,11 +962,21 @@ fn compact_keep_recent(
 
 fn estimated_request_chars(
     history: &[serde_json::Value],
+    provider_name: &str,
     instructions: &str,
     registry: &ToolRegistry,
 ) -> usize {
-    let tools = registry.to_api_tools();
-    crate::compact::estimate_request_chars(history, instructions, &tools)
+    match provider_name {
+        "openai" => {
+            let tools = registry.to_api_tools();
+            crate::compact::estimate_request_chars(history, instructions, &tools)
+        }
+        "zai" | "test" => crate::compact::estimate_history_chars(history),
+        _ => {
+            let tools = registry.to_api_tools();
+            crate::compact::estimate_request_chars(history, instructions, &tools)
+        }
+    }
 }
 
 fn is_context_window_error(err: &anyhow::Error) -> bool {
@@ -927,10 +995,11 @@ fn is_context_window_error(err: &anyhow::Error) -> bool {
 fn context_usage_chars(
     history: &[serde_json::Value],
     max_chars: usize,
+    provider_name: &str,
     instructions: &str,
     registry: &ToolRegistry,
 ) -> (usize, usize) {
-    let used_chars = estimated_request_chars(history, instructions, registry);
+    let used_chars = estimated_request_chars(history, provider_name, instructions, registry);
     (used_chars, max_chars.max(1))
 }
 
@@ -1116,9 +1185,57 @@ mod tests {
         let registry = crate::tools::default_registry(std::env::current_dir().unwrap());
 
         let (used_chars, max_chars) =
-            context_usage_chars(&history, 1_000, "system prompt", &registry);
+            context_usage_chars(&history, 1_000, "openai", "system prompt", &registry);
 
         assert!(used_chars > crate::compact::estimate_history_chars(&history));
         assert_eq!(max_chars, 1_000);
+    }
+
+    #[test]
+    fn context_usage_chars_matches_zai_payload_shape() {
+        let history = vec![serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "hello",
+        })];
+        let registry = crate::tools::default_registry(std::env::current_dir().unwrap());
+
+        let (used_chars, max_chars) =
+            context_usage_chars(&history, 1_000, "zai", "system prompt", &registry);
+
+        assert_eq!(used_chars, crate::compact::estimate_history_chars(&history));
+        assert_eq!(max_chars, 1_000);
+    }
+
+    #[test]
+    fn force_shrink_history_for_overflow_retry_removes_oldest_items() {
+        let mut history = vec![
+            serde_json::json!({"type": "message", "role": "user", "content": "m1"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "m2"}),
+            serde_json::json!({"type": "message", "role": "user", "content": "m3"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "m4"}),
+        ];
+
+        let removed = force_shrink_history_for_overflow_retry(&mut history, 1);
+
+        assert_eq!(removed, 1);
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history[0].get("content").and_then(|v| v.as_str()),
+            Some("m2")
+        );
+    }
+
+    #[test]
+    fn force_shrink_history_for_overflow_retry_keeps_at_least_one_item() {
+        let mut history = vec![
+            serde_json::json!({"type": "message", "role": "user", "content": "m1"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "m2"}),
+        ];
+
+        let removed = force_shrink_history_for_overflow_retry(&mut history, 2);
+
+        assert_eq!(removed, 1);
+        assert_eq!(history.len(), 1);
     }
 }
