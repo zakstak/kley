@@ -18,6 +18,11 @@ fn docker_entrypoint_script() -> String {
     fs::read_to_string(path).expect("docker-entrypoint.sh should be readable")
 }
 
+fn preflight_script() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("preflight.sh");
+    fs::read_to_string(path).expect("preflight.sh should be readable")
+}
+
 fn docker_compose_manifest() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker-compose.yml");
     fs::read_to_string(path).expect("docker-compose.yml should be readable")
@@ -387,4 +392,64 @@ fn self_improve_prompt_enforces_quality_guardrails() {
             "expected self-improve prompt to contain {required:?}"
         );
     }
+}
+
+#[test]
+fn docker_entrypoint_repairs_worktree_and_notepad_mount_ownership() {
+    let script = docker_entrypoint_script();
+
+    for required in [
+        "\"$WORKSPACE_DIR/.git/worktrees\"",
+        "\"$WORKSPACE_DIR/.sisyphus/notepads\"",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected docker-entrypoint.sh to contain {required:?}"
+        );
+    }
+}
+
+#[test]
+fn preflight_script_checks_repo_path_ownership_before_dispatch() {
+    let script = preflight_script();
+
+    for required in [
+        "check_repo_path_ownership()",
+        "if [ -e \"/.dockerenv\" ]; then",
+        "expected_uid=\"$(stat -c '%u' \"$SCRIPT_DIR\" 2>/dev/null || true)\"",
+        "expected_gid=\"$(stat -c '%g' \"$SCRIPT_DIR\" 2>/dev/null || true)\"",
+        "if [ -n \"$expected_uid\" ] && [ -n \"$expected_gid\" ]; then",
+        "check_repo_path_ownership \"$SCRIPT_DIR/.git/refs\" \"$expected_uid\" \"$expected_gid\"",
+        "check_repo_path_ownership \"$SCRIPT_DIR/.git/worktrees\" \"$expected_uid\" \"$expected_gid\"",
+        "check_repo_path_ownership \"$SCRIPT_DIR/.sisyphus/notepads\" \"$expected_uid\" \"$expected_gid\"",
+        "error: preflight requires writable repo path:",
+        "error: preflight requires repo ownership repair:",
+        "workspace owner uid:gid $expected_uid:$expected_gid",
+        "./docker-session.sh self-improve.sh",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected preflight.sh to contain {required:?}"
+        );
+    }
+
+    assert!(
+        !script.contains("current_uid=\"$(id -u)\""),
+        "expected preflight.sh not to key ownership checks off the current container uid"
+    );
+
+    assert_ordered_markers(
+        &script,
+        &[
+            "if [ -e \"/.dockerenv\" ]; then",
+            "expected_uid=\"$(stat -c '%u' \"$SCRIPT_DIR\" 2>/dev/null || true)\"",
+            "expected_gid=\"$(stat -c '%g' \"$SCRIPT_DIR\" 2>/dev/null || true)\"",
+            "check_repo_path_ownership \"$SCRIPT_DIR/.git/refs\" \"$expected_uid\" \"$expected_gid\"",
+            "check_repo_path_ownership \"$SCRIPT_DIR/.git/worktrees\" \"$expected_uid\" \"$expected_gid\"",
+            "check_repo_path_ownership \"$SCRIPT_DIR/.sisyphus/notepads\" \"$expected_uid\" \"$expected_gid\"",
+            "exec cargo run --quiet --manifest-path \"$MANIFEST_PATH\" --bin kley -- preflight \"$@\"",
+            "exec kley preflight \"$@\"",
+        ],
+        "preflight ownership guard before dispatch",
+    );
 }
