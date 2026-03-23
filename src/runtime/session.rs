@@ -423,22 +423,26 @@ impl<'a> SessionRuntime<'a> {
 
         compact_history_to_budget(
             &self.resolved,
-            self.provider.name(),
             &self.model,
             &mut self.history,
             &self.compact_config,
             &self.events,
-            &self.instructions,
-            &self.registry,
+            &RequestBudgetContext {
+                provider_name: self.provider.name(),
+                instructions: &self.instructions,
+                registry: &self.registry,
+            },
         )
         .await;
 
         let (context_used_chars, context_max_chars) = context_usage_chars(
             &self.history,
             self.compact_config.threshold_chars,
-            self.provider.name(),
-            &self.instructions,
-            &self.registry,
+            &RequestBudgetContext {
+                provider_name: self.provider.name(),
+                instructions: &self.instructions,
+                registry: &self.registry,
+            },
         );
 
         if self.abort_signal.load(Ordering::Relaxed) {
@@ -465,13 +469,15 @@ impl<'a> SessionRuntime<'a> {
         let final_text = loop {
             compact_history_to_budget(
                 &self.resolved,
-                self.provider.name(),
                 &self.model,
                 &mut self.history,
                 &self.compact_config,
                 &self.events,
-                &self.instructions,
-                &self.registry,
+                &RequestBudgetContext {
+                    provider_name: self.provider.name(),
+                    instructions: &self.instructions,
+                    registry: &self.registry,
+                },
             )
             .await;
 
@@ -628,9 +634,11 @@ impl<'a> SessionRuntime<'a> {
                         let (context_used_chars, context_max_chars) = context_usage_chars(
                             &self.history,
                             self.compact_config.threshold_chars,
-                            self.provider.name(),
-                            &self.instructions,
-                            &self.registry,
+                            &RequestBudgetContext {
+                                provider_name: self.provider.name(),
+                                instructions: &self.instructions,
+                                registry: &self.registry,
+                            },
                         );
                         self.events.emit(AgentEvent::ToolCallCompleted {
                             session_id: self.session.id.clone(),
@@ -656,29 +664,35 @@ impl<'a> SessionRuntime<'a> {
 
                     let before_retry_request_chars = estimated_request_chars(
                         &self.history,
-                        self.provider.name(),
-                        &self.instructions,
-                        &self.registry,
+                        &RequestBudgetContext {
+                            provider_name: self.provider.name(),
+                            instructions: &self.instructions,
+                            registry: &self.registry,
+                        },
                     );
                     let before_retry_len = self.history.len();
 
                     compact_history_to_budget(
                         &self.resolved,
-                        self.provider.name(),
                         &self.model,
                         &mut self.history,
                         &retry_config,
                         &self.events,
-                        &self.instructions,
-                        &self.registry,
+                        &RequestBudgetContext {
+                            provider_name: self.provider.name(),
+                            instructions: &self.instructions,
+                            registry: &self.registry,
+                        },
                     )
                     .await;
 
                     let after_retry_request_chars = estimated_request_chars(
                         &self.history,
-                        self.provider.name(),
-                        &self.instructions,
-                        &self.registry,
+                        &RequestBudgetContext {
+                            provider_name: self.provider.name(),
+                            instructions: &self.instructions,
+                            registry: &self.registry,
+                        },
                     );
                     if after_retry_request_chars >= before_retry_request_chars
                         && self.history.len() == before_retry_len
@@ -749,9 +763,11 @@ impl<'a> SessionRuntime<'a> {
                 let (context_used_chars, context_max_chars) = context_usage_chars(
                     &self.history,
                     self.compact_config.threshold_chars,
-                    self.provider.name(),
-                    &self.instructions,
-                    &self.registry,
+                    &RequestBudgetContext {
+                        provider_name: self.provider.name(),
+                        instructions: &self.instructions,
+                        registry: &self.registry,
+                    },
                 );
                 self.events.emit(AgentEvent::TurnCompleted {
                     session_id: self.session.id.clone(),
@@ -841,22 +857,26 @@ fn create_provider(provider_name: &str) -> Box<dyn Provider> {
     }
 }
 
+struct RequestBudgetContext<'a> {
+    provider_name: &'a str,
+    instructions: &'a str,
+    registry: &'a ToolRegistry,
+}
+
 async fn compact_history_to_budget(
     auth: &ResolvedAuth,
-    provider_name: &str,
     model: &str,
     history: &mut Vec<serde_json::Value>,
     config: &CompactConfig,
     events: &EventEmitter,
-    instructions: &str,
-    registry: &ToolRegistry,
+    request_budget: &RequestBudgetContext<'_>,
 ) {
     if history.len() < 2 {
         return;
     }
 
     for pass in 0..=CONTEXT_OVERFLOW_RETRY_LIMIT {
-        let request_chars = estimated_request_chars(history, provider_name, instructions, registry);
+        let request_chars = estimated_request_chars(history, request_budget);
         let target_chars = config.threshold_chars.max(1);
         if request_chars <= target_chars {
             return;
@@ -892,8 +912,7 @@ async fn compact_history_to_budget(
             return;
         }
 
-        let after_request_chars =
-            estimated_request_chars(history, provider_name, instructions, registry);
+        let after_request_chars = estimated_request_chars(history, request_budget);
         let after_history_chars = crate::compact::estimate_history_chars(history);
         if after_request_chars >= before_request_chars
             && after_history_chars >= before_history_chars
@@ -962,19 +981,17 @@ fn compact_keep_recent(
 
 fn estimated_request_chars(
     history: &[serde_json::Value],
-    provider_name: &str,
-    instructions: &str,
-    registry: &ToolRegistry,
+    request_budget: &RequestBudgetContext<'_>,
 ) -> usize {
-    match provider_name {
+    match request_budget.provider_name {
         "openai" => {
-            let tools = registry.to_api_tools();
-            crate::compact::estimate_request_chars(history, instructions, &tools)
+            let tools = request_budget.registry.to_api_tools();
+            crate::compact::estimate_request_chars(history, request_budget.instructions, &tools)
         }
         "zai" | "test" => crate::compact::estimate_history_chars(history),
         _ => {
-            let tools = registry.to_api_tools();
-            crate::compact::estimate_request_chars(history, instructions, &tools)
+            let tools = request_budget.registry.to_api_tools();
+            crate::compact::estimate_request_chars(history, request_budget.instructions, &tools)
         }
     }
 }
@@ -995,11 +1012,9 @@ fn is_context_window_error(err: &anyhow::Error) -> bool {
 fn context_usage_chars(
     history: &[serde_json::Value],
     max_chars: usize,
-    provider_name: &str,
-    instructions: &str,
-    registry: &ToolRegistry,
+    request_budget: &RequestBudgetContext<'_>,
 ) -> (usize, usize) {
-    let used_chars = estimated_request_chars(history, provider_name, instructions, registry);
+    let used_chars = estimated_request_chars(history, request_budget);
     (used_chars, max_chars.max(1))
 }
 
@@ -1183,9 +1198,13 @@ mod tests {
             "content": "hello",
         })];
         let registry = crate::tools::default_registry(std::env::current_dir().unwrap());
+        let request_budget = RequestBudgetContext {
+            provider_name: "openai",
+            instructions: "system prompt",
+            registry: &registry,
+        };
 
-        let (used_chars, max_chars) =
-            context_usage_chars(&history, 1_000, "openai", "system prompt", &registry);
+        let (used_chars, max_chars) = context_usage_chars(&history, 1_000, &request_budget);
 
         assert!(used_chars > crate::compact::estimate_history_chars(&history));
         assert_eq!(max_chars, 1_000);
@@ -1199,9 +1218,13 @@ mod tests {
             "content": "hello",
         })];
         let registry = crate::tools::default_registry(std::env::current_dir().unwrap());
+        let request_budget = RequestBudgetContext {
+            provider_name: "zai",
+            instructions: "system prompt",
+            registry: &registry,
+        };
 
-        let (used_chars, max_chars) =
-            context_usage_chars(&history, 1_000, "zai", "system prompt", &registry);
+        let (used_chars, max_chars) = context_usage_chars(&history, 1_000, &request_budget);
 
         assert_eq!(used_chars, crate::compact::estimate_history_chars(&history));
         assert_eq!(max_chars, 1_000);
