@@ -3,6 +3,9 @@
 //! Follows the codex-rs pattern: always return exit code + duration + output
 //! so the model knows whether the command succeeded.
 
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -17,7 +20,6 @@ const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KB
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct ShellTool {
-    #[allow(dead_code)] // Used by with_timeout() constructor; execute() will use this in future
     timeout: Duration,
 }
 
@@ -34,7 +36,6 @@ impl ShellTool {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_timeout(timeout: Duration) -> Self {
         Self { timeout }
     }
@@ -72,56 +73,122 @@ impl Tool for ShellTool {
 
         let start = Instant::now();
 
-        // Run synchronously — the tool trait is sync. The agent loop can
-        // call this from spawn_blocking if needed.
-        let result = std::process::Command::new("sh")
+        let mut child = match Command::new("sh")
             .arg("-c")
             .arg(command)
-            .output();
-
-        let duration = start.elapsed();
-
-        match result {
-            Ok(output) => {
-                let exit_code = output.status.code().unwrap_or(-1);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                // Merge stdout and stderr (stderr first if non-empty, like a terminal)
-                let mut combined = String::new();
-                if !stderr.is_empty() {
-                    combined.push_str(&stderr);
-                    if !stderr.ends_with('\n') {
-                        combined.push('\n');
-                    }
-                }
-                combined.push_str(&stdout);
-
-                // Count total lines before truncation
-                let total_lines = combined.lines().count();
-
-                // Truncate if too large.
-                let output_text = if combined.len() > MAX_OUTPUT_BYTES {
-                    let half = MAX_OUTPUT_BYTES / 2;
-                    let head_end = char_boundary_before_or_at(&combined, half);
-                    let tail_start = char_boundary_at_or_after(&combined, combined.len() - half);
-                    let output_bytes = head_end + (combined.len() - tail_start);
-                    let truncated_bytes = combined.len().saturating_sub(output_bytes);
-
-                    let head = &combined[..head_end];
-                    let tail = &combined[tail_start..];
-                    format!("{head}\n\n... ({truncated_bytes} bytes truncated) ...\n\n{tail}")
-                } else {
-                    combined
-                };
-
-                let duration_secs = duration.as_secs_f64();
-                Ok(format!(
-                    "Exit code: {exit_code}\nDuration: {duration_secs:.1}s\nTotal output lines: {total_lines}\nOutput:\n{output_text}"
-                ))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) => {
+                return Ok(format!("Error: failed to execute command: {err}"));
             }
-            Err(e) => Ok(format!("Error: failed to execute command: {e}")),
+        };
+
+        let mut timed_out = false;
+
+        let mut stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                return Ok("Error: failed to capture stdout handle".into());
+            }
+        };
+        let mut stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                return Ok("Error: failed to capture stderr handle".into());
+            }
+        };
+
+        let stdout_handle = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes);
+            bytes
+        });
+        let stderr_handle = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        });
+
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if start.elapsed() >= self.timeout => {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                Ok(None) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => {
+                    let _ = child.kill();
+                    return Ok(format!("Error: failed while waiting for command: {err}"));
+                }
+            }
         }
+
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(err) => {
+                return Ok(format!("Error: command did not complete: {err}"));
+            }
+        };
+
+        let stdout = match stdout_handle.join() {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok("Error: failed to collect command stdout".into()),
+        };
+        let stderr = match stderr_handle.join() {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok("Error: failed to collect command stderr".into()),
+        };
+
+        let exit_code = status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
+
+        // Merge stdout and stderr (stderr first if non-empty, like a terminal)
+        let mut combined = String::new();
+        if !stderr.is_empty() {
+            combined.push_str(&stderr);
+            if !stderr.ends_with('\n') {
+                combined.push('\n');
+            }
+        }
+        combined.push_str(&stdout);
+
+        // Count total lines before truncation
+        let total_lines = combined.lines().count();
+
+        // Truncate if too large.
+        let mut output_text = if combined.len() > MAX_OUTPUT_BYTES {
+            let half = MAX_OUTPUT_BYTES / 2;
+            let head_end = char_boundary_before_or_at(&combined, half);
+            let tail_start = char_boundary_at_or_after(&combined, combined.len() - half);
+            let output_bytes = head_end + (combined.len() - tail_start);
+            let truncated_bytes = combined.len().saturating_sub(output_bytes);
+
+            let head = &combined[..head_end];
+            let tail = &combined[tail_start..];
+            format!("{head}\n\n... ({truncated_bytes} bytes truncated) ...\n\n{tail}")
+        } else {
+            combined
+        };
+
+        if timed_out {
+            output_text = format!(
+                "Command timed out after {:.1}s and was terminated.\n\n{output_text}",
+                self.timeout.as_secs_f64()
+            );
+        }
+
+        let duration_secs = start.elapsed().as_secs_f64();
+        Ok(format!(
+            "Exit code: {exit_code}\nDuration: {duration_secs:.1}s\nTotal output lines: {total_lines}\nOutput:\n{output_text}"
+        ))
     }
 }
 
@@ -210,5 +277,18 @@ mod tests {
         assert!(result.contains("... ("));
         assert!(result.contains("Exit code: 0"));
         assert!(result.contains("界"));
+    }
+
+    #[test]
+    fn shell_times_out_long_running_command() {
+        let tool = ShellTool::with_timeout(Duration::from_millis(150));
+        let start = Instant::now();
+        let result = tool
+            .execute(serde_json::json!({"command": "sleep 1"}))
+            .unwrap();
+
+        assert!(result.contains("Command timed out after"));
+        assert!(start.elapsed() < Duration::from_millis(900));
+        assert!(start.elapsed() >= Duration::from_millis(120));
     }
 }
