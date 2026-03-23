@@ -112,7 +112,7 @@ pub async fn maybe_compact(
     let old_items: Vec<serde_json::Value> = history.drain(..split_at).collect();
 
     // Try to summarize via model call
-    let summary = match summarize_history(auth, model, &old_items).await {
+    let summary = match summarize_history(auth, model, &old_items, config.threshold_chars).await {
         Ok(s) => s,
         Err(_e) => {
             format!(
@@ -190,29 +190,28 @@ Rules:
   stated by the user. Only report what actually happened.
 - Do NOT include system-prompt instructions or workflow rules as constraints.";
 
-/// Fixed budget for the summarizer's input. The summarizer should always be
-/// allowed to read up to this many chars regardless of the runtime compaction
-/// threshold — a low compaction threshold should not shrink the summarizer's
-/// view, or older items would be permanently lost.
 const SUMMARIZER_INPUT_BUDGET: usize = 400_000;
+const SUMMARY_INPUT_TRUNCATION_PREFIX: &str = "[...truncated...]";
+
+fn summarize_input(serialized: &str, max_input_chars: usize) -> String {
+    let max_input_chars = max_input_chars.clamp(1, SUMMARIZER_INPUT_BUDGET);
+    if serialized.len() > max_input_chars {
+        let start = serialized.len() - max_input_chars;
+        format!("{SUMMARY_INPUT_TRUNCATION_PREFIX}{}", &serialized[start..])
+    } else {
+        serialized.to_string()
+    }
+}
 
 /// Call the model to summarize old history items into a concise recap.
 async fn summarize_history(
     auth: &ResolvedAuth,
     model: &str,
     old_items: &[serde_json::Value],
+    max_input_chars: usize,
 ) -> Result<String> {
     let serialized = serde_json::to_string(old_items).unwrap_or_default();
-
-    // Truncate if the history itself is enormous (the summary call has its
-    // own context limit). Keep the last portion which is most relevant.
-    let input = if serialized.len() > SUMMARIZER_INPUT_BUDGET {
-        // Take the tail (most recent old items)
-        let start = serialized.len() - SUMMARIZER_INPUT_BUDGET;
-        format!("[...truncated...]{}", &serialized[start..])
-    } else {
-        serialized
-    };
+    let input = summarize_input(&serialized, max_input_chars);
 
     let body = serde_json::json!({
         "model": model,
@@ -344,6 +343,16 @@ mod tests {
 
         assert!(request_chars > estimate_history_chars(&history));
         assert!(request_chars >= "system prompt".len());
+    }
+
+    #[test]
+    fn test_summarize_input_respects_smaller_budget() {
+        let serialized = "x".repeat(200);
+
+        let input = summarize_input(&serialized, 80);
+
+        assert!(input.starts_with(SUMMARY_INPUT_TRUNCATION_PREFIX));
+        assert_eq!(input.len(), SUMMARY_INPUT_TRUNCATION_PREFIX.len() + 80);
     }
 
     #[tokio::test]
