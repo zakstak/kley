@@ -211,7 +211,7 @@ These are worse than `no-safe-change` unless directly required by a substantive 
 
 ## History awareness
 Before selecting candidates, review your own recent PR history to avoid repeating work.
-- Run `gh pr list --repo zakstak/kley --state all --limit 20 --json title,headRefName,state` at the start of each cycle.
+- Run `gh pr list --repo zakstak/kley --author saga-agent --state all --limit 20 --json title,headRefName,state` at the start of each cycle.
 - Do not address the same area, problem, or code path as any recent PR.
 - Do not submit a fix that is a variation of, follow-up to, or retry of a previous fix.
 - If your best candidate overlaps with a recent PR, choose a different candidate or report `no-safe-change`.
@@ -347,8 +347,8 @@ This retrospective informs future cycles. It does not lower the quality bar for 
 
 
 12. Enforce diff size guardrails.
-     - Count added lines outside test files: `git diff --numstat | grep -v -E '(^tests/|/tests/)' | awk '{s+=$1} END {print s+0}'`
-     - Count changed files: `git diff --name-only | wc -l`
+     - Count added lines outside test files: `git diff HEAD --numstat | awk '$3 !~ /^tests\//' | awk '{s+=$1} END {print s+0}'`
+     - Count changed files: `git diff HEAD --name-only | wc -l`
      - If added lines > 200 or changed files > 5, the change is too large. Unstage, discard the branch, and report `no-safe-change`.
 13. Commit with a descriptive conventional commit message.
     - Format: `type(scope): subject`

@@ -352,7 +352,7 @@ fn self_improve_prompt_enforces_quality_guardrails() {
     // History awareness (Branch C)
     for required in [
         "## History awareness",
-        "gh pr list --repo zakstak/kley --state all --limit 20",
+        "gh pr list --repo zakstak/kley --author saga-agent --state all --limit 20",
         "Review recent PR history",
         "overlaps with a recent PR",
     ] {
@@ -368,7 +368,7 @@ fn self_improve_prompt_enforces_quality_guardrails() {
         "Maximum 200 added lines excluding test files",
         "Maximum 5 changed files",
         "Enforce diff size guardrails",
-        "git diff --numstat",
+        "git diff HEAD --numstat",
     ] {
         assert!(
             script.contains(required),
