@@ -190,6 +190,20 @@ Rules:
   stated by the user. Only report what actually happened.
 - Do NOT include system-prompt instructions or workflow rules as constraints.";
 
+const SUMMARIZER_INPUT_BUDGET: usize = 400_000;
+const SUMMARY_INPUT_MIN_CHARS: usize = 32_000;
+const SUMMARY_INPUT_TRUNCATION_PREFIX: &str = "[...truncated...]";
+
+fn summarize_input(serialized: &str, max_input_chars: usize) -> String {
+    let max_input_chars = max_input_chars.clamp(SUMMARY_INPUT_MIN_CHARS, SUMMARIZER_INPUT_BUDGET);
+    if serialized.len() > max_input_chars {
+        let start = serialized.len() - max_input_chars;
+        format!("{SUMMARY_INPUT_TRUNCATION_PREFIX}{}", &serialized[start..])
+    } else {
+        serialized.to_string()
+    }
+}
+
 /// Call the model to summarize old history items into a concise recap.
 async fn summarize_history(
     auth: &ResolvedAuth,
@@ -198,17 +212,7 @@ async fn summarize_history(
     max_input_chars: usize,
 ) -> Result<String> {
     let serialized = serde_json::to_string(old_items).unwrap_or_default();
-
-    // Truncate if the history itself is enormous (the summary call has its
-    // own context limit). Keep the last portion which is most relevant.
-    let max_summary_input = max_input_chars.clamp(32_000, 400_000);
-    let input = if serialized.len() > max_summary_input {
-        // Take the tail (most recent old items)
-        let start = serialized.len() - max_summary_input;
-        format!("[...truncated...]{}", &serialized[start..])
-    } else {
-        serialized
-    };
+    let input = summarize_input(&serialized, max_input_chars);
 
     let body = serde_json::json!({
         "model": model,
@@ -340,6 +344,29 @@ mod tests {
 
         assert!(request_chars > estimate_history_chars(&history));
         assert!(request_chars >= "system prompt".len());
+    }
+
+    #[test]
+    fn test_summarize_input_respects_smaller_budget() {
+        let serialized = "x".repeat(100_000);
+
+        let input = summarize_input(&serialized, 80_000);
+
+        assert!(input.starts_with(SUMMARY_INPUT_TRUNCATION_PREFIX));
+        assert_eq!(input.len(), SUMMARY_INPUT_TRUNCATION_PREFIX.len() + 80_000);
+    }
+
+    #[test]
+    fn test_summarize_input_clamps_tiny_budget_to_floor() {
+        let serialized = "x".repeat(SUMMARY_INPUT_MIN_CHARS + 5_000);
+
+        let input = summarize_input(&serialized, 80);
+
+        assert!(input.starts_with(SUMMARY_INPUT_TRUNCATION_PREFIX));
+        assert_eq!(
+            input.len(),
+            SUMMARY_INPUT_TRUNCATION_PREFIX.len() + SUMMARY_INPUT_MIN_CHARS
+        );
     }
 
     #[tokio::test]
