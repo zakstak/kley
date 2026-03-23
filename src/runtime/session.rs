@@ -937,8 +937,23 @@ fn force_shrink_history_for_overflow_retry(
         _ => (history.len() / 2).max(1),
     };
     let remove_count = target_removal.min(max_removable);
-    history.drain(..remove_count);
-    remove_count
+
+    // Snap forward to the next `message` boundary so we don't split
+    // function_call / function_call_output pairs.
+    let mut adjusted = remove_count;
+    while adjusted < history.len().saturating_sub(1) {
+        let item_type = history[adjusted]
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if item_type == "message" {
+            break;
+        }
+        adjusted += 1;
+    }
+    let final_count = adjusted.min(max_removable);
+    history.drain(..final_count);
+    final_count
 }
 
 fn retry_compact_config(config: &CompactConfig, retry_count: usize) -> CompactConfig {
@@ -1260,5 +1275,54 @@ mod tests {
 
         assert_eq!(removed, 1);
         assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn force_shrink_history_for_overflow_retry_snaps_to_message_boundary() {
+        // History: [msg, msg, fn_call, fn_output, msg]
+        // With retry_count=1, target_removal = 5/4 = 1.
+        // Index 1 is "message", so it should drain exactly 1.
+        // But if target_removal lands on a fn_call, it should advance past
+        // the fn_call + fn_output pair.
+        let mut history = vec![
+            serde_json::json!({"type": "message", "role": "user", "content": "m1"}),
+            serde_json::json!({"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}),
+            serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "result"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "m2"}),
+            serde_json::json!({"type": "message", "role": "user", "content": "m3"}),
+        ];
+
+        // target_removal = 5/4 = 1, index 1 is fn_call -> snap to index 3 (next message)
+        let removed = force_shrink_history_for_overflow_retry(&mut history, 1);
+
+        assert_eq!(removed, 3);
+        assert_eq!(history.len(), 2);
+        // First remaining item should be the assistant message
+        assert_eq!(
+            history[0].get("content").and_then(|v| v.as_str()),
+            Some("m2")
+        );
+    }
+
+    #[test]
+    fn force_shrink_history_for_overflow_retry_handles_all_tool_items() {
+        // Edge case: all items are fn_call/fn_output except the last message.
+        let mut history = vec![
+            serde_json::json!({"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"}),
+            serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "r1"}),
+            serde_json::json!({"type": "function_call", "call_id": "c2", "name": "t", "arguments": "{}"}),
+            serde_json::json!({"type": "function_call_output", "call_id": "c2", "output": "r2"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": "done"}),
+        ];
+
+        let removed = force_shrink_history_for_overflow_retry(&mut history, 1);
+
+        // Should snap all the way to index 4 (the message), but keep at least 1
+        assert_eq!(removed, 4);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].get("content").and_then(|v| v.as_str()),
+            Some("done")
+        );
     }
 }
