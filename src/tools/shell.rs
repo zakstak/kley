@@ -73,9 +73,11 @@ impl Tool for ShellTool {
 
         let start = Instant::now();
 
-        let mut child = match Command::new("sh")
+        let mut child = match Command::new("setsid")
+            .arg("sh")
             .arg("-c")
             .arg(command)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -117,14 +119,14 @@ impl Tool for ShellTool {
                 Ok(Some(_)) => break,
                 Ok(None) if start.elapsed() >= self.timeout => {
                     timed_out = true;
-                    let _ = child.kill();
+                    terminate_shell_process(&mut child);
                     break;
                 }
                 Ok(None) => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(err) => {
-                    let _ = child.kill();
+                    terminate_shell_process(&mut child);
                     return Ok(format!("Error: failed while waiting for command: {err}"));
                 }
             }
@@ -189,6 +191,20 @@ impl Tool for ShellTool {
         Ok(format!(
             "Exit code: {exit_code}\nDuration: {duration_secs:.1}s\nTotal output lines: {total_lines}\nOutput:\n{output_text}"
         ))
+    }
+}
+
+fn terminate_shell_process(child: &mut std::process::Child) {
+    let pid = child.id();
+    let process_group = format!("-{pid}");
+    let kill_status = Command::new("kill")
+        .arg("-TERM")
+        .arg("--")
+        .arg(&process_group)
+        .status();
+
+    if kill_status.map(|status| !status.success()).unwrap_or(true) {
+        let _ = child.kill();
     }
 }
 
@@ -262,6 +278,17 @@ mod tests {
     }
 
     #[test]
+    fn shell_closes_stdin_for_noninteractive_commands() {
+        let tool = ShellTool::with_timeout(Duration::from_millis(300));
+        let start = Instant::now();
+        let result = tool.execute(serde_json::json!({"command": "cat"})).unwrap();
+
+        assert!(result.contains("Exit code: 0"));
+        assert!(!result.contains("Command timed out after"));
+        assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
     fn shell_truncates_unicode_output_without_panic() {
         let tool = ShellTool::new();
         let unicode_count = 35_001;
@@ -285,6 +312,19 @@ mod tests {
         let start = Instant::now();
         let result = tool
             .execute(serde_json::json!({"command": "sleep 1"}))
+            .unwrap();
+
+        assert!(result.contains("Command timed out after"));
+        assert!(start.elapsed() < Duration::from_millis(900));
+        assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn shell_timeout_terminates_descendant_processes() {
+        let tool = ShellTool::with_timeout(Duration::from_millis(150));
+        let start = Instant::now();
+        let result = tool
+            .execute(serde_json::json!({"command": "sleep 1 & wait"}))
             .unwrap();
 
         assert!(result.contains("Command timed out after"));
