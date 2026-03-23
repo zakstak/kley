@@ -18,6 +18,7 @@ const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KB
 
 /// Default timeout for command execution.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+const TIMEOUT_TERMINATION_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
 pub struct ShellTool {
     timeout: Duration,
@@ -197,13 +198,33 @@ impl Tool for ShellTool {
 fn terminate_shell_process(child: &mut std::process::Child) {
     let pid = child.id();
     let process_group = format!("-{pid}");
-    let kill_status = Command::new("kill")
+
+    let term_status = Command::new("kill")
         .arg("-TERM")
         .arg("--")
         .arg(&process_group)
         .status();
 
-    if kill_status.map(|status| !status.success()).unwrap_or(true) {
+    let wait_deadline = Instant::now() + TIMEOUT_TERMINATION_GRACE_PERIOD;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < wait_deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    let kill_status = Command::new("kill")
+        .arg("-KILL")
+        .arg("--")
+        .arg(&process_group)
+        .status();
+
+    if term_status.map(|status| !status.success()).unwrap_or(true)
+        && kill_status.map(|status| !status.success()).unwrap_or(true)
+    {
         let _ = child.kill();
     }
 }
@@ -325,6 +346,21 @@ mod tests {
         let start = Instant::now();
         let result = tool
             .execute(serde_json::json!({"command": "sleep 1 & wait"}))
+            .unwrap();
+
+        assert!(result.contains("Command timed out after"));
+        assert!(start.elapsed() < Duration::from_millis(900));
+        assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn shell_timeout_escalates_when_term_is_ignored() {
+        let tool = ShellTool::with_timeout(Duration::from_millis(150));
+        let start = Instant::now();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "trap '' TERM; while :; do sleep 1; done"
+            }))
             .unwrap();
 
         assert!(result.contains("Command timed out after"));
