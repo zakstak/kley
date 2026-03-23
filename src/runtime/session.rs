@@ -951,9 +951,22 @@ fn force_shrink_history_for_overflow_retry(
         }
         adjusted += 1;
     }
-    let final_count = adjusted.min(max_removable);
+    let final_count = avoid_orphaned_tool_output(history, adjusted.min(max_removable));
     history.drain(..final_count);
     final_count
+}
+
+fn avoid_orphaned_tool_output(history: &[serde_json::Value], remove_count: usize) -> usize {
+    if remove_count == 0 || remove_count >= history.len() {
+        return remove_count;
+    }
+
+    let candidate = &history[remove_count];
+    if candidate.get("type").and_then(|v| v.as_str()) == Some("function_call_output") {
+        remove_count.saturating_sub(1).max(1)
+    } else {
+        remove_count
+    }
 }
 
 fn retry_compact_config(config: &CompactConfig, retry_count: usize) -> CompactConfig {
@@ -1323,6 +1336,23 @@ mod tests {
         assert_eq!(
             history[0].get("content").and_then(|v| v.as_str()),
             Some("done")
+        );
+    }
+
+    #[test]
+    fn force_shrink_history_for_overflow_retry_avoids_orphaned_tool_output() {
+        let mut history = vec![
+            serde_json::json!({"type": "message", "role": "user", "content": "m1"}),
+            serde_json::json!({"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}),
+            serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "result"}),
+        ];
+
+        let removed = force_shrink_history_for_overflow_retry(&mut history, 1);
+
+        assert_eq!(removed, 1);
+        assert_eq!(
+            history[0].get("type").and_then(|v| v.as_str()),
+            Some("function_call")
         );
     }
 }
