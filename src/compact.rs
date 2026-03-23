@@ -191,10 +191,11 @@ Rules:
 - Do NOT include system-prompt instructions or workflow rules as constraints.";
 
 const SUMMARIZER_INPUT_BUDGET: usize = 400_000;
+const SUMMARY_INPUT_MIN_CHARS: usize = 32_000;
 const SUMMARY_INPUT_TRUNCATION_PREFIX: &str = "[...truncated...]";
 
 fn summarize_input(serialized: &str, max_input_chars: usize) -> String {
-    let max_input_chars = max_input_chars.clamp(1, SUMMARIZER_INPUT_BUDGET);
+    let max_input_chars = max_input_chars.clamp(SUMMARY_INPUT_MIN_CHARS, SUMMARIZER_INPUT_BUDGET);
     if serialized.len() > max_input_chars {
         let start = serialized.len() - max_input_chars;
         format!("{SUMMARY_INPUT_TRUNCATION_PREFIX}{}", &serialized[start..])
@@ -347,12 +348,25 @@ mod tests {
 
     #[test]
     fn test_summarize_input_respects_smaller_budget() {
-        let serialized = "x".repeat(200);
+        let serialized = "x".repeat(100_000);
+
+        let input = summarize_input(&serialized, 80_000);
+
+        assert!(input.starts_with(SUMMARY_INPUT_TRUNCATION_PREFIX));
+        assert_eq!(input.len(), SUMMARY_INPUT_TRUNCATION_PREFIX.len() + 80_000);
+    }
+
+    #[test]
+    fn test_summarize_input_clamps_tiny_budget_to_floor() {
+        let serialized = "x".repeat(SUMMARY_INPUT_MIN_CHARS + 5_000);
 
         let input = summarize_input(&serialized, 80);
 
         assert!(input.starts_with(SUMMARY_INPUT_TRUNCATION_PREFIX));
-        assert_eq!(input.len(), SUMMARY_INPUT_TRUNCATION_PREFIX.len() + 80);
+        assert_eq!(
+            input.len(),
+            SUMMARY_INPUT_TRUNCATION_PREFIX.len() + SUMMARY_INPUT_MIN_CHARS
+        );
     }
 
     #[tokio::test]
