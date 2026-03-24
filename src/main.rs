@@ -58,6 +58,12 @@ enum Command {
         /// so 800000 ≈ 200k tokens.)
         #[arg(long, default_value = "800000")]
         compact_threshold: usize,
+
+        /// Reasoning effort level for the model (e.g. "low", "medium", "high").
+        /// When set, the model will spend more compute on internal reasoning
+        /// before responding. Only supported by OpenAI reasoning models.
+        #[arg(long)]
+        reasoning_effort: Option<String>,
     },
     Web {
         #[arg(long)]
@@ -99,6 +105,7 @@ async fn run() -> Result<()> {
             max_turns,
             prompt,
             compact_threshold,
+            reasoning_effort,
         } => {
             // Resolve run mode
             let run_mode = if autonomous {
@@ -145,6 +152,7 @@ async fn run() -> Result<()> {
                 emitter,
                 run_mode,
                 compact_config,
+                reasoning_effort,
             )
             .await?;
 

@@ -106,6 +106,7 @@ pub struct SessionRuntime<'a> {
     hooks: RuntimeHooks,
     abort_signal: Arc<AtomicBool>,
     active_turn: bool,
+    reasoning_effort: Option<String>,
 }
 
 impl<'a> SessionRuntime<'a> {
@@ -152,6 +153,7 @@ impl<'a> SessionRuntime<'a> {
             instructions,
             hooks,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
     }
 
@@ -167,6 +169,7 @@ impl<'a> SessionRuntime<'a> {
         instructions: String,
         hooks: RuntimeHooks,
         abort_signal: Arc<AtomicBool>,
+        reasoning_effort: Option<String>,
     ) -> Result<Self> {
         let model = model_override
             .map(String::from)
@@ -234,6 +237,7 @@ impl<'a> SessionRuntime<'a> {
             abort_signal,
             hooks,
             active_turn: false,
+            reasoning_effort,
         })
     }
 
@@ -249,6 +253,7 @@ impl<'a> SessionRuntime<'a> {
         instructions: String,
         hooks: RuntimeHooks,
         abort_signal: Arc<AtomicBool>,
+        reasoning_effort: Option<String>,
     ) -> Result<Self> {
         let model = model_override
             .map(String::from)
@@ -322,6 +327,7 @@ impl<'a> SessionRuntime<'a> {
             abort_signal,
             hooks,
             active_turn: false,
+            reasoning_effort,
         })
     }
 
@@ -515,6 +521,7 @@ impl<'a> SessionRuntime<'a> {
                     abort_signal: &self.abort_signal,
                     events: &self.events,
                     output_hook: Some(&output_hook),
+                    reasoning_effort: self.reasoning_effort.as_deref(),
                 };
                 self.provider
                     .send(&self.resolved, ctx, &mut token_usage)

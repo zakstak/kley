@@ -36,6 +36,7 @@ fi
 
 MAX_CYCLES="${1:-5}"
 TURNS_PER_CYCLE="${MAX_TURN_PER_CYCLE:-30}"
+REASONING_EFFORT="${REASONING_EFFORT:-high}"
 LOG_DIR="$(pwd)/.self-improve-logs"
 RETROSPECTIVE_FILE="$LOG_DIR/retrospectives.jsonl"
 mkdir -p "$LOG_DIR"
@@ -447,7 +448,7 @@ EOF
 		--autonomous \
 		--yolo \
 		--max-turns "$TURNS_PER_CYCLE" \
-		--prompt "$PROMPT" \
+		--reasoning-effort "$REASONING_EFFORT" --prompt "$PROMPT" \
 		2>&1 | tee "$log_file"; then
 		run_exit=0
 	else

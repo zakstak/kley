@@ -64,6 +64,8 @@ pub struct SendContext<'a> {
     pub abort_signal: &'a AtomicBool,
     pub events: &'a EventEmitter,
     pub output_hook: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    /// OpenAI reasoning effort level (e.g. "low", "medium", "high").
+    pub reasoning_effort: Option<&'a str>,
 }
 
 /// Trait for LLM providers. Each provider knows how to send a prompt and

@@ -170,6 +170,9 @@ async fn send_ws(
     if !tools.is_empty() {
         create_payload["tools"] = serde_json::json!(tools);
     }
+    if let Some(effort) = ctx.reasoning_effort {
+        create_payload["reasoning"] = serde_json::json!({ "effort": effort });
+    }
 
     tokio::select! {
         _ = wait_for_abort_signal(ctx.abort_signal) => {
@@ -298,6 +301,9 @@ async fn send_sse(
     });
     if !tools.is_empty() {
         body["tools"] = serde_json::json!(tools);
+    }
+    if let Some(effort) = ctx.reasoning_effort {
+        body["reasoning"] = serde_json::json!({ "effort": effort });
     }
 
     let client = reqwest::Client::new();
