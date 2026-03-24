@@ -18,6 +18,7 @@ use super::Tool;
 /// Maximum output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KB
 const MAX_CAPTURE_BYTES: u64 = (MAX_OUTPUT_BYTES as u64) * 2;
+const PRE_TIMEOUT_OBSERVATION_WINDOW: Duration = Duration::from_millis(20);
 
 /// Default timeout for command execution.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -116,39 +117,74 @@ impl Tool for ShellTool {
         let mut timed_out = false;
         let mut terminated_for_output_limit = false;
         let mut remaining_capture_holders_after_termination = 0usize;
+        let mut observed_descendants = Vec::new();
+        let mut observed_descendant_groups = Vec::new();
+        track_observed_descendants(
+            child.id(),
+            &mut observed_descendants,
+            &mut observed_descendant_groups,
+        );
+
+        let observation_deadline = Instant::now() + PRE_TIMEOUT_OBSERVATION_WINDOW;
+        while Instant::now() < observation_deadline {
+            track_observed_descendants(
+                child.id(),
+                &mut observed_descendants,
+                &mut observed_descendant_groups,
+            );
+            if !observed_descendants.is_empty() || !observed_descendant_groups.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
 
         loop {
+            track_observed_descendants(
+                child.id(),
+                &mut observed_descendants,
+                &mut observed_descendant_groups,
+            );
+
             match child.try_wait() {
                 Ok(Some(_)) => break,
-                Ok(None)
-                    if capture_limit_exceeded(
-                        &stdout_path,
-                        &stderr_path,
-                        self.max_capture_bytes,
-                    ) =>
-                {
-                    terminated_for_output_limit = true;
-                    let termination_outcome =
-                        terminate_shell_process(&mut child, &[&stdout_path, &stderr_path]);
-                    remaining_capture_holders_after_termination =
-                        remaining_capture_holders_after_termination
-                            .max(termination_outcome.remaining_capture_holders);
-                    break;
-                }
-                Ok(None) if start.elapsed() >= self.timeout => {
-                    timed_out = true;
-                    let termination_outcome =
-                        terminate_shell_process(&mut child, &[&stdout_path, &stderr_path]);
-                    remaining_capture_holders_after_termination =
-                        remaining_capture_holders_after_termination
-                            .max(termination_outcome.remaining_capture_holders);
-                    break;
-                }
                 Ok(None) => {
+                    if capture_limit_exceeded(&stdout_path, &stderr_path, self.max_capture_bytes) {
+                        terminated_for_output_limit = true;
+                        let termination_outcome = terminate_shell_process(
+                            &mut child,
+                            &[&stdout_path, &stderr_path],
+                            &observed_descendants,
+                            &observed_descendant_groups,
+                        );
+                        remaining_capture_holders_after_termination =
+                            remaining_capture_holders_after_termination
+                                .max(termination_outcome.remaining_capture_holders);
+                        break;
+                    }
+
+                    if start.elapsed() >= self.timeout {
+                        timed_out = true;
+                        let termination_outcome = terminate_shell_process(
+                            &mut child,
+                            &[&stdout_path, &stderr_path],
+                            &observed_descendants,
+                            &observed_descendant_groups,
+                        );
+                        remaining_capture_holders_after_termination =
+                            remaining_capture_holders_after_termination
+                                .max(termination_outcome.remaining_capture_holders);
+                        break;
+                    }
+
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(err) => {
-                    let _ = terminate_shell_process(&mut child, &[&stdout_path, &stderr_path]);
+                    let _ = terminate_shell_process(
+                        &mut child,
+                        &[&stdout_path, &stderr_path],
+                        &observed_descendants,
+                        &observed_descendant_groups,
+                    );
                     return Ok(format!("Error: failed while waiting for command: {err}"));
                 }
             }
@@ -162,6 +198,8 @@ impl Tool for ShellTool {
                 return Ok(format!("Error: command did not complete: {err}"));
             }
         };
+
+        reap_known_children_nonblocking(&observed_descendants);
 
         drop(stdout_capture);
         drop(stderr_capture);
@@ -251,18 +289,26 @@ struct TerminationOutcome {
 fn terminate_shell_process(
     child: &mut std::process::Child,
     capture_paths: &[&PathBuf],
+    known_processes: &[u32],
+    known_process_groups: &[u32],
 ) -> TerminationOutcome {
     let pid = child.id();
     let process_group = format!("-{pid}");
-    let mut tracked_descendants = collect_termination_candidates(pid, &[], capture_paths);
+    let mut tracked_descendants =
+        collect_termination_candidates(pid, known_processes, capture_paths);
+    let mut tracked_process_groups =
+        collect_termination_process_groups(&tracked_descendants, known_process_groups);
 
     let _ = signal_processes("-TERM", std::iter::once(process_group.as_str()));
     let _ = signal_descendants("-TERM", &tracked_descendants);
+    let _ = signal_process_groups("-TERM", &tracked_process_groups);
 
     let wait_deadline = Instant::now() + TIMEOUT_TERMINATION_GRACE_PERIOD;
     loop {
         tracked_descendants =
             collect_termination_candidates(pid, &tracked_descendants, capture_paths);
+        tracked_process_groups =
+            collect_termination_process_groups(&tracked_descendants, &tracked_process_groups);
         if child_exited(child) && tracked_descendants.is_empty() {
             return termination_outcome(capture_paths);
         }
@@ -276,13 +322,18 @@ fn terminate_shell_process(
 
     let remaining_descendants =
         collect_termination_candidates(pid, &tracked_descendants, capture_paths);
+    let remaining_process_groups =
+        collect_termination_process_groups(&remaining_descendants, &tracked_process_groups);
     let _ = signal_processes("-KILL", std::iter::once(process_group.as_str()));
     let _ = signal_descendants("-KILL", &remaining_descendants);
+    let _ = signal_process_groups("-KILL", &remaining_process_groups);
 
     let kill_deadline = Instant::now() + TIMEOUT_TERMINATION_GRACE_PERIOD;
     while Instant::now() < kill_deadline {
         tracked_descendants =
             collect_termination_candidates(pid, &tracked_descendants, capture_paths);
+        tracked_process_groups =
+            collect_termination_process_groups(&tracked_descendants, &tracked_process_groups);
 
         if child_exited(child) && tracked_descendants.is_empty() {
             return termination_outcome(capture_paths);
@@ -290,6 +341,10 @@ fn terminate_shell_process(
 
         if !tracked_descendants.is_empty() {
             let _ = signal_descendants("-KILL", &tracked_descendants);
+        }
+
+        if !tracked_process_groups.is_empty() {
+            let _ = signal_process_groups("-KILL", &tracked_process_groups);
         }
 
         thread::sleep(Duration::from_millis(10));
@@ -347,6 +402,42 @@ fn collect_termination_candidates(
     candidates
 }
 
+fn collect_termination_process_groups(
+    known_processes: &[u32],
+    known_process_groups: &[u32],
+) -> Vec<u32> {
+    let mut process_groups = known_process_groups.to_vec();
+    process_groups.extend(
+        known_processes
+            .iter()
+            .filter_map(|pid| process_group_id(*pid)),
+    );
+    process_groups.retain(|process_group| *process_group > 0);
+    process_groups.sort_unstable();
+    process_groups.dedup();
+    process_groups
+}
+
+fn track_observed_descendants(
+    root_pid: u32,
+    observed_descendants: &mut Vec<u32>,
+    observed_process_groups: &mut Vec<u32>,
+) {
+    observed_descendants.retain(|pid| process_exists(*pid));
+    observed_descendants.extend(descendant_processes(root_pid));
+    observed_descendants.sort_unstable();
+    observed_descendants.dedup();
+
+    observed_process_groups.extend(
+        observed_descendants
+            .iter()
+            .filter_map(|pid| process_group_id(*pid)),
+    );
+    observed_process_groups.retain(|process_group| *process_group > 0);
+    observed_process_groups.sort_unstable();
+    observed_process_groups.dedup();
+}
+
 fn capture_limit_exceeded(
     stdout_path: &PathBuf,
     stderr_path: &PathBuf,
@@ -366,6 +457,18 @@ fn signal_descendants(
     descendant_pids: &[u32],
 ) -> std::io::Result<std::process::ExitStatus> {
     signal_processes(signal, descendant_pids.iter().map(|pid| pid.to_string()))
+}
+
+fn signal_process_groups(
+    signal: &str,
+    process_groups: &[u32],
+) -> std::io::Result<std::process::ExitStatus> {
+    signal_processes(
+        signal,
+        process_groups
+            .iter()
+            .map(|process_group| format!("-{process_group}")),
+    )
 }
 
 fn signal_processes<I, S>(signal: &str, processes: I) -> std::io::Result<std::process::ExitStatus>
@@ -404,6 +507,27 @@ where
 fn child_exited(child: &mut Child) -> bool {
     matches!(child.try_wait(), Ok(Some(_)) | Err(_))
 }
+
+#[cfg(target_os = "linux")]
+fn reap_known_children_nonblocking(known_processes: &[u32]) {
+    const WNOHANG: i32 = 1;
+
+    unsafe extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+
+    let mut known_processes: Vec<u32> = known_processes.to_vec();
+    known_processes.sort_unstable();
+    known_processes.dedup();
+
+    for known_pid in known_processes {
+        let mut status = 0;
+        let _ = unsafe { waitpid(known_pid as i32, &mut status, WNOHANG) };
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reap_known_children_nonblocking(_known_processes: &[u32]) {}
 
 #[cfg(target_os = "linux")]
 fn descendant_processes(root_pid: u32) -> Vec<u32> {
@@ -464,6 +588,23 @@ fn process_exists(pid: u32) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn process_exists(_pid: u32) -> bool {
     false
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_id(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let right_paren = stat.rfind(')')?;
+    let fields = stat.get(right_paren + 1..)?.trim_start();
+    let mut parts = fields.split_whitespace();
+    let _state = parts.next()?;
+    let _parent_pid = parts.next()?;
+    let process_group = parts.next()?;
+    process_group.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_group_id(_pid: u32) -> Option<u32> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -836,12 +977,12 @@ mod tests {
             match child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) if start.elapsed() >= timeout => {
-                    terminate_shell_process(&mut child, &[&stdout_path, &stderr_path]);
+                    terminate_shell_process(&mut child, &[&stdout_path, &stderr_path], &[], &[]);
                     break;
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(10)),
                 Err(_) => {
-                    terminate_shell_process(&mut child, &[&stdout_path, &stderr_path]);
+                    terminate_shell_process(&mut child, &[&stdout_path, &stderr_path], &[], &[]);
                     break;
                 }
             }
@@ -870,7 +1011,7 @@ mod tests {
         .unwrap();
 
         let start = Instant::now();
-        terminate_shell_process(&mut child, &[]);
+        terminate_shell_process(&mut child, &[], &[], &[]);
         let _ = child.wait();
 
         drop(stdout_capture);
@@ -927,6 +1068,33 @@ mod tests {
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline && process_exists(detached_pid) {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(result.contains("Command timed out after"));
+        assert!(!process_exists(detached_pid));
+    }
+
+    #[test]
+    fn shell_timeout_kills_daemonized_descendants_without_capture_fds() {
+        let pid_file = NamedTempFile::new().unwrap();
+        let pid_path = pid_file.path().display();
+        let tool = ShellTool::with_timeout(Duration::from_millis(150));
+
+        let result = tool
+            .execute(serde_json::json!({
+                "command": format!("setsid sh -c 'sleep 0.05; sleep 60 >/dev/null 2>&1 < /dev/null & echo $! > {pid_path}; exit 0' & sleep 999")
+            }))
+            .unwrap();
+
+        let detached_pid = fs::read_to_string(pid_file.path())
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(700);
         while Instant::now() < deadline && process_exists(detached_pid) {
             thread::sleep(Duration::from_millis(10));
         }
