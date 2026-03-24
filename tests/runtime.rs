@@ -187,6 +187,7 @@ mod runtime {
             "system".to_string(),
             RuntimeHooks::default(),
             abort_signal,
+            None,
         )
         .unwrap();
         (runtime, receiver)
@@ -464,6 +465,7 @@ mod runtime {
             "system".to_string(),
             hooks,
             abort_signal,
+            None,
         )
         .unwrap();
 

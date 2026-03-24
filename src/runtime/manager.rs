@@ -195,6 +195,7 @@ impl RuntimeWorker {
                 worker.instructions.clone(),
                 RuntimeHooks::default(),
                 abort_signal,
+                None,
             )?;
 
             let submit = runtime_rt

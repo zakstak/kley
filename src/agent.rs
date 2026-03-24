@@ -25,6 +25,7 @@ pub async fn chat_loop(
     events: EventEmitter,
     run_mode: RunMode,
     compact_config: CompactConfig,
+    reasoning_effort: Option<String>,
 ) -> Result<()> {
     let cred_store = CredentialStore::open()?;
     let resolved = auth::resolve_auth(&cred_store, &events).await?;
@@ -51,7 +52,7 @@ pub async fn chat_loop(
         })),
     };
 
-    let mut runtime = SessionRuntime::new(
+    let mut runtime = SessionRuntime::new_with_abort_signal(
         store,
         resolved,
         model_override,
@@ -61,6 +62,8 @@ pub async fn chat_loop(
         registry,
         instructions,
         hooks,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_effort,
     )?;
 
     eprintln!("kley v0 — {}/{}", runtime.provider(), runtime.model());
