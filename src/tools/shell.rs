@@ -310,8 +310,16 @@ fn terminate_shell_process(
 
 fn termination_outcome(capture_paths: &[&PathBuf]) -> TerminationOutcome {
     TerminationOutcome {
-        remaining_capture_holders: processes_holding_capture_files(capture_paths).len(),
+        remaining_capture_holders: remaining_capture_holders_excluding_self(capture_paths),
     }
+}
+
+fn remaining_capture_holders_excluding_self(capture_paths: &[&PathBuf]) -> usize {
+    let self_pid = std::process::id();
+    processes_holding_capture_files(capture_paths)
+        .into_iter()
+        .filter(|pid| *pid != self_pid)
+        .count()
 }
 
 fn maybe_prepend_capture_holder_warning(
@@ -332,7 +340,11 @@ fn collect_termination_candidates(
     known_processes: &[u32],
     capture_paths: &[&PathBuf],
 ) -> Vec<u32> {
-    let mut candidates = known_processes.to_vec();
+    let mut candidates: Vec<u32> = known_processes
+        .iter()
+        .copied()
+        .filter(|pid| process_exists(*pid))
+        .collect();
     candidates.extend(descendant_processes(root_pid));
     candidates.extend(processes_holding_capture_files(capture_paths));
     candidates.retain(|pid| *pid != std::process::id());
@@ -450,12 +462,12 @@ fn parse_parent_pid(status: &str) -> Option<u32> {
     })
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn process_exists(pid: u32) -> bool {
     PathBuf::from(format!("/proc/{pid}")).exists()
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(not(target_os = "linux"))]
 fn process_exists(_pid: u32) -> bool {
     false
 }
@@ -947,5 +959,16 @@ mod tests {
         let output = maybe_prepend_capture_holder_warning("tool output".to_string(), 0);
 
         assert_eq!(output, "tool output");
+    }
+
+    #[test]
+    fn remaining_capture_holders_excluding_self_does_not_count_parent_fd() {
+        let (capture_path, capture_file) = create_capture_file("stdout").unwrap();
+
+        let holders = remaining_capture_holders_excluding_self(&[&capture_path]);
+
+        drop(capture_file);
+        let _ = fs::remove_file(capture_path);
+        assert_eq!(holders, 0);
     }
 }
