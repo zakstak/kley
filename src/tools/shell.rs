@@ -256,8 +256,8 @@ fn terminate_shell_process(
     let process_group = format!("-{pid}");
     let mut tracked_descendants = collect_termination_candidates(pid, &[], capture_paths);
 
-    let term_status = signal_processes("-TERM", std::iter::once(process_group.as_str()));
-    let descendant_term_status = signal_descendants("-TERM", &tracked_descendants);
+    let _ = signal_processes("-TERM", std::iter::once(process_group.as_str()));
+    let _ = signal_descendants("-TERM", &tracked_descendants);
 
     let wait_deadline = Instant::now() + TIMEOUT_TERMINATION_GRACE_PERIOD;
     loop {
@@ -276,8 +276,8 @@ fn terminate_shell_process(
 
     let remaining_descendants =
         collect_termination_candidates(pid, &tracked_descendants, capture_paths);
-    let kill_status = signal_processes("-KILL", std::iter::once(process_group.as_str()));
-    let descendant_kill_status = signal_descendants("-KILL", &remaining_descendants);
+    let _ = signal_processes("-KILL", std::iter::once(process_group.as_str()));
+    let _ = signal_descendants("-KILL", &remaining_descendants);
 
     let kill_deadline = Instant::now() + TIMEOUT_TERMINATION_GRACE_PERIOD;
     while Instant::now() < kill_deadline {
@@ -295,16 +295,7 @@ fn terminate_shell_process(
         thread::sleep(Duration::from_millis(10));
     }
 
-    if !child_exited(child)
-        && term_status.map(|status| !status.success()).unwrap_or(true)
-        && kill_status.map(|status| !status.success()).unwrap_or(true)
-        && descendant_term_status
-            .map(|status| !status.success())
-            .unwrap_or(true)
-        && descendant_kill_status
-            .map(|status| !status.success())
-            .unwrap_or(true)
-    {
+    if !child_exited(child) {
         let _ = child.kill();
     }
 
@@ -864,6 +855,30 @@ mod tests {
 
         assert!(start.elapsed() < Duration::from_millis(900));
         assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn terminate_shell_process_falls_back_to_child_kill_without_descendants() {
+        let (stdout_path, stdout_capture) = create_capture_file("stdout").unwrap();
+        let (stderr_path, stderr_capture) = create_capture_file("stderr").unwrap();
+        let mut child = spawn_shell_child_with_setsid_launcher(
+            "definitely-missing-kley-setsid-launcher",
+            "exec sleep 60",
+            &stdout_capture,
+            &stderr_capture,
+        )
+        .unwrap();
+
+        let start = Instant::now();
+        terminate_shell_process(&mut child, &[]);
+        let _ = child.wait();
+
+        drop(stdout_capture);
+        drop(stderr_capture);
+        let _ = read_and_remove_capture_file(&stdout_path, MAX_CAPTURE_BYTES);
+        let _ = read_and_remove_capture_file(&stderr_path, MAX_CAPTURE_BYTES);
+
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
