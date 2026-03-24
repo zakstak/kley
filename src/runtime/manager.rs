@@ -703,6 +703,10 @@ fn assistant_message_context_chars(content: &str) -> usize {
     })])
 }
 
+fn join_error(err: JoinError) -> anyhow::Error {
+    anyhow::anyhow!("runtime worker join error: {err}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,7 +915,4 @@ mod tests {
             Some((second_expected, 1000))
         );
     }
-}
-fn join_error(err: JoinError) -> anyhow::Error {
-    anyhow::anyhow!("runtime worker join error: {err}")
 }

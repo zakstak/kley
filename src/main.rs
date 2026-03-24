@@ -172,17 +172,6 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn preflight_subcommand_parses() {
-        let cli = Cli::try_parse_from(["kley", "preflight"]).unwrap();
-        assert!(matches!(cli.command, Command::Preflight));
-    }
-}
-
 /// Render an event to stderr with visual emphasis appropriate to its severity.
 fn print_event(event: &AgentEvent) {
     match event {
@@ -218,5 +207,16 @@ fn print_event(event: &AgentEvent) {
         AgentEvent::HistoryCompacted { .. } => {
             eprintln!("  {event}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preflight_subcommand_parses() {
+        let cli = Cli::try_parse_from(["kley", "preflight"]).unwrap();
+        assert!(matches!(cli.command, Command::Preflight));
     }
 }

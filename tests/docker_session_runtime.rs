@@ -88,15 +88,15 @@ struct PidGuard(Option<u32>);
 
 impl Drop for PidGuard {
     fn drop(&mut self) {
-        if let Some(pid) = self.0.take() {
-            if process_exists(pid) {
-                let _ = Command::new("kill")
-                    .arg("-TERM")
-                    .arg(pid.to_string())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
+        if let Some(pid) = self.0.take()
+            && process_exists(pid)
+        {
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
     }
 }
