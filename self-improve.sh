@@ -12,23 +12,26 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$({
+	unset CDPATH
+	cd -- "$(dirname -- "$0")" && pwd
+})"
 SCRIPT_MANIFEST_PATH="$SCRIPT_DIR/Cargo.toml"
 
 cd "$SCRIPT_DIR"
 
 if [ ! -e "/.dockerenv" ]; then
-  echo "error: self-improve.sh must run inside Docker" >&2
-  echo "hint: rerun with ./docker-session.sh self-improve.sh" >&2
-  exit 1
+	echo "error: self-improve.sh must run inside Docker" >&2
+	echo "hint: rerun with ./docker-session.sh self-improve.sh" >&2
+	exit 1
 fi
 
 if "$SCRIPT_DIR/preflight.sh"; then
-  :
+	:
 else
-  preflight_status=$?
-  echo "error: preflight failed; refusing to start self-improve" >&2
-  exit "$preflight_status"
+	preflight_status=$?
+	echo "error: preflight failed; refusing to start self-improve" >&2
+	exit "$preflight_status"
 fi
 
 MAX_CYCLES="${1:-5}"
@@ -38,65 +41,68 @@ RETROSPECTIVE_FILE="$LOG_DIR/retrospectives.jsonl"
 mkdir -p "$LOG_DIR"
 
 run_repo_cargo_bin() {
-  local bin="$1"
-  shift
+	local bin="$1"
+	shift
 
-  if command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_MANIFEST_PATH" ]; then
-    cargo run --quiet --manifest-path "$SCRIPT_MANIFEST_PATH" --bin "$bin" -- "$@"
-    return
-  fi
+	if command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_MANIFEST_PATH" ]; then
+		cargo run --quiet --manifest-path "$SCRIPT_MANIFEST_PATH" --bin "$bin" -- "$@"
+		return
+	fi
 
-  cargo run --quiet --bin "$bin" -- "$@"
+	cargo run --quiet --bin "$bin" -- "$@"
 }
 
 run_kley() {
-  if command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_MANIFEST_PATH" ]; then
-    run_repo_cargo_bin kley "$@"
-    return
-  fi
+	if command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_MANIFEST_PATH" ]; then
+		run_repo_cargo_bin kley "$@"
+		return
+	fi
 
-  if command -v kley >/dev/null 2>&1; then
-    kley "$@"
-    return
-  fi
+	if command -v kley >/dev/null 2>&1; then
+		kley "$@"
+		return
+	fi
 
-  echo "error: could not find 'kley' in PATH and no repo-local Cargo manifest next to self-improve.sh" >&2
-  return 127
+	echo "error: could not find 'kley' in PATH and no repo-local Cargo manifest next to self-improve.sh" >&2
+	return 127
 }
 
 append_retrospective_record() {
-  local log_file="$1"
-  local cycle="$2"
-  local timestamp="$3"
-  local run_exit="$4"
-  local status="$5"
-  local output_file="$6"
+	local log_file="$1"
+	local cycle="$2"
+	local timestamp="$3"
+	local run_exit="$4"
+	local status="$5"
+	local output_file="$6"
 
-  run_repo_cargo_bin self-improve-retrospective \
-    "$log_file" \
-    "$cycle" \
-    "$timestamp" \
-    "$run_exit" \
-    "$status" \
-    "$output_file"
+	run_repo_cargo_bin self-improve-retrospective \
+		"$log_file" \
+		"$cycle" \
+		"$timestamp" \
+		"$run_exit" \
+		"$status" \
+		"$output_file"
 }
 
 cycle=0
 consecutive_no_change=0
-MAX_NO_CHANGE=3  # stop after this many consecutive no-safe-change results
+consecutive_interruptions=0
+MAX_NO_CHANGE=3 # stop after this many consecutive no-safe-change results
+MAX_INTERRUPTS=2
 
-while (( cycle < MAX_CYCLES )); do
-  cycle=$((cycle + 1))
-  timestamp=$(date +%Y%m%dT%H%M%S)
-  log_file="$LOG_DIR/cycle-${cycle}-${timestamp}.log"
+while ((cycle < MAX_CYCLES)); do
+	cycle=$((cycle + 1))
+	timestamp=$(date +%Y%m%dT%H%M%S)
+	log_file="$LOG_DIR/cycle-${cycle}-${timestamp}.log"
 
-  echo "════════════════════════════════════════════"
-  echo "  Self-improvement cycle $cycle / $MAX_CYCLES"
-  echo "  Turns per cycle: $TURNS_PER_CYCLE"
-  echo "  Log: $log_file"
-  echo "════════════════════════════════════════════"
+	echo "════════════════════════════════════════════"
+	echo "  Self-improvement cycle $cycle / $MAX_CYCLES"
+	echo "  Turns per cycle: $TURNS_PER_CYCLE"
+	echo "  Log: $log_file"
+	echo "════════════════════════════════════════════"
 
-PROMPT=$(cat <<'EOF'
+	PROMPT=$(
+		cat <<'EOF'
 You are kley, a Rust-based coding agent running inside your own source repository.
 
 You only have these capabilities in this harness:
@@ -434,65 +440,85 @@ PREVENTION NOTES:
 NEXT:
 - <best next meaningful improvement>
 EOF
-)
+	)
 
-  # Run one cycle, tee output to log
-  if run_kley chat \
-    --autonomous \
-    --yolo \
-    --max-turns "$TURNS_PER_CYCLE" \
-    --prompt "$PROMPT" \
-    2>&1 | tee "$log_file"; then
-    run_exit=0
-  else
-    run_exit=$?
-  fi
+	# Run one cycle, tee output to log
+	if run_kley chat \
+		--autonomous \
+		--yolo \
+		--max-turns "$TURNS_PER_CYCLE" \
+		--prompt "$PROMPT" \
+		2>&1 | tee "$log_file"; then
+		run_exit=0
+	else
+		run_exit=$?
+	fi
 
-  # Parse the status from the log
-  status=$({
-    grep -oP '(?<=^STATUS: )\S+' "$log_file" | tail -n 1
-  } || true)
-  if [ -z "$status" ]; then
-    echo "⚠  Log for cycle $cycle has no STATUS line; treating as blocked." >&2
-    status=blocked
-  fi
+	# Parse the status from the log
+	status=$({
+		grep -oP '(?<=^STATUS: )\S+' "$log_file" | tail -n 1
+	} || true)
+	if [ -z "$status" ]; then
+		case "$run_exit" in
+		130 | 137 | 143)
+			echo "⚠  Log for cycle $cycle has no STATUS line; run exited with code $run_exit. Treating as interrupted." >&2
+			status=interrupted
+			;;
+		*)
+			echo "⚠  Log for cycle $cycle has no STATUS line; treating as blocked." >&2
+			status=blocked
+			;;
+		esac
+	fi
 
-  if append_retrospective_record \
-    "$log_file" \
-    "$cycle" \
-    "$timestamp" \
-    "$run_exit" \
-    "$status" \
-    "$RETROSPECTIVE_FILE"; then
-    echo "Retrospective record appended to $RETROSPECTIVE_FILE"
-  else
-    echo "⚠  Failed to append retrospective record for cycle $cycle" >&2
-  fi
+	if append_retrospective_record \
+		"$log_file" \
+		"$cycle" \
+		"$timestamp" \
+		"$run_exit" \
+		"$status" \
+		"$RETROSPECTIVE_FILE"; then
+		echo "Retrospective record appended to $RETROSPECTIVE_FILE"
+	else
+		echo "⚠  Failed to append retrospective record for cycle $cycle" >&2
+	fi
 
-  echo ""
-  echo "── Cycle $cycle finished: STATUS=$status (exit=$run_exit) ──"
-  echo ""
+	echo ""
+	echo "── Cycle $cycle finished: STATUS=$status (exit=$run_exit) ──"
+	echo ""
 
-  case "$status" in
-    success)
-      consecutive_no_change=0
-      ;;
-    blocked)
-      echo "⛔ Cycle reported blocked. Stopping loop."
-      break
-      ;;
-    no-safe-change)
-      consecutive_no_change=$((consecutive_no_change + 1))
-      echo "⚠  no-safe-change ($consecutive_no_change / $MAX_NO_CHANGE consecutive)"
-      if (( consecutive_no_change >= MAX_NO_CHANGE )); then
-        echo "⛔ $MAX_NO_CHANGE consecutive no-safe-change results. Stopping loop."
-        break
-      fi
-      ;;
-    *)
-      echo "⚠  Unrecognized status '$status'. Continuing cautiously."
-      ;;
-  esac
+	case "$status" in
+	success)
+		consecutive_no_change=0
+		consecutive_interruptions=0
+		;;
+	blocked)
+		echo "⛔ Cycle reported blocked. Stopping loop."
+		break
+		;;
+	no-safe-change)
+		consecutive_interruptions=0
+		consecutive_no_change=$((consecutive_no_change + 1))
+		echo "⚠  no-safe-change ($consecutive_no_change / $MAX_NO_CHANGE consecutive)"
+		if ((consecutive_no_change >= MAX_NO_CHANGE)); then
+			echo "⛔ $MAX_NO_CHANGE consecutive no-safe-change results. Stopping loop."
+			break
+		fi
+		;;
+	interrupted)
+		consecutive_no_change=0
+		consecutive_interruptions=$((consecutive_interruptions + 1))
+		echo "⚠  interrupted ($consecutive_interruptions / $MAX_INTERRUPTS consecutive)"
+		if ((consecutive_interruptions >= MAX_INTERRUPTS)); then
+			echo "⛔ $MAX_INTERRUPTS consecutive interrupted cycles. Stopping loop."
+			break
+		fi
+		;;
+	*)
+		consecutive_interruptions=0
+		echo "⚠  Unrecognized status '$status'. Continuing cautiously."
+		;;
+	esac
 done
 
 echo ""

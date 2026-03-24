@@ -203,6 +203,38 @@ fn self_improve_script_appends_structured_retrospective_records() {
 }
 
 #[test]
+fn self_improve_script_treats_signal_terminated_runs_as_interrupted_before_blocking() {
+    let script = self_improve_script();
+
+    for required in [
+        "MAX_INTERRUPTS=2",
+        "130 | 137 | 143)",
+        "Treating as interrupted.",
+        "status=interrupted",
+        "interrupted)",
+        "consecutive_interruptions=$((consecutive_interruptions + 1))",
+        "consecutive interrupted cycles. Stopping loop.",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected self-improve script to contain {required:?}"
+        );
+    }
+
+    assert_ordered_markers(
+        &script,
+        &[
+            "if [ -z \"$status\" ]; then",
+            "130 | 137 | 143)",
+            "status=interrupted",
+            "case \"$status\" in",
+            "interrupted)",
+        ],
+        "self-improve interrupted fallback flow",
+    );
+}
+
+#[test]
 fn self_improve_prompt_requires_explicit_base_branch_guidance() {
     let script = self_improve_script();
 
@@ -254,7 +286,7 @@ fn self_improve_script_requires_docker_preflight_gate() {
             "if [ ! -e \"/.dockerenv\" ]; then",
             "\"$SCRIPT_DIR/preflight.sh\"",
             "LOG_DIR=",
-            "while (( cycle < MAX_CYCLES ))",
+            "while ((cycle < MAX_CYCLES)); do",
         ],
         "self-improve docker preflight gate",
     );
