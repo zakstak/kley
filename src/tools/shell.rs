@@ -114,7 +114,7 @@ impl Tool for ShellTool {
         };
 
         let mut timed_out = false;
-        let mut output_limit_exceeded = false;
+        let mut terminated_for_output_limit = false;
         let mut remaining_capture_holders_after_termination = 0usize;
 
         loop {
@@ -127,7 +127,7 @@ impl Tool for ShellTool {
                         self.max_capture_bytes,
                     ) =>
                 {
-                    output_limit_exceeded = true;
+                    terminated_for_output_limit = true;
                     let termination_outcome =
                         terminate_shell_process(&mut child, &[&stdout_path, &stderr_path]);
                     remaining_capture_holders_after_termination =
@@ -180,7 +180,7 @@ impl Tool for ShellTool {
                 Err(err) => return Ok(format!("Error: failed to collect command stderr: {err}")),
             };
 
-        output_limit_exceeded = output_limit_exceeded || stdout_truncated || stderr_truncated;
+        let capture_truncated = stdout_truncated || stderr_truncated;
 
         let exit_code = status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&stdout);
@@ -219,11 +219,14 @@ impl Tool for ShellTool {
                 "Command timed out after {:.1}s and was terminated.\n\n{output_text}",
                 self.timeout.as_secs_f64()
             );
-        }
-
-        if output_limit_exceeded {
+        } else if terminated_for_output_limit {
             output_text = format!(
                 "Command exceeded the output capture limit of {} bytes and was terminated.\n\n{output_text}",
+                self.max_capture_bytes
+            );
+        } else if capture_truncated {
+            output_text = format!(
+                "Command output exceeded the capture readback limit of {} bytes, so only a truncated snapshot is shown.\n\n{output_text}",
                 self.max_capture_bytes
             );
         }
@@ -929,6 +932,20 @@ mod tests {
 
         assert!(result.contains("Command exceeded the output capture limit"));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn shell_reports_truncated_capture_without_false_termination_message() {
+        let tool = ShellTool::with_limits(Duration::from_secs(5), 256);
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "printf '%4096s' ''"
+            }))
+            .unwrap();
+
+        assert!(result.contains("Exit code: 0"));
+        assert!(result.contains("Command output exceeded the capture readback limit"));
+        assert!(!result.contains("and was terminated"));
     }
 
     #[test]
