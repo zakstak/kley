@@ -101,12 +101,12 @@ impl Tool for ShellTool {
                     "description": "The shell command to execute (passed to sh -c)"
                 },
                 "timeout_ms": {
-                    "type": "integer",
+                    "type": ["integer", "null"],
                     "minimum": 1,
-                    "description": "Optional timeout in milliseconds (must be >= 1). Defaults to tool timeout if omitted."
+                    "description": "Timeout in milliseconds (must be >= 1). Pass null to use the tool default timeout."
                 }
             },
-            "required": ["command"],
+            "required": ["command", "timeout_ms"],
             "additionalProperties": false,
         })
     }
@@ -878,6 +878,28 @@ mod tests {
             .execute(serde_json::json!({"command": "echo hi", "timeout_ms": -1}))
             .unwrap();
         assert!(result.contains("Error: timeout_ms must be >= 1"));
+    }
+
+    #[test]
+    fn shell_schema_requires_nullable_timeout_for_strict_mode() {
+        let tool = ShellTool::new();
+        let schema = tool.parameters_schema();
+        let required = schema["required"].as_array().unwrap();
+
+        assert_eq!(
+            required,
+            &vec![
+                serde_json::json!("command"),
+                serde_json::json!("timeout_ms")
+            ]
+        );
+
+        let timeout_types = schema["properties"]["timeout_ms"]["type"]
+            .as_array()
+            .unwrap();
+        assert!(timeout_types.iter().any(|value| value == "integer"));
+        assert!(timeout_types.iter().any(|value| value == "null"));
+        assert_eq!(schema["properties"]["timeout_ms"]["minimum"], 1);
     }
 
     #[test]

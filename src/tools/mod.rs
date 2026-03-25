@@ -138,6 +138,39 @@ mod tests {
     }
 
     #[test]
+    fn default_registry_tool_schemas_match_strict_mode_requirements() {
+        let reg = default_registry(std::env::temp_dir());
+
+        for tool in reg.to_api_tools() {
+            assert_eq!(tool["strict"], true);
+
+            let parameters = tool["parameters"].as_object().unwrap();
+            assert_eq!(
+                parameters.get("additionalProperties"),
+                Some(&serde_json::json!(false))
+            );
+
+            let properties = parameters
+                .get("properties")
+                .and_then(|value| value.as_object())
+                .unwrap();
+            let required = parameters
+                .get("required")
+                .and_then(|value| value.as_array())
+                .unwrap();
+
+            for property_name in properties.keys() {
+                assert!(
+                    required.iter().any(|value| value == property_name),
+                    "tool '{}' is missing '{}' from required",
+                    tool["name"],
+                    property_name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn default_registry_has_builtins() {
         let reg = default_registry(std::env::temp_dir());
         assert!(reg.get("shell").is_some());

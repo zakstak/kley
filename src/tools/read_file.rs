@@ -28,15 +28,15 @@ impl Tool for ReadFileTool {
                     "type": ["integer", "null"],
                     "minimum": 1,
                     "description":
-                        "First line to include (1-based, inclusive). Omit or set null to start from beginning."
+                        "First line to include (1-based, inclusive). Pass null to start from beginning."
                 },
                 "end_line": {
                     "type": ["integer", "null"],
                     "minimum": 1,
-                    "description": "Last line to include (1-based, inclusive). Omit or set null to read to end."
+                    "description": "Last line to include (1-based, inclusive). Pass null to read to end."
                 }
             },
-            "required": ["path"],
+            "required": ["path", "start_line", "end_line"],
             "additionalProperties": false,
         })
     }
@@ -154,11 +154,18 @@ mod tests {
     }
 
     #[test]
-    fn schema_does_not_require_optional_ranges() {
+    fn schema_requires_nullable_ranges_for_strict_mode() {
         let tool = ReadFileTool;
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
-        assert_eq!(required, &vec![serde_json::json!("path")]);
+        assert_eq!(
+            required,
+            &vec![
+                serde_json::json!("path"),
+                serde_json::json!("start_line"),
+                serde_json::json!("end_line")
+            ]
+        );
         let start_line = &schema["properties"]["start_line"];
         assert_eq!(start_line["minimum"], 1);
         let start_types = start_line["type"].as_array().unwrap();
