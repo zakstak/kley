@@ -47,7 +47,7 @@ enum Command {
 
         /// Run autonomously — the agent works continuously, checking in
         /// via report_status, without waiting for user input between turns.
-        #[arg(long, conflicts_with = "tool_approval")]
+        #[arg(long)]
         autonomous: bool,
 
         /// Maximum number of autonomous turns before stopping (safety valve).
@@ -360,6 +360,54 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_mode_accepts_never_tool_approval_flag() {
+        let cli = Cli::try_parse_from([
+            "kley",
+            "chat",
+            "--autonomous",
+            "--prompt",
+            "tinker",
+            "--tool-approval",
+            "never",
+        ])
+        .unwrap();
+
+        let Command::Chat {
+            autonomous,
+            prompt,
+            tool_approval,
+            ..
+        } = cli.command
+        else {
+            panic!("expected chat command")
+        };
+
+        assert!(autonomous);
+        assert_eq!(prompt.unwrap(), "tinker");
+        assert_eq!(tool_approval, Some(ToolApprovalMode::Never));
+    }
+
+    #[test]
+    fn autonomous_mode_accepts_auto_tool_approval_flag() {
+        let cli = Cli::try_parse_from([
+            "kley",
+            "chat",
+            "--autonomous",
+            "--prompt",
+            "tinker",
+            "--tool-approval",
+            "auto",
+        ])
+        .unwrap();
+
+        let Command::Chat { tool_approval, .. } = cli.command else {
+            panic!("expected chat command")
+        };
+
+        assert_eq!(tool_approval, Some(ToolApprovalMode::Auto));
+    }
+
+    #[test]
     fn preview_tool_arguments_truncates_long_unicode_input() {
         let long = "界".repeat(230);
         let preview = preview_tool_arguments(&long);
@@ -414,6 +462,17 @@ mod tests {
     fn autonomous_mode_rejects_ask_tool_approval_from_env() {
         let err =
             resolve_tool_approval_mode_with_env(None, true, false, Some(ToolApprovalMode::Ask))
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("autonomous mode cannot use ask tool approval")
+        );
+    }
+
+    #[test]
+    fn autonomous_mode_rejects_ask_tool_approval_flag() {
+        let err =
+            resolve_tool_approval_mode_with_env(Some(ToolApprovalMode::Ask), true, false, None)
                 .unwrap_err();
         assert!(
             err.to_string()
