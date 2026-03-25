@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -127,7 +127,7 @@ fn parse_record(
 
         let stripped = line.trim();
         if let Some(section_name) = stripped.strip_suffix(':') {
-            current_section = match section_name {
+            let known_section = match section_name {
                 "BEFORE" => Some("before"),
                 "AFTER" => Some("after"),
                 "HELPFUL FEATURE IDEAS" => Some("helpful_feature_ideas"),
@@ -136,7 +136,11 @@ fn parse_record(
                 "PREVENTION NOTES" => Some("prevention_notes"),
                 _ => None,
             };
-            continue;
+
+            if let Some(section_key) = known_section {
+                current_section = Some(section_key);
+                continue;
+            }
         }
 
         if stripped.is_empty() {
@@ -671,6 +675,44 @@ PREVENTION NOTES:
                 "cargo test --quiet self_improve_prompt".to_string(),
                 "target evidence is required even for no-safe-change reports".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn parse_record_keeps_colon_terminated_bullets_inside_sections() {
+        let log_content = r#"STATUS: success
+BRANCH: improve/rust
+COMMIT: abc123
+PR: https://example/pr/1
+TARGET: keep list evidence with colon labels
+
+BEFORE:
+- Command:
+- Result:
+
+AFTER:
+- Command:
+- Result:
+"#;
+
+        let record = parse_record(
+            log_content,
+            7,
+            "20260101T000007".to_string(),
+            0,
+            "success".to_string(),
+            Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
+        )
+        .expect("record should parse");
+
+        assert_eq!(
+            record.before,
+            vec!["Command:".to_string(), "Result:".to_string()]
+        );
+        assert_eq!(
+            record.after,
+            vec!["Command:".to_string(), "Result:".to_string()]
         );
     }
 }
