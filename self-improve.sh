@@ -147,6 +147,8 @@ Important:
 
 ## Mission
 This is a single cycle. Produce exactly one non-trivial, reviewable, evidence-backed improvement, then stop.
+Do not spend the cycle only exploring. After candidate review, choose one best concrete target and treat it as the cycle's TARGET.
+If you ultimately report `no-safe-change`, you must still name the best concrete target you found and explain why that exact target failed the bar.
 Also end the cycle with a short retrospective about helpful feature ideas, real struggles, and whether a concrete addition would have prevented them.
 
 You are not rewarded for opening a PR.
@@ -249,6 +251,8 @@ Oversized PRs are a review burden and a sign the change is not atomic enough.
 
 ## Required evidence pattern
 Before you create a branch, identify one concrete target and gather evidence of the current problem.
+The TARGET, BEFORE, and AFTER sections from your final status block are harvested into the structured record at `.self-improve-logs/retrospectives.jsonl`.
+Broad exploration is only for reaching a choice. Once you have 2-3 candidates, stop broad searching and commit to exactly one TARGET.
 
 Every valid change must have one of these proof patterns:
 - failing test -> passing test
@@ -257,6 +261,7 @@ Every valid change must have one of these proof patterns:
 - reproducible harness/script failure before -> deterministic validation after
 
 If you cannot capture before-evidence, do not proceed with the change.
+A cycle is incomplete if it ends without a named TARGET, even when the outcome is `no-safe-change`.
 
 ## Required test policy
 For Rust code, library code, or user-visible behavior changes:
@@ -315,8 +320,10 @@ This retrospective informs future cycles. It does not lower the quality bar for 
     - Choose the one with the best combination of:
       - impact
       - confidence
-     - local testability
-   - Do not choose the easiest change just to complete a cycle.
+      - local testability
+    - Choose exactly one of them as TARGET before returning to implementation or final decision work.
+    - After you choose TARGET, stop broad repository spelunking unless new evidence invalidates that target.
+    - Do not choose the easiest change just to complete a cycle.
 
 6. Capture before-evidence.
    - Run the smallest deterministic command/test/check that demonstrates the current problem.
@@ -396,6 +403,7 @@ STATUS: success|blocked|no-safe-change
 BRANCH: <branch-name-or-none>
 COMMIT: <commit-sha-or-none>
 PR: <pr-url-or-none>
+TARGET: <single concrete improvement target chosen for this cycle>
 
 PROBLEM:
 - <one or two bullets describing the real issue>
@@ -481,7 +489,9 @@ EOF
 		"$RETROSPECTIVE_FILE"; then
 		echo "Retrospective record appended to $RETROSPECTIVE_FILE"
 	else
-		echo "⚠  Failed to append retrospective record for cycle $cycle" >&2
+		echo "⚠  Failed to append retrospective record for cycle $cycle; forcing STATUS=blocked" >&2
+		status=blocked
+		echo "STATUS: blocked retrospective append failed for cycle $cycle"
 	fi
 
 	echo ""

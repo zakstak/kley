@@ -16,9 +16,13 @@ struct RetrospectiveRecord {
     status_detail: Option<String>,
     run_exit: i64,
     log_file: String,
+    evidence_file: String,
     branch: String,
     commit: String,
     pr: String,
+    target: String,
+    before: Vec<String>,
+    after: Vec<String>,
     helpful_feature_ideas: Vec<String>,
     struggle: String,
     preventable: Option<bool>,
@@ -45,7 +49,15 @@ fn main() -> Result<()> {
 
     let log_content = fs::read_to_string(&log_path)
         .with_context(|| format!("failed to read log file: {}", log_path.display()))?;
-    let record = parse_record(&log_content, cycle, timestamp, run_exit, status, &log_path)?;
+    let record = parse_record(
+        &log_content,
+        cycle,
+        timestamp,
+        run_exit,
+        status,
+        &log_path,
+        &output_path,
+    )?;
     append_record(&output_path, &record)
 }
 
@@ -61,6 +73,7 @@ fn parse_record(
     run_exit: i64,
     status: String,
     log_path: &Path,
+    output_path: &Path,
 ) -> Result<RetrospectiveRecord> {
     let lines: Vec<&str> = log_content.lines().collect();
     let status_start = lines.iter().rposition(|line| line.starts_with("STATUS: "));
@@ -78,8 +91,11 @@ fn parse_record(
     let mut branch = String::from("none");
     let mut commit = String::from("none");
     let mut pr = String::from("none");
+    let mut target = String::from("none");
 
     let mut sections: HashMap<&'static str, Vec<String>> = HashMap::from([
+        ("before", Vec::new()),
+        ("after", Vec::new()),
         ("helpful_feature_ideas", Vec::new()),
         ("struggle_lines", Vec::new()),
         ("preventable_lines", Vec::new()),
@@ -103,10 +119,17 @@ fn parse_record(
             current_section = None;
             continue;
         }
+        if let Some(value) = line.strip_prefix("TARGET: ") {
+            target = value.trim().to_owned();
+            current_section = None;
+            continue;
+        }
 
         let stripped = line.trim();
         if let Some(section_name) = stripped.strip_suffix(':') {
             current_section = match section_name {
+                "BEFORE" => Some("before"),
+                "AFTER" => Some("after"),
                 "HELPFUL FEATURE IDEAS" => Some("helpful_feature_ideas"),
                 "STRUGGLE" => Some("struggle_lines"),
                 "PREVENTABLE" => Some("preventable_lines"),
@@ -137,10 +160,30 @@ fn parse_record(
         }
     }
 
+    let before = sections.remove("before").unwrap_or_default();
+    let after = sections.remove("after").unwrap_or_default();
     let helpful_feature_ideas = sections.remove("helpful_feature_ideas").unwrap_or_default();
     let struggle_lines = sections.remove("struggle_lines").unwrap_or_default();
     let preventable_lines = sections.remove("preventable_lines").unwrap_or_default();
     let prevention_notes = sections.remove("prevention_notes").unwrap_or_default();
+
+    if matches!(status.as_str(), "success" | "no-safe-change") {
+        if target.trim().is_empty() || target.trim().eq_ignore_ascii_case("none") {
+            return Err(anyhow!(
+                "missing required TARGET line in final status block for status {status}"
+            ));
+        }
+        if before.is_empty() {
+            return Err(anyhow!(
+                "missing required BEFORE section in final status block for status {status}"
+            ));
+        }
+        if after.is_empty() {
+            return Err(anyhow!(
+                "missing required AFTER section in final status block for status {status}"
+            ));
+        }
+    }
 
     let preventable_raw = join_and_trim_lower(&preventable_lines);
     let preventable = match preventable_raw.as_deref() {
@@ -157,9 +200,13 @@ fn parse_record(
         status_detail,
         run_exit,
         log_file: log_path.to_string_lossy().to_string(),
+        evidence_file: output_path.to_string_lossy().to_string(),
         branch,
         commit,
         pr,
+        target,
+        before,
+        after,
         helpful_feature_ideas,
         struggle: struggle_lines.join(" ").trim().to_owned(),
         preventable,
@@ -251,6 +298,15 @@ STATUS: success
 BRANCH: improve/rust
 COMMIT: abc123
 PR: https://example/pr/1
+TARGET: tighten self-improve target evidence contract
+
+BEFORE:
+- cargo test --quiet self_improve_prompt
+- target field was not preserved into the structured record
+
+AFTER:
+- cargo test --quiet self_improve_prompt
+- target and evidence fields are preserved into the structured record
 
 HELPFUL FEATURE IDEAS:
 - One
@@ -274,13 +330,33 @@ PREVENTION NOTES:
             0,
             "success".to_string(),
             Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
         )
         .expect("record should parse");
 
         assert_eq!(record.cycle, 2);
+        assert_eq!(record.evidence_file, "/tmp/retrospectives.jsonl");
         assert_eq!(record.branch, "improve/rust");
         assert_eq!(record.commit, "abc123");
         assert_eq!(record.pr, "https://example/pr/1");
+        assert_eq!(
+            record.target,
+            "tighten self-improve target evidence contract"
+        );
+        assert_eq!(
+            record.before,
+            vec![
+                "cargo test --quiet self_improve_prompt".to_string(),
+                "target field was not preserved into the structured record".to_string()
+            ]
+        );
+        assert_eq!(
+            record.after,
+            vec![
+                "cargo test --quiet self_improve_prompt".to_string(),
+                "target and evidence fields are preserved into the structured record".to_string()
+            ]
+        );
         assert_eq!(
             record.helpful_feature_ideas,
             vec!["One".to_string(), "Two continued details".to_string()]
@@ -309,6 +385,7 @@ PREVENTABLE:
             1,
             "blocked".to_string(),
             Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
         )
         .expect("record should parse");
 
@@ -318,10 +395,21 @@ PREVENTABLE:
 
     #[test]
     fn append_record_serializes_structured_retrospective_fields() {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let output_path = temp_dir.path().join("retrospectives.jsonl");
         let log_content = r#"STATUS: success
 BRANCH: improve/rust
 COMMIT: abc123
 PR: https://example/pr/1
+TARGET: tighten self-improve target evidence contract
+
+BEFORE:
+- cargo test --quiet self_improve_prompt
+- target field was not preserved into the structured record
+
+AFTER:
+- cargo test --quiet self_improve_prompt
+- target and evidence fields are preserved into the structured record
 
 HELPFUL FEATURE IDEAS:
 - One
@@ -345,11 +433,10 @@ PREVENTION NOTES:
             0,
             "success".to_string(),
             Path::new("/tmp/cycle.log"),
+            &output_path,
         )
         .expect("record should parse");
 
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let output_path = temp_dir.path().join("retrospectives.jsonl");
         append_record(&output_path, &record).expect("record should append");
 
         let serialized =
@@ -361,6 +448,28 @@ PREVENTION NOTES:
         let value: serde_json::Value =
             serde_json::from_str(line).expect("serialized record should be valid JSON");
 
+        assert_eq!(
+            value["evidence_file"],
+            json!(output_path.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            value["target"],
+            json!("tighten self-improve target evidence contract")
+        );
+        assert_eq!(
+            value["before"],
+            json!([
+                "cargo test --quiet self_improve_prompt",
+                "target field was not preserved into the structured record"
+            ])
+        );
+        assert_eq!(
+            value["after"],
+            json!([
+                "cargo test --quiet self_improve_prompt",
+                "target and evidence fields are preserved into the structured record"
+            ])
+        );
         assert_eq!(
             value["helpful_feature_ideas"],
             json!(["One", "Two continued details"])
@@ -383,13 +492,18 @@ PREVENTION NOTES:
             1,
             "blocked".to_string(),
             Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
         )
         .expect("record should still parse without final block");
 
         assert_eq!(record.status, "blocked");
+        assert_eq!(record.evidence_file, "/tmp/retrospectives.jsonl");
         assert_eq!(record.branch, "none");
         assert_eq!(record.commit, "none");
         assert_eq!(record.pr, "none");
+        assert_eq!(record.target, "none");
+        assert!(record.before.is_empty());
+        assert!(record.after.is_empty());
         assert!(record.helpful_feature_ideas.is_empty());
         assert!(record.prevention_notes.is_empty());
         assert_eq!(record.struggle, "");
@@ -406,6 +520,8 @@ PREVENTION NOTES:
 
     #[test]
     fn append_record_serializes_status_detail_for_missing_final_status_block() {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let output_path = temp_dir.path().join("retrospectives.jsonl");
         let log_content = "error: decryption failed (wrong passphrase?): Excessive work parameter for passphrase.\nDecryption would take around 32 seconds.\n";
 
         let record = parse_record(
@@ -415,11 +531,10 @@ PREVENTION NOTES:
             1,
             "blocked".to_string(),
             Path::new("/tmp/cycle.log"),
+            &output_path,
         )
         .expect("record should still parse without final block");
 
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let output_path = temp_dir.path().join("retrospectives.jsonl");
         append_record(&output_path, &record).expect("record should append");
 
         let serialized =
@@ -431,6 +546,13 @@ PREVENTION NOTES:
         let value: serde_json::Value =
             serde_json::from_str(line).expect("serialized record should be valid JSON");
 
+        assert_eq!(
+            value["evidence_file"],
+            json!(output_path.to_string_lossy().to_string())
+        );
+        assert_eq!(value["target"], json!("none"));
+        assert_eq!(value["before"], json!([]));
+        assert_eq!(value["after"], json!([]));
         assert_eq!(
             value["status_detail"],
             json!(
@@ -450,12 +572,105 @@ PREVENTION NOTES:
             1,
             "blocked".to_string(),
             Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
         )
         .expect("record should still parse without final block");
 
         assert_eq!(
             record.status_detail,
             Some("fatal: authentication failed for 'https://example.com/repo.git'".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_record_rejects_success_without_target_or_evidence_sections() {
+        let log_content = r#"STATUS: success
+BRANCH: improve/rust
+COMMIT: abc123
+PR: https://example/pr/1
+"#;
+
+        let err = parse_record(
+            log_content,
+            5,
+            "20260101T000005".to_string(),
+            0,
+            "success".to_string(),
+            Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
+        )
+        .expect_err("success records should require target and evidence sections");
+
+        assert!(err.to_string().contains("missing required TARGET line"));
+    }
+
+    #[test]
+    fn parse_record_accepts_no_safe_change_with_target_and_evidence_sections() {
+        let log_content = r#"STATUS: no-safe-change
+BRANCH: none
+COMMIT: none
+PR: none
+TARGET: tighten self-improve target evidence contract
+
+PROBLEM:
+- the cycle found no safe implementation path
+
+TESTS ADDED_OR_CHANGED:
+- none
+
+BEFORE:
+- cargo test --quiet self_improve_prompt
+- target evidence was not required in structured output
+
+AFTER:
+- cargo test --quiet self_improve_prompt
+- target evidence is required even for no-safe-change reports
+
+SUMMARY:
+- no code change was safe enough to ship
+
+HELPFUL FEATURE IDEAS:
+- none identified
+
+STRUGGLE:
+- proving the best target was still not safe to implement
+
+PREVENTABLE:
+- no
+
+PREVENTION NOTES:
+- none
+"#;
+
+        let record = parse_record(
+            log_content,
+            6,
+            "20260101T000006".to_string(),
+            0,
+            "no-safe-change".to_string(),
+            Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
+        )
+        .expect("no-safe-change should accept target and evidence sections");
+
+        assert_eq!(record.status, "no-safe-change");
+        assert_eq!(
+            record.target,
+            "tighten self-improve target evidence contract"
+        );
+        assert_eq!(
+            record.before,
+            vec![
+                "cargo test --quiet self_improve_prompt".to_string(),
+                "target evidence was not required in structured output".to_string()
+            ]
+        );
+        assert_eq!(
+            record.after,
+            vec![
+                "cargo test --quiet self_improve_prompt".to_string(),
+                "target evidence is required even for no-safe-change reports".to_string()
+            ]
         );
     }
 }
