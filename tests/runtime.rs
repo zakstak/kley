@@ -16,13 +16,14 @@ use futures_util::stream;
 use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
 use kley::events::{AgentEvent, Transport, event_channel};
-use kley::runtime::{AbortResult, RuntimeHooks, SessionRuntime, SubmitResult};
+use kley::runtime::{AbortResult, RuntimeEvent, RuntimeHooks, SessionRuntime, SubmitResult};
 use kley::store::{Session, SessionStatus, SharedStore, Store, Turn};
 use kley::tools::{Tool, ToolRegistry};
 use serde_json::Value;
 
 mod runtime {
     use super::*;
+    use kley::runtime::ToolCall;
 
     struct SlowTool {
         executed: Arc<AtomicBool>,
@@ -446,7 +447,7 @@ mod runtime {
             on_event: Some(Arc::new({
                 let abort_signal = abort_signal.clone();
                 move |event| {
-                    if matches!(event, kley::runtime::RuntimeEvent::ToolCallStarted { .. }) {
+                    if matches!(event, RuntimeEvent::ToolCallStarted { .. }) {
                         abort_signal.store(true, Ordering::Relaxed);
                     }
                 }
@@ -571,5 +572,63 @@ mod runtime {
         assert!(request_count.load(Ordering::Relaxed) >= 2);
 
         server.task.abort();
+    }
+
+    #[tokio::test]
+    async fn on_tool_approval_denies_execution() {
+        let store = Store::open_memory().unwrap();
+        let (emitter, _receiver) = event_channel();
+        let (executed, execution_happened) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(SlowTool {
+            executed: execution_happened.clone(),
+        }));
+
+        let hooks = RuntimeHooks {
+            on_tool_approval: Some(Arc::new({
+                let executed = executed.clone();
+                move |_: &ToolCall| {
+                    executed.store(true, Ordering::Relaxed);
+                    false
+                }
+            })),
+            ..RuntimeHooks::default()
+        };
+
+        let store = Arc::new(Mutex::new(store));
+        let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
+            store.clone(),
+            test_auth(),
+            Some("test-model"),
+            None,
+            emitter,
+            CompactConfig::default(),
+            registry,
+            "system".to_string(),
+            hooks,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .unwrap();
+
+        let result = runtime
+            .submit_prompt("please use a tool".to_string())
+            .await
+            .unwrap();
+
+        assert!(matches!(result, SubmitResult::Completed { .. }));
+        assert!(executed.load(Ordering::Relaxed));
+        assert!(!execution_happened.load(Ordering::Relaxed));
+
+        let session = runtime.session_id().to_string();
+        let turns = Turn::list_for_session(&store.lock().unwrap(), &session).unwrap();
+        assert!(turns.iter().any(|turn| {
+            turn.kind == "function_call_output"
+                && turn.content.contains("Tool execution denied by user")
+        }));
     }
 }

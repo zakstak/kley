@@ -18,6 +18,7 @@ pub enum RunMode {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_loop(
     model_override: Option<&str>,
     resume_session_id: Option<&str>,
@@ -26,6 +27,7 @@ pub async fn chat_loop(
     run_mode: RunMode,
     compact_config: CompactConfig,
     reasoning_effort: Option<String>,
+    hooks: RuntimeHooks,
 ) -> Result<()> {
     let cred_store = CredentialStore::open()?;
     let resolved = auth::resolve_auth(&cred_store, &events).await?;
@@ -36,9 +38,9 @@ pub async fn chat_loop(
     let skills = crate::skills::discover_skills(&project_dir);
     let instructions = crate::skills::build_system_prompt(&rules, &skills);
 
-    let hooks = RuntimeHooks {
-        on_output_delta: None,
-        on_event: Some(Arc::new(|event| match event {
+    let mut hooks = hooks;
+    if hooks.on_event.is_none() {
+        hooks.on_event = Some(Arc::new(|event| match event {
             RuntimeEvent::SessionResumed { session_id } => {
                 eprintln!("Resuming session {}", &session_id[..8]);
             }
@@ -49,8 +51,8 @@ pub async fn chat_loop(
                 eprintln!("Loaded {turns} previous turns");
             }
             RuntimeEvent::ToolCallStarted { .. } | RuntimeEvent::ToolCallCompleted { .. } => {}
-        })),
-    };
+        }));
+    }
 
     let mut runtime = SessionRuntime::new_with_abort_signal(
         store,

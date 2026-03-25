@@ -1,6 +1,7 @@
 pub mod manager;
 pub mod session;
 
+pub use crate::provider::ToolCall;
 pub use manager::{
     AbortTurnError, AbortTurnOutcome, ActiveTurnReplay, AttachControllerError, ManagedRuntime,
     RuntimeEventEnvelope, RuntimeManager, SubmitPromptError, SubmitPromptOutcome,

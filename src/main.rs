@@ -1,10 +1,11 @@
-use anyhow::Result;
-use clap::{Parser, Subcommand};
-use std::io::Write;
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::io::{self, Write};
 
 use kley::agent::RunMode;
 use kley::compact::CompactConfig;
 use kley::events::{AgentEvent, event_channel};
+use kley::runtime::{RuntimeHooks, ToolCall};
 use kley::store::Store;
 
 #[derive(Debug, Parser)]
@@ -24,6 +25,10 @@ enum Command {
     },
     /// Start an interactive chat session
     Chat {
+        /// How tool calls are approved
+        #[arg(long, value_enum)]
+        tool_approval: Option<ToolApprovalMode>,
+
         /// Model to use (e.g. "gpt-4.1" or "glm-4.7")
         #[arg(long, short)]
         model: Option<String>,
@@ -37,12 +42,12 @@ enum Command {
         resume: Option<String>,
 
         /// Auto-approve all tool executions without confirmation
-        #[arg(long)]
+        #[arg(long, conflicts_with = "tool_approval")]
         yolo: bool,
 
         /// Run autonomously — the agent works continuously, checking in
         /// via report_status, without waiting for user input between turns.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "tool_approval")]
         autonomous: bool,
 
         /// Maximum number of autonomous turns before stopping (safety valve).
@@ -50,7 +55,7 @@ enum Command {
         max_turns: usize,
 
         /// Initial prompt (required for --autonomous mode).
-        #[arg(long)]
+        #[arg(long, required_if_eq("autonomous", "true"))]
         prompt: Option<String>,
 
         /// Character budget for context-window compaction. When history
@@ -70,6 +75,13 @@ enum Command {
         bind: Option<String>,
     },
     Preflight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ToolApprovalMode {
+    Ask,
+    Auto,
+    Never,
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,22 +109,46 @@ async fn run() -> Result<()> {
             LoginProvider::Zai => kley::auth::zai::login_interactive()?,
         },
         Command::Chat {
+            tool_approval: approval_mode,
             model,
             last,
             resume,
-            yolo: _yolo,
+            yolo,
             autonomous,
             max_turns,
             prompt,
             compact_threshold,
             reasoning_effort,
         } => {
+            let approval_mode = resolve_tool_approval_mode(approval_mode, autonomous, yolo)?;
+            let auto_approve_tools = yolo || matches!(approval_mode, ToolApprovalMode::Auto);
+            let deny_tools = matches!(approval_mode, ToolApprovalMode::Never);
+            let _ = io::stdout().flush();
+
+            if matches!(approval_mode, ToolApprovalMode::Auto) {
+                eprintln!("  ℹ️  Tool approval mode: auto");
+            }
+            if matches!(approval_mode, ToolApprovalMode::Never) {
+                eprintln!("  ℹ️  Tool approval mode: never");
+            }
+            if autonomous && deny_tools {
+                eprintln!("  ℹ️  Autonomous mode is non-interactive: tool calls will be denied.");
+            }
+
             // Resolve run mode
+            let tool_approval: fn(&ToolCall) -> bool = if auto_approve_tools {
+                |_| true
+            } else if deny_tools {
+                |_| false
+            } else {
+                |tool| request_tool_approval(tool)
+            };
+
             let run_mode = if autonomous {
-                let initial_prompt = prompt.unwrap_or_else(|| {
-                    eprintln!("error: --autonomous requires --prompt \"<your prompt>\"");
-                    std::process::exit(1);
-                });
+                let initial_prompt = match prompt {
+                    Some(prompt) => prompt,
+                    None => bail!("--autonomous requires --prompt"),
+                };
                 RunMode::Autonomous {
                     initial_prompt,
                     max_turns,
@@ -153,6 +189,10 @@ async fn run() -> Result<()> {
                 run_mode,
                 compact_config,
                 reasoning_effort,
+                RuntimeHooks {
+                    on_tool_approval: Some(std::sync::Arc::new(tool_approval)),
+                    ..RuntimeHooks::default()
+                },
             )
             .await?;
 
@@ -170,6 +210,90 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_tool_approval_mode(
+    approval_mode: Option<ToolApprovalMode>,
+    autonomous: bool,
+    yolo: bool,
+) -> Result<ToolApprovalMode> {
+    let env_mode = match std::env::var("KLEY_TOOL_APPROVAL") {
+        Ok(raw) => Some(parse_tool_approval_mode(&raw)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("invalid tool approval mode: KLEY_TOOL_APPROVAL must be valid unicode")
+        }
+    };
+
+    resolve_tool_approval_mode_with_env(approval_mode, autonomous, yolo, env_mode)
+}
+
+fn resolve_tool_approval_mode_with_env(
+    approval_mode: Option<ToolApprovalMode>,
+    autonomous: bool,
+    yolo: bool,
+    env_mode: Option<ToolApprovalMode>,
+) -> Result<ToolApprovalMode> {
+    if yolo {
+        return Ok(ToolApprovalMode::Auto);
+    }
+
+    let mode = approval_mode.or(env_mode).unwrap_or({
+        if autonomous {
+            ToolApprovalMode::Auto
+        } else {
+            ToolApprovalMode::Ask
+        }
+    });
+
+    if autonomous && matches!(mode, ToolApprovalMode::Ask) {
+        bail!("autonomous mode cannot use ask tool approval; set KLEY_TOOL_APPROVAL=auto or never")
+    }
+
+    Ok(mode)
+}
+
+fn parse_tool_approval_mode(raw: &str) -> Result<ToolApprovalMode> {
+    match raw.to_ascii_lowercase().as_str() {
+        "ask" => Ok(ToolApprovalMode::Ask),
+        "auto" => Ok(ToolApprovalMode::Auto),
+        "never" => Ok(ToolApprovalMode::Never),
+        _ => bail!("invalid tool approval mode: {raw}"),
+    }
+}
+
+fn request_tool_approval(tool: &ToolCall) -> bool {
+    eprintln!("  ⇓ tool call: {} {}", tool.name, tool.call_id);
+    if !tool.arguments.is_empty() {
+        eprintln!("     args: {}", preview_tool_arguments(&tool.arguments));
+    }
+    loop {
+        eprint!("  Allow tool execution? [y/N]: ");
+        let _ = std::io::stderr().flush();
+
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            return false;
+        }
+
+        match answer.trim().to_lowercase().as_str() {
+            "y" | "yes" => return true,
+            "n" | "no" | "" => return false,
+            _ => {
+                eprintln!("  Please type y or n.");
+            }
+        }
+    }
+}
+
+fn preview_tool_arguments(arguments: &str) -> String {
+    let max_chars = 220usize;
+    let trimmed = arguments.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    trimmed.chars().take(max_chars).chain("…".chars()).collect()
 }
 
 /// Render an event to stderr with visual emphasis appropriate to its severity.
@@ -209,10 +333,95 @@ fn print_event(event: &AgentEvent) {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn autonomous_mode_requires_prompt() {
+        let err = Cli::try_parse_from(["kley", "chat", "--autonomous"]).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::MissingRequiredArgument));
+    }
+
+    #[test]
+    fn autonomous_mode_accepts_prompt() {
+        let cli =
+            Cli::try_parse_from(["kley", "chat", "--autonomous", "--prompt", "tinker"])
+                .unwrap();
+        let Command::Chat {
+            autonomous, prompt, ..
+        } = cli.command
+        else {
+            panic!("expected chat command")
+        };
+
+        assert!(autonomous);
+        assert_eq!(prompt.unwrap(), "tinker");
+    }
+
+    #[test]
+    fn preview_tool_arguments_truncates_long_unicode_input() {
+        let long = "界".repeat(230);
+        let preview = preview_tool_arguments(&long);
+        assert_eq!(preview.chars().count(), 221);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_tool_arguments_truncates_long_input() {
+        let long = "x".repeat(250);
+        let preview = preview_tool_arguments(&long);
+        assert_eq!(preview, format!("{}{}", "x".repeat(220), "…"));
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_tool_arguments_returns_input_if_short() {
+        let short = r#"{"path":"file.txt"}"#;
+        let preview = preview_tool_arguments(short);
+        assert_eq!(preview, short);
+    }
+
+    #[test]
+    fn tool_approval_value_must_be_valid() {
+        let err =
+            Cli::try_parse_from(["kley", "chat", "--tool-approval", "sometimes"]).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidValue));
+    }
+
+    #[test]
+    fn tool_approval_conflicts_with_yolo() {
+        let err =
+            Cli::try_parse_from(["kley", "chat", "--tool-approval", "auto", "--yolo"])
+                .unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::ArgumentConflict));
+    }
+
+    #[test]
+    fn autonomous_mode_defaults_to_auto_tool_approval() {
+        let mode = resolve_tool_approval_mode_with_env(None, true, false, None).unwrap();
+        assert_eq!(mode, ToolApprovalMode::Auto);
+    }
+
+    #[test]
+    fn autonomous_mode_honors_never_tool_approval_from_env() {
+        let mode =
+            resolve_tool_approval_mode_with_env(None, true, false, Some(ToolApprovalMode::Never))
+                .unwrap();
+        assert_eq!(mode, ToolApprovalMode::Never);
+    }
+
+    #[test]
+    fn autonomous_mode_rejects_ask_tool_approval_from_env() {
+        let err =
+            resolve_tool_approval_mode_with_env(None, true, false, Some(ToolApprovalMode::Ask))
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("autonomous mode cannot use ask tool approval")
+        );
+    }
 
     #[test]
     fn preflight_subcommand_parses() {
