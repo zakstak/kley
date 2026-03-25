@@ -93,6 +93,7 @@ fn self_improve_prompt_keeps_retrospective_fields_in_final_status_order() {
     let mut cursor = 0;
     for marker in [
         "STATUS: success|blocked|no-safe-change",
+        "TARGET: <single concrete improvement target chosen for this cycle>",
         "SUMMARY:",
         "HELPFUL FEATURE IDEAS:",
         "STRUGGLE:",
@@ -104,6 +105,27 @@ fn self_improve_prompt_keeps_retrospective_fields_in_final_status_order() {
             .find(marker)
             .unwrap_or_else(|| panic!("expected final status block to contain {marker:?}"));
         cursor += relative_index + marker.len();
+    }
+}
+
+#[test]
+fn self_improve_prompt_requires_named_target_and_known_evidence_location() {
+    let script = self_improve_script();
+
+    for required in [
+        "Do not spend the cycle only exploring.",
+        "After candidate review, choose one best concrete target and treat it as the cycle's TARGET.",
+        "If you ultimately report `no-safe-change`, you must still name the best concrete target you found and explain why that exact target failed the bar.",
+        "The TARGET, BEFORE, and AFTER sections from your final status block are harvested into the structured record at `.self-improve-logs/retrospectives.jsonl`.",
+        "Broad exploration is only for reaching a choice. Once you have 2-3 candidates, stop broad searching and commit to exactly one TARGET.",
+        "A cycle is incomplete if it ends without a named TARGET, even when the outcome is `no-safe-change`.",
+        "Choose exactly one of them as TARGET before returning to implementation or final decision work.",
+        "After you choose TARGET, stop broad repository spelunking unless new evidence invalidates that target.",
+    ] {
+        assert!(
+            script.contains(required),
+            "expected self-improve prompt to contain {required:?}"
+        );
     }
 }
 
@@ -194,6 +216,9 @@ fn self_improve_script_appends_structured_retrospective_records() {
         "run_repo_cargo_bin self-improve-retrospective \\",
         "\"$RETROSPECTIVE_FILE\"",
         "Retrospective record appended to $RETROSPECTIVE_FILE",
+        "Failed to append retrospective record for cycle $cycle; forcing STATUS=blocked",
+        "status=blocked",
+        "STATUS: blocked retrospective append failed for cycle $cycle",
     ] {
         assert!(
             script.contains(required),
