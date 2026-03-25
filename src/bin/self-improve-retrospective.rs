@@ -126,8 +126,10 @@ fn parse_record(
         }
 
         let stripped = line.trim();
-        if let Some(section_name) = stripped.strip_suffix(':') {
-            current_section = match section_name {
+        if !stripped.starts_with("- ")
+            && let Some(section_name) = stripped.strip_suffix(':')
+        {
+            let known_section = match section_name {
                 "BEFORE" => Some("before"),
                 "AFTER" => Some("after"),
                 "HELPFUL FEATURE IDEAS" => Some("helpful_feature_ideas"),
@@ -136,6 +138,13 @@ fn parse_record(
                 "PREVENTION NOTES" => Some("prevention_notes"),
                 _ => None,
             };
+
+            if let Some(section_key) = known_section {
+                current_section = Some(section_key);
+                continue;
+            }
+
+            current_section = None;
             continue;
         }
 
@@ -672,5 +681,106 @@ PREVENTION NOTES:
                 "target evidence is required even for no-safe-change reports".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parse_record_keeps_colon_terminated_bullets_inside_sections() {
+        let log_content = r#"STATUS: success
+BRANCH: improve/rust
+COMMIT: abc123
+PR: https://example/pr/1
+TARGET: keep list evidence with colon labels
+
+BEFORE:
+- Command:
+- Result:
+
+AFTER:
+- Command:
+- Result:
+"#;
+
+        let record = parse_record(
+            log_content,
+            7,
+            "20260101T000007".to_string(),
+            0,
+            "success".to_string(),
+            Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
+        )
+        .expect("record should parse");
+
+        assert_eq!(
+            record.before,
+            vec!["Command:".to_string(), "Result:".to_string()]
+        );
+        assert_eq!(
+            record.after,
+            vec!["Command:".to_string(), "Result:".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_record_ignores_unknown_headers_after_after_section() {
+        let log_content = r#"STATUS: success
+BRANCH: improve/rust
+COMMIT: abc123
+PR: https://example/pr/1
+TARGET: keep unknown status headings out of after
+
+BEFORE:
+- baseline evidence
+
+AFTER:
+- valid after evidence
+FULL VALIDATION:
+- all checks passed
+SUMMARY:
+- wrapped up
+"#;
+
+        let record = parse_record(
+            log_content,
+            7,
+            "20260101T000007".to_string(),
+            0,
+            "success".to_string(),
+            Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
+        )
+        .expect("record should parse");
+
+        assert_eq!(record.after, vec!["valid after evidence".to_string()]);
+    }
+
+    #[test]
+    fn parse_record_rejects_success_when_only_unknown_headers_follow_after() {
+        let log_content = r#"STATUS: success
+BRANCH: improve/rust
+COMMIT: abc123
+PR: https://example/pr/1
+TARGET: reject unknown heading as after evidence
+
+BEFORE:
+- baseline evidence
+
+AFTER:
+FULL VALIDATION:
+- all checks passed
+"#;
+
+        let err = parse_record(
+            log_content,
+            8,
+            "20260101T000008".to_string(),
+            0,
+            "success".to_string(),
+            Path::new("/tmp/cycle.log"),
+            Path::new("/tmp/retrospectives.jsonl"),
+        )
+        .expect_err("success should require actual after evidence entries");
+
+        assert!(err.to_string().contains("missing required AFTER section"));
     }
 }

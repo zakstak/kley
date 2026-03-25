@@ -1502,6 +1502,16 @@ fn ts_now() -> String {
     Utc::now().to_rfc3339()
 }
 
+async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {
+    let text = serde_json::to_string(&response).map_err(|_| ())?;
+    socket.send(Message::Text(text)).await.map_err(|_| ())
+}
+
+async fn send_event(socket: &mut WebSocket, event: UiEvent) -> Result<(), ()> {
+    let text = serde_json::to_string(&event).map_err(|_| ())?;
+    socket.send(Message::Text(text)).await.map_err(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1582,14 +1592,4 @@ mod tests {
         assert_eq!(usage.max_chars, 120_000);
         assert!(usage.percent_used <= 100);
     }
-}
-
-async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {
-    let text = serde_json::to_string(&response).map_err(|_| ())?;
-    socket.send(Message::Text(text)).await.map_err(|_| ())
-}
-
-async fn send_event(socket: &mut WebSocket, event: UiEvent) -> Result<(), ()> {
-    let text = serde_json::to_string(&event).map_err(|_| ())?;
-    socket.send(Message::Text(text)).await.map_err(|_| ())
 }
