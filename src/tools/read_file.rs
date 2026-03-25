@@ -26,14 +26,17 @@ impl Tool for ReadFileTool {
                 },
                 "start_line": {
                     "type": ["integer", "null"],
-                    "description": "First line to include (1-based, inclusive). Omit to start from beginning."
+                    "minimum": 1,
+                    "description":
+                        "First line to include (1-based, inclusive). Omit or set null to start from beginning."
                 },
                 "end_line": {
                     "type": ["integer", "null"],
-                    "description": "Last line to include (1-based, inclusive). Omit to read to end."
+                    "minimum": 1,
+                    "description": "Last line to include (1-based, inclusive). Omit or set null to read to end."
                 }
             },
-            "required": ["path", "start_line", "end_line"],
+            "required": ["path"],
             "additionalProperties": false,
         })
     }
@@ -57,16 +60,14 @@ impl Tool for ReadFileTool {
             return Ok(format!("File: {path} (0 lines total)\n"));
         }
 
-        let requested_start = args
-            .get("start_line")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.max(1) as usize)
-            .unwrap_or(1);
-        let requested_end = args
-            .get("end_line")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.max(1) as usize)
-            .unwrap_or(total);
+        let requested_start = match parse_line_bound(&args, "start_line", 1) {
+            Ok(value) => value,
+            Err(error) => return Ok(error),
+        };
+        let requested_end = match parse_line_bound(&args, "end_line", total) {
+            Ok(value) => value,
+            Err(error) => return Ok(error),
+        };
 
         if requested_start > requested_end {
             return Ok(format!(
@@ -89,6 +90,23 @@ impl Tool for ReadFileTool {
         }
 
         Ok(output)
+    }
+}
+
+fn parse_line_bound(args: &Value, key: &str, default: usize) -> Result<usize, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => {
+            let raw = value
+                .as_i64()
+                .ok_or_else(|| format!("Error: {key} must be an integer"))?;
+
+            if raw < 1 {
+                return Err(format!("Error: {key} must be >= 1"));
+            }
+
+            usize::try_from(raw).map_err(|_| format!("Error: {key} out of range"))
+        }
     }
 }
 
@@ -118,6 +136,41 @@ mod tests {
         assert!(result.contains("2: line2"));
         assert!(result.contains("3: line3"));
         assert!(result.contains("3 lines total"));
+    }
+
+    #[test]
+    fn read_whole_file_omits_optional_bounds_when_absent() {
+        let f = temp_file("line1\nline2\nline3\n");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap()
+            }))
+            .unwrap();
+        assert!(result.contains("1: line1"));
+        assert!(result.contains("3: line3"));
+        assert!(result.contains("3 lines total"));
+        assert!(!result.contains("Showing lines"));
+    }
+
+    #[test]
+    fn schema_does_not_require_optional_ranges() {
+        let tool = ReadFileTool;
+        let schema = tool.parameters_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required, &vec![serde_json::json!("path")]);
+        let start_line = &schema["properties"]["start_line"];
+        assert_eq!(start_line["minimum"], 1);
+        let start_types = start_line["type"].as_array().unwrap();
+        assert_eq!(start_types.len(), 2);
+        assert!(start_types.iter().any(|v| v == "integer"));
+        assert!(start_types.iter().any(|v| v == "null"));
+        let end_line = &schema["properties"]["end_line"];
+        assert_eq!(end_line["minimum"], 1);
+        let end_types = end_line["type"].as_array().unwrap();
+        assert_eq!(end_types.len(), 2);
+        assert!(end_types.iter().any(|v| v == "integer"));
+        assert!(end_types.iter().any(|v| v == "null"));
     }
 
     #[test]
@@ -199,5 +252,35 @@ mod tests {
             }))
             .unwrap();
         assert!(result.contains("Error:"));
+    }
+
+    #[test]
+    fn invalid_start_line_is_domain_error() {
+        let f = temp_file("line1\nline2\n");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": "first",
+                "end_line": 2,
+            }))
+            .unwrap();
+
+        assert_eq!(result, "Error: start_line must be an integer");
+    }
+
+    #[test]
+    fn invalid_end_line_is_domain_error() {
+        let f = temp_file("line1\nline2\n");
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": f.path().to_str().unwrap(),
+                "start_line": 1,
+                "end_line": 0,
+            }))
+            .unwrap();
+
+        assert_eq!(result, "Error: end_line must be >= 1");
     }
 }

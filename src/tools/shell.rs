@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 
 use super::Tool;
@@ -57,6 +57,30 @@ impl ShellTool {
             max_capture_bytes,
         }
     }
+
+    fn parse_timeout_ms(args: &Value, default: Duration) -> Result<Duration> {
+        let Some(raw) = args.get("timeout_ms") else {
+            return Ok(default);
+        };
+
+        if let Some(ms) = raw.as_u64() {
+            return Ok(Duration::from_millis(ms));
+        }
+
+        if let Some(ms) = raw.as_i64() {
+            return Ok(Duration::from_millis(ms.max(0) as u64));
+        }
+
+        if raw.is_f64() || raw.is_string() {
+            return Err(anyhow!("Error: timeout_ms must be an integer"));
+        }
+
+        if raw.is_null() {
+            return Ok(default);
+        }
+
+        Err(anyhow!("Error: timeout_ms must be an integer"))
+    }
 }
 
 impl Tool for ShellTool {
@@ -75,6 +99,11 @@ impl Tool for ShellTool {
                 "command": {
                     "type": "string",
                     "description": "The shell command to execute (passed to sh -c)"
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional timeout in milliseconds (must be >= 1). Defaults to tool timeout if omitted."
                 }
             },
             "required": ["command"],
@@ -87,6 +116,14 @@ impl Tool for ShellTool {
 
         if command.is_empty() {
             return Ok("Error: empty command".into());
+        }
+
+        let timeout = match Self::parse_timeout_ms(&args, self.timeout) {
+            Ok(timeout) => timeout,
+            Err(error) => return Ok(error.to_string()),
+        };
+        if timeout.as_nanos() == 0 {
+            return Ok("Error: timeout_ms must be >= 1".to_string());
         }
 
         let start = Instant::now();
@@ -148,7 +185,7 @@ impl Tool for ShellTool {
                         break;
                     }
 
-                    if start.elapsed() >= self.timeout {
+                    if start.elapsed() >= timeout {
                         timed_out = true;
                         let termination_outcome = terminate_shell_process(
                             &mut child,
@@ -239,7 +276,7 @@ impl Tool for ShellTool {
         if timed_out {
             output_text = format!(
                 "Command timed out after {:.1}s and was terminated.\n\n{output_text}",
-                self.timeout.as_secs_f64()
+                timeout.as_secs_f64()
             );
         } else if terminated_for_output_limit {
             output_text = format!(
@@ -807,6 +844,40 @@ mod tests {
             .execute(serde_json::json!({"command": "true"}))
             .unwrap();
         assert!(result.contains("Duration:"));
+    }
+
+    #[test]
+    fn shell_timeout_ms_overrides_default_timeout() {
+        let tool = ShellTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "sleep 1; echo should_not_print",
+                "timeout_ms": 50,
+            }))
+            .unwrap();
+
+        assert!(result.contains("Command timed out after"));
+        assert!(!result.contains("should_not_print"));
+    }
+
+    #[test]
+    fn shell_invalid_timeout_is_domain_error() {
+        let tool = ShellTool::new();
+
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hi", "timeout_ms": "bad"}))
+            .unwrap();
+        assert!(result.contains("Error: timeout_ms must be an integer"));
+
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hi", "timeout_ms": 0}))
+            .unwrap();
+        assert!(result.contains("Error: timeout_ms must be >= 1"));
+
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hi", "timeout_ms": -1}))
+            .unwrap();
+        assert!(result.contains("Error: timeout_ms must be >= 1"));
     }
 
     #[test]
