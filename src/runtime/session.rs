@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter};
-use crate::provider::{Provider, SendContext, TokenUsage, TurnResult, merge_token_usage};
+use crate::provider::{Provider, SendContext, TokenUsage, ToolCall, TurnResult, merge_token_usage};
 use crate::store::{NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::ToolRegistry;
@@ -45,11 +45,13 @@ pub enum RuntimeEvent {
 
 type DeltaHook = Arc<dyn Fn(&str) + Send + Sync>;
 type EventHook = Arc<dyn Fn(RuntimeEvent) + Send + Sync>;
+type ToolApprovalHook = Arc<dyn Fn(&ToolCall) -> bool + Send + Sync>;
 
 #[derive(Default, Clone)]
 pub struct RuntimeHooks {
     pub on_output_delta: Option<DeltaHook>,
     pub on_event: Option<EventHook>,
+    pub on_tool_approval: Option<ToolApprovalHook>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,23 +581,35 @@ impl<'a> SessionRuntime<'a> {
                             Ok(())
                         })?;
 
-                        let (output, success) = match self.registry.get(&call.name) {
-                            Some(tool) => {
-                                if self.abort_signal.load(Ordering::Relaxed) {
-                                    return self.finish_aborted_submit(
-                                        &turn_id,
-                                        &message_id,
-                                        turn_number,
-                                    );
+                        let approved = match &self.hooks.on_tool_approval {
+                            Some(approve) => approve(call),
+                            None => true,
+                        };
+
+                        let (output, success) = if !approved {
+                            (
+                                                                "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.".to_string(),
+                                false,
+                            )
+                        } else {
+                            match self.registry.get(&call.name) {
+                                Some(tool) => {
+                                    if self.abort_signal.load(Ordering::Relaxed) {
+                                        return self.finish_aborted_submit(
+                                            &turn_id,
+                                            &message_id,
+                                            turn_number,
+                                        );
+                                    }
+                                    let args: serde_json::Value =
+                                        serde_json::from_str(&call.arguments).unwrap_or_default();
+                                    match tool.execute(args) {
+                                        Ok(result) => (result, true),
+                                        Err(e) => (format!("Tool error: {e:#}"), false),
+                                    }
                                 }
-                                let args: serde_json::Value =
-                                    serde_json::from_str(&call.arguments).unwrap_or_default();
-                                match tool.execute(args) {
-                                    Ok(result) => (result, true),
-                                    Err(e) => (format!("Tool error: {e:#}"), false),
-                                }
+                                None => (format!("Error: unknown tool '{}'", call.name), false),
                             }
-                            None => (format!("Error: unknown tool '{}'", call.name), false),
                         };
 
                         let output_preview =
