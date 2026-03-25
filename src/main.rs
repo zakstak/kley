@@ -347,8 +347,7 @@ mod tests {
     #[test]
     fn autonomous_mode_accepts_prompt() {
         let cli =
-            Cli::try_parse_from(["kley", "chat", "--autonomous", "--prompt", "tinker"])
-                .unwrap();
+            Cli::try_parse_from(["kley", "chat", "--autonomous", "--prompt", "tinker"]).unwrap();
         let Command::Chat {
             autonomous, prompt, ..
         } = cli.command
@@ -393,8 +392,7 @@ mod tests {
     #[test]
     fn tool_approval_conflicts_with_yolo() {
         let err =
-            Cli::try_parse_from(["kley", "chat", "--tool-approval", "auto", "--yolo"])
-                .unwrap_err();
+            Cli::try_parse_from(["kley", "chat", "--tool-approval", "auto", "--yolo"]).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ArgumentConflict));
     }
 
