@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 MANIFEST_PATH="$SCRIPT_DIR/Cargo.toml"
 
 check_repo_path_ownership() {
@@ -16,7 +16,7 @@ check_repo_path_ownership() {
 
   if [ ! -w "$path" ]; then
     echo "error: preflight requires writable repo path: $path" >&2
-    echo "hint: rerun with ./docker-session.sh self-improve.sh so docker-entrypoint.sh can repair mount ownership, or restore the path to the workspace owner uid:gid $expected_uid:$expected_gid on the host" >&2
+    echo "hint: rerun with ./docker-session.sh so docker-entrypoint.sh can repair mount ownership, or restore the path to the workspace owner uid:gid $expected_uid:$expected_gid on the host" >&2
     return 1
   fi
 
@@ -24,7 +24,7 @@ check_repo_path_ownership() {
   mismatch=$(find "$path" \( ! -uid "$expected_uid" -o ! -gid "$expected_gid" \) -print -quit 2>/dev/null || true)
   if [ -n "$mismatch" ]; then
     echo "error: preflight requires repo ownership repair: $mismatch" >&2
-    echo "hint: rerun with ./docker-session.sh self-improve.sh so docker-entrypoint.sh can repair mount ownership, or restore the path to the workspace owner uid:gid $expected_uid:$expected_gid on the host" >&2
+    echo "hint: rerun with ./docker-session.sh so docker-entrypoint.sh can repair mount ownership, or restore the path to the workspace owner uid:gid $expected_uid:$expected_gid on the host" >&2
     return 1
   fi
 }

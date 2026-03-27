@@ -15,9 +15,6 @@
 *.swo
 *~
 
-# Self-improvement logs
-.self-improve-logs/
-
 # OS
 .DS_Store
 Thumbs.db

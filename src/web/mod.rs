@@ -2,7 +2,6 @@ pub mod config;
 pub mod mock;
 pub mod protocol;
 pub mod router;
-pub mod self_improve;
 pub mod state;
 pub mod ui;
 pub mod ws;

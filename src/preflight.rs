@@ -246,9 +246,9 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
     report.blank_line();
 
     if report.fail > 0 {
-        report.push_line("⚠ Fix the failing checks above before running self-improve.sh");
+        report.push_line("⚠ Fix the failing checks above before continuing.");
     } else {
-        report.push_line("✓ All checks passed — ready to self-improve!");
+        report.push_line("✓ All checks passed.");
     }
 
     report
@@ -320,13 +320,48 @@ fn find_repo_manifest(path: &Path) -> Option<PathBuf> {
 
     start.ancestors().find_map(|ancestor| {
         let manifest_path = ancestor.join("Cargo.toml");
-        let self_improve_path = ancestor.join("self-improve.sh");
-        if manifest_path.is_file() && self_improve_path.is_file() {
+        if is_kley_repo_manifest(&manifest_path) {
             Some(manifest_path)
         } else {
             None
         }
     })
+}
+
+fn is_kley_repo_manifest(manifest_path: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(manifest_path) else {
+        return false;
+    };
+
+    manifest_declares_kley_package(&contents)
+}
+
+fn manifest_declares_kley_package(contents: &str) -> bool {
+    let mut in_package = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+
+        if !in_package || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+
+        if key.trim() == "name" {
+            let value = value.trim();
+            return value == "\"kley\"" || value == "'kley'";
+        }
+    }
+
+    false
 }
 
 fn cargo_launcher_help_command(manifest_path: &Path) -> CommandSpec {
@@ -576,7 +611,6 @@ mod tests {
         let work_dir = repo_root.join("nested/worktree");
         fs::create_dir_all(&work_dir).unwrap();
         fs::write(repo_root.join("Cargo.toml"), "[package]\nname = 'kley'\n").unwrap();
-        fs::write(repo_root.join("self-improve.sh"), "#!/usr/bin/env bash\n").unwrap();
 
         let env = RuntimeEnv {
             in_docker: false,
@@ -599,7 +633,6 @@ mod tests {
         let exe_dir = repo_root.join("target/debug");
         fs::create_dir_all(&exe_dir).unwrap();
         fs::write(repo_root.join("Cargo.toml"), "[package]\nname = 'kley'\n").unwrap();
-        fs::write(repo_root.join("self-improve.sh"), "#!/usr/bin/env bash\n").unwrap();
 
         let env = RuntimeEnv {
             in_docker: false,
@@ -631,6 +664,27 @@ mod tests {
     }
 
     #[test]
+    fn launcher_falls_back_to_path_binary_for_unrelated_rust_repo() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path();
+        let work_dir = repo_root.join("nested/worktree");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::write(
+            repo_root.join("Cargo.toml"),
+            "[package]\nname = 'not-kley'\n",
+        )
+        .unwrap();
+
+        let env = RuntimeEnv {
+            in_docker: false,
+            current_dir: work_dir,
+            current_exe: PathBuf::from("/usr/local/bin/kley"),
+        };
+
+        assert_eq!(resolve_launcher(&env), KleyLauncher::PathBinary);
+    }
+
+    #[test]
     fn report_rendering_includes_summary_and_failure_guidance() {
         let temp = tempdir().unwrap();
         let repo_root = temp.path();
@@ -639,7 +693,6 @@ mod tests {
 
         fs::create_dir_all(&work_dir).unwrap();
         fs::write(&manifest_path, "[package]\nname = 'kley'\n").unwrap();
-        fs::write(repo_root.join("self-improve.sh"), "#!/usr/bin/env bash\n").unwrap();
 
         let env = RuntimeEnv {
             in_docker: false,
@@ -762,6 +815,6 @@ mod tests {
         assert!(text.contains("  ✗ kley binary works"));
         assert!(text.contains("  ⚠ cmake is installed (optional on host)"));
         assert!(text.contains("  Passed: 31  Failed: 2  Warnings: 1"));
-        assert!(text.contains("⚠ Fix the failing checks above before running self-improve.sh"));
+        assert!(text.contains("⚠ Fix the failing checks above before continuing."));
     }
 }

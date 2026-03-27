@@ -27,26 +27,6 @@ pub enum WebCommand {
         session_id: String,
         turn_id: String,
     },
-    #[serde(rename = "self_improve.get")]
-    SelfImproveGet { request_id: String },
-    #[serde(rename = "self_improve.start")]
-    SelfImproveStart {
-        request_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_cycles: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        turns_per_cycle: Option<u32>,
-    },
-    #[serde(rename = "self_improve.stop")]
-    SelfImproveStop { request_id: String },
-    #[serde(rename = "self_improve.restart")]
-    SelfImproveRestart {
-        request_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_cycles: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        turns_per_cycle: Option<u32>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,41 +58,6 @@ pub struct StateSnapshotData {
     pub transcript: Vec<TranscriptEntry>,
     pub active_turn: Option<ActiveTurnSnapshot>,
     pub context_usage: ContextUsage,
-    pub self_improve: SelfImproveSnapshotData,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SelfImproveSnapshotData {
-    pub available: bool,
-    pub active_run: Option<SelfImproveActiveRun>,
-    pub history: Vec<SelfImproveRunRecord>,
-    pub recent_logs: Vec<String>,
-    pub retrospectives: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SelfImproveActiveRun {
-    pub run_id: String,
-    pub pid: u32,
-    pub started_at: String,
-    pub max_cycles: u32,
-    pub turns_per_cycle: u32,
-    pub stop_requested: bool,
-    pub latest_status: String,
-    pub latest_detail: String,
-    pub log_tail: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SelfImproveRunRecord {
-    pub run_id: String,
-    pub started_at: String,
-    pub ended_at: Option<String>,
-    pub outcome: String,
-    pub exit_code: Option<i32>,
-    pub max_cycles: u32,
-    pub turns_per_cycle: u32,
-    pub stop_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,27 +199,6 @@ pub enum UiEvent {
         session_id: String,
         provider: String,
     },
-    #[serde(rename = "self_improve.snapshot")]
-    SelfImproveSnapshot {
-        event_id: String,
-        ts: String,
-        data: SelfImproveSnapshotData,
-    },
-    #[serde(rename = "self_improve.log")]
-    SelfImproveLog {
-        event_id: String,
-        ts: String,
-        run_id: String,
-        line: String,
-    },
-    #[serde(rename = "self_improve.status")]
-    SelfImproveStatus {
-        event_id: String,
-        ts: String,
-        run_id: String,
-        status: String,
-        detail: String,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -307,11 +231,7 @@ impl WebCommand {
             | WebCommand::SessionsList { request_id }
             | WebCommand::SessionLoad { request_id, .. }
             | WebCommand::PromptSubmit { request_id, .. }
-            | WebCommand::TurnAbort { request_id, .. }
-            | WebCommand::SelfImproveGet { request_id }
-            | WebCommand::SelfImproveStart { request_id, .. }
-            | WebCommand::SelfImproveStop { request_id }
-            | WebCommand::SelfImproveRestart { request_id, .. } => request_id,
+            | WebCommand::TurnAbort { request_id, .. } => request_id,
         }
     }
 }
