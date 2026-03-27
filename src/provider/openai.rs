@@ -108,6 +108,96 @@ struct OutputItem {
     name: Option<String>,
 }
 
+#[derive(Default)]
+struct OpenAiStreamState {
+    full_response: String,
+    tool_calls: Vec<ToolCall>,
+    current_call_args: String,
+    current_call_id: String,
+    current_call_name: String,
+}
+
+impl OpenAiStreamState {
+    fn into_turn_result(self) -> TurnResult {
+        if !self.tool_calls.is_empty() {
+            TurnResult::ToolCalls(self.tool_calls)
+        } else {
+            TurnResult::Text(self.full_response)
+        }
+    }
+}
+
+fn apply_openai_response_event(
+    event_type: &str,
+    payload: &str,
+    event: Option<ResponseEvent>,
+    state: &mut OpenAiStreamState,
+    output_hook: Option<&(dyn Fn(&str) + Send + Sync)>,
+    token_usage: &mut Option<TokenUsage>,
+    transport_label: &str,
+) -> Result<bool> {
+    match event_type {
+        "response.output_text.delta" => {
+            if let Some(delta) = event.and_then(|event| event.delta) {
+                if let Some(hook) = output_hook {
+                    hook(&delta);
+                }
+                state.full_response.push_str(&delta);
+            }
+        }
+        "response.output_item.added" => {
+            if let Some(item) = event.and_then(|event| event.item)
+                && item.r#type.as_deref() == Some("function_call")
+            {
+                state.current_call_id = item.call_id.unwrap_or_default();
+                state.current_call_name = item.name.unwrap_or_default();
+                state.current_call_args.clear();
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(delta) = event.and_then(|event| event.delta) {
+                state.current_call_args.push_str(&delta);
+            }
+        }
+        "response.function_call_arguments.done" => {
+            if let Some(event) = event {
+                state.tool_calls.push(ToolCall {
+                    call_id: event
+                        .call_id
+                        .unwrap_or_else(|| state.current_call_id.clone()),
+                    name: event
+                        .name
+                        .unwrap_or_else(|| state.current_call_name.clone()),
+                    arguments: event
+                        .arguments
+                        .unwrap_or_else(|| state.current_call_args.clone()),
+                });
+                state.current_call_args.clear();
+                state.current_call_id.clear();
+                state.current_call_name.clear();
+            }
+        }
+        "response.completed" => {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                *token_usage = parse_token_usage(&value);
+            }
+            return Ok(true);
+        }
+        "error" => {
+            let err_value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+            let err_msg = err_value
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("OpenAI {transport_label} error: {err_msg}");
+        }
+        _ => {}
+    }
+
+    Ok(false)
+}
+
 // ── WebSocket transport ─────────────────────────────────────────────────────
 
 async fn send_ws(
@@ -184,11 +274,7 @@ async fn send_ws(
         }
     }
 
-    let mut full_response = String::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut current_call_args = String::new();
-    let mut current_call_id = String::new();
-    let mut current_call_name = String::new();
+    let mut state = OpenAiStreamState::default();
 
     loop {
         let Some(msg) = (tokio::select! {
@@ -211,57 +297,18 @@ async fn send_ws(
                     Ok(e) => e,
                     Err(_) => continue,
                 };
+                let event_type = event.r#type.clone();
 
-                match event.r#type.as_str() {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = event.delta {
-                            if let Some(hook) = ctx.output_hook {
-                                hook(&delta);
-                            }
-                            full_response.push_str(&delta);
-                        }
-                    }
-                    "response.output_item.added" => {
-                        if let Some(item) = &event.item
-                            && item.r#type.as_deref() == Some("function_call")
-                        {
-                            current_call_id = item.call_id.clone().unwrap_or_default();
-                            current_call_name = item.name.clone().unwrap_or_default();
-                            current_call_args.clear();
-                        }
-                    }
-                    "response.function_call_arguments.delta" => {
-                        if let Some(delta) = event.delta {
-                            current_call_args.push_str(&delta);
-                        }
-                    }
-                    "response.function_call_arguments.done" => {
-                        tool_calls.push(ToolCall {
-                            call_id: event.call_id.unwrap_or_else(|| current_call_id.clone()),
-                            name: event.name.unwrap_or_else(|| current_call_name.clone()),
-                            arguments: event.arguments.unwrap_or_else(|| current_call_args.clone()),
-                        });
-                        current_call_args.clear();
-                        current_call_id.clear();
-                        current_call_name.clear();
-                    }
-                    "response.completed" => {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                            *token_usage = parse_token_usage(&value);
-                        }
-                        break;
-                    }
-                    "error" => {
-                        let err_value: serde_json::Value =
-                            serde_json::from_str(&text).unwrap_or_default();
-                        let err_msg = err_value
-                            .get("error")
-                            .and_then(|e| e.get("message"))
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("unknown error");
-                        anyhow::bail!("OpenAI WebSocket error: {err_msg}");
-                    }
-                    _ => {}
+                if apply_openai_response_event(
+                    &event_type,
+                    &text,
+                    Some(event),
+                    &mut state,
+                    ctx.output_hook,
+                    token_usage,
+                    "WebSocket",
+                )? {
+                    break;
                 }
             }
             tungstenite::Message::Close(_) => break,
@@ -271,11 +318,7 @@ async fn send_ws(
 
     let _ = ws.close(None).await;
 
-    if !tool_calls.is_empty() {
-        Ok(TurnResult::ToolCalls(tool_calls))
-    } else {
-        Ok(TurnResult::Text(full_response))
-    }
+    Ok(state.into_turn_result())
 }
 
 // ── SSE transport ───────────────────────────────────────────────────────────
@@ -325,11 +368,7 @@ async fn send_sse(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut full_response = String::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut current_call_args = String::new();
-    let mut current_call_id = String::new();
-    let mut current_call_name = String::new();
+    let mut state = OpenAiStreamState::default();
     let mut buffer = String::new();
 
     loop {
@@ -350,16 +389,7 @@ async fn send_sse(
             let block = buffer[..block_end].to_string();
             buffer = buffer[block_end + 2..].to_string();
 
-            if process_sse_block_with_tools(
-                &block,
-                &mut full_response,
-                &mut tool_calls,
-                &mut current_call_args,
-                &mut current_call_id,
-                &mut current_call_name,
-                ctx.output_hook,
-                token_usage,
-            )? {
+            if process_sse_block_with_tools(&block, &mut state, ctx.output_hook, token_usage)? {
                 done = true;
                 break;
             }
@@ -370,23 +400,14 @@ async fn send_sse(
         }
     }
 
-    if !tool_calls.is_empty() {
-        Ok(TurnResult::ToolCalls(tool_calls))
-    } else {
-        Ok(TurnResult::Text(full_response))
-    }
+    Ok(state.into_turn_result())
 }
 
 // ── SSE block parsing ───────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 fn process_sse_block_with_tools(
     block: &str,
-    full_response: &mut String,
-    tool_calls: &mut Vec<ToolCall>,
-    current_call_args: &mut String,
-    current_call_id: &mut String,
-    current_call_name: &mut String,
+    state: &mut OpenAiStreamState,
     output_hook: Option<&(dyn Fn(&str) + Send + Sync)>,
     token_usage: &mut Option<TokenUsage>,
 ) -> Result<bool> {
@@ -404,82 +425,74 @@ fn process_sse_block_with_tools(
         return Ok(false);
     }
 
-    match event_type.as_str() {
-        "response.output_text.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
-                && let Some(delta) = event.delta
-            {
-                if let Some(hook) = output_hook {
-                    hook(&delta);
-                }
-                full_response.push_str(&delta);
-            }
-        }
-        "response.output_item.added" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
-                && let Some(item) = &event.item
-                && item.r#type.as_deref() == Some("function_call")
-            {
-                *current_call_id = item.call_id.clone().unwrap_or_default();
-                *current_call_name = item.name.clone().unwrap_or_default();
-                current_call_args.clear();
-            }
-        }
-        "response.function_call_arguments.delta" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data)
-                && let Some(delta) = event.delta
-            {
-                current_call_args.push_str(&delta);
-            }
-        }
-        "response.function_call_arguments.done" => {
-            if let Ok(event) = serde_json::from_str::<ResponseEvent>(&data) {
-                tool_calls.push(ToolCall {
-                    call_id: event.call_id.unwrap_or_else(|| current_call_id.clone()),
-                    name: event.name.unwrap_or_else(|| current_call_name.clone()),
-                    arguments: event.arguments.unwrap_or_else(|| current_call_args.clone()),
-                });
-                current_call_args.clear();
-                current_call_id.clear();
-                current_call_name.clear();
-            }
-        }
-        "response.completed" => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-                *token_usage = parse_token_usage(&value);
-            }
-            return Ok(true);
-        }
-        "error" => {
-            let err_value: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
-            let err_msg = err_value
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            anyhow::bail!("OpenAI SSE error: {err_msg}");
-        }
-        _ => {}
-    }
-
-    Ok(false)
+    let event = serde_json::from_str::<ResponseEvent>(&data).ok();
+    apply_openai_response_event(
+        &event_type,
+        &data,
+        event,
+        state,
+        output_hook,
+        token_usage,
+        "SSE",
+    )
 }
 
 /// Public SSE block parser used by tests and other modules.
 pub fn process_openai_sse_block(block: &str, full_response: &mut String) -> Result<bool> {
-    let mut dummy_calls = Vec::new();
-    let mut dummy_args = String::new();
-    let mut dummy_id = String::new();
-    let mut dummy_name = String::new();
+    let mut state = OpenAiStreamState {
+        full_response: full_response.clone(),
+        ..OpenAiStreamState::default()
+    };
     let mut dummy_usage = None;
-    process_sse_block_with_tools(
-        block,
-        full_response,
-        &mut dummy_calls,
-        &mut dummy_args,
-        &mut dummy_id,
-        &mut dummy_name,
-        None,
-        &mut dummy_usage,
-    )
+    let done = process_sse_block_with_tools(block, &mut state, None, &mut dummy_usage)?;
+    *full_response = state.full_response;
+    Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_tool_call_events_assemble_tool_call() {
+        let mut state = OpenAiStreamState::default();
+        let mut token_usage = None;
+
+        let added = r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call-1","name":"shell"}}"#;
+        assert!(!process_sse_block_with_tools(added, &mut state, None, &mut token_usage).unwrap());
+
+        let delta = r#"event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"cmd\":\"ls\"}"}"#;
+        assert!(!process_sse_block_with_tools(delta, &mut state, None, &mut token_usage).unwrap());
+
+        let done = r#"event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done"}"#;
+        assert!(!process_sse_block_with_tools(done, &mut state, None, &mut token_usage).unwrap());
+
+        match state.into_turn_result() {
+            TurnResult::ToolCalls(tool_calls) => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].call_id, "call-1");
+                assert_eq!(tool_calls[0].name, "shell");
+                assert_eq!(tool_calls[0].arguments, r#"{"cmd":"ls"}"#);
+            }
+            TurnResult::Text(text) => panic!("expected tool calls, got text: {text}"),
+            TurnResult::Aborted => panic!("unexpected abort result"),
+        }
+    }
+
+    #[test]
+    fn sse_malformed_non_error_event_is_ignored() {
+        let mut state = OpenAiStreamState::default();
+        let mut token_usage = None;
+
+        let block = "event: response.output_text.delta\ndata: {not valid json";
+        let done = process_sse_block_with_tools(block, &mut state, None, &mut token_usage).unwrap();
+
+        assert!(!done);
+        assert!(state.full_response.is_empty());
+        assert!(state.tool_calls.is_empty());
+        assert!(token_usage.is_none());
+    }
 }
