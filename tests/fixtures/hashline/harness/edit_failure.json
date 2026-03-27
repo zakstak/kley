@@ -1,0 +1,43 @@
+{
+  "kind": "hashline_harness_scenario",
+  "name": "edit_failure",
+  "description": "Provider selects the right tool but the edit request itself fails.",
+  "workspace": {
+    "files": [
+      {
+        "path": "src/sample.txt",
+        "content": "alpha\nbeta\ngamma\n"
+      }
+    ]
+  },
+  "engines": {
+    "patch": {
+      "prompt": "Use the patch tool exactly once with a missing target in `src/sample.txt`.",
+      "offline_provider_result": {
+        "type": "tool_call",
+        "arguments": {
+          "path": "src/sample.txt",
+          "target": "missing",
+          "replacement": "BETA"
+        }
+      }
+    },
+    "hashline_edit": {
+      "prompt": "Use the hashline_edit tool exactly once with a stale anchor in `src/sample.txt`.",
+      "offline_provider_result": {
+        "type": "tool_call",
+        "arguments": {
+          "path": "src/sample.txt",
+          "edits": [
+            {
+              "kind": "replace",
+              "start": "2#deadbeef",
+              "end": "2#deadbeef",
+              "replacement": "BETA\n"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

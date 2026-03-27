@@ -1,0 +1,29 @@
+{
+  "kind": "hashline_harness_scenario",
+  "name": "provider_failure",
+  "description": "Provider never returns the selected tool call.",
+  "workspace": {
+    "files": [
+      {
+        "path": "src/sample.txt",
+        "content": "alpha\nbeta\ngamma\n"
+      }
+    ]
+  },
+  "engines": {
+    "patch": {
+      "prompt": "Do not call any tools.",
+      "offline_provider_result": {
+        "type": "text",
+        "content": "provider returned plain text instead of a tool call"
+      }
+    },
+    "hashline_edit": {
+      "prompt": "Do not call any tools.",
+      "offline_provider_result": {
+        "type": "text",
+        "content": "provider returned plain text instead of a tool call"
+      }
+    }
+  }
+}
