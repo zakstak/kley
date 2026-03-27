@@ -446,6 +446,46 @@ fn hashline_engine_applies_bottom_up_against_original_snapshot() {
 }
 
 #[test]
+fn hashline_engine_applies_mixed_same_anchor_operations_in_deterministic_order() {
+    let engine = HashlineEditEngine;
+    let original = "alpha\nbeta\ngamma\n";
+    let expected = "alpha\nbefore\nBETA!\nafter\ngamma\n";
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(original.as_bytes()).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let anchor = anchor_for_line(original, 2);
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![
+            EditOperation {
+                kind: "replace".to_string(),
+                anchor: anchor.clone(),
+                end_anchor: Some(anchor.clone()),
+                lines: vec!["BETA!\n".to_string()],
+            },
+            EditOperation {
+                kind: "insert_before".to_string(),
+                anchor: anchor.clone(),
+                end_anchor: None,
+                lines: vec!["before\n".to_string()],
+            },
+            EditOperation {
+                kind: "insert_after".to_string(),
+                anchor: anchor.clone(),
+                end_anchor: None,
+                lines: vec!["after\n".to_string()],
+            },
+        ],
+    });
+
+    assert!(matches!(outcome, EditOutcome::Applied { .. }));
+    let updated = fs::read_to_string(path).unwrap();
+    assert_eq!(updated, expected);
+}
+
+#[test]
 fn hashline_engine_preserves_crlf_and_bom() {
     let engine = HashlineEditEngine;
     let original_bytes = b"\xEF\xBB\xBFalpha\r\nbeta\r\ngamma\r\n".to_vec();

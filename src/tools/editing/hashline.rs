@@ -86,6 +86,7 @@ impl EditEngine for HashlineEditEngine {
             right
                 .start_line
                 .cmp(&left.start_line)
+                .then_with(|| right.kind.precedence().cmp(&left.kind.precedence()))
                 .then_with(|| right.original_index.cmp(&left.original_index))
         });
 
@@ -366,6 +367,15 @@ impl HashlineOperationKind {
 
     const fn requires_replacement(self) -> bool {
         matches!(self, Self::Replace | Self::InsertBefore | Self::InsertAfter)
+    }
+
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::InsertAfter => 3,
+            Self::Replace => 2,
+            Self::Delete => 1,
+            Self::InsertBefore => 0,
+        }
     }
 }
 

@@ -5,12 +5,28 @@ use std::path::Path;
 use uuid::Uuid;
 
 pub fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path
+    let target_path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let link_target = fs::read_link(path)?;
+            if link_target.is_absolute() {
+                link_target
+            } else {
+                let symlink_parent = path
+                    .parent()
+                    .filter(|value| !value.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                symlink_parent.join(link_target)
+            }
+        }
+        _ => path.to_path_buf(),
+    };
+
+    let parent = target_path
         .parent()
         .filter(|value| !value.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
-    let file_name = path
+    let file_name = target_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("target");
@@ -23,13 +39,13 @@ pub fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     temp_file.write_all(bytes)?;
     temp_file.sync_all()?;
 
-    if let Ok(metadata) = fs::metadata(path) {
+    if let Ok(metadata) = fs::metadata(&target_path) {
         fs::set_permissions(&temp_path, metadata.permissions())?;
     }
 
     drop(temp_file);
 
-    if let Err(err) = fs::rename(&temp_path, path) {
+    if let Err(err) = fs::rename(&temp_path, &target_path) {
         let _ = fs::remove_file(&temp_path);
         return Err(err);
     }
@@ -42,6 +58,8 @@ mod tests {
     use super::atomic_replace;
     use std::fs;
     use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     #[cfg(unix)]
     #[test]
@@ -61,5 +79,24 @@ mod tests {
         let updated_mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(updated_mode, original_mode);
         assert_eq!(fs::read_to_string(&target).unwrap(), "echo new\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_updates_symlink_target_without_replacing_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.txt");
+        let mut file = fs::File::create(&target).unwrap();
+        file.write_all(b"original").unwrap();
+
+        let link_path = temp.path().join("link.txt");
+        symlink(&target, &link_path).unwrap();
+
+        atomic_replace(&link_path, b"updated").unwrap();
+
+        let metadata = fs::symlink_metadata(&link_path).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+        assert_eq!(fs::read_to_string(&link_path).unwrap(), "updated");
     }
 }
