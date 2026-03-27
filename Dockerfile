@@ -112,8 +112,8 @@ COPY --from=builder /tmp/kley-image-source.sha256 /usr/local/bin/kley-image-sour
 
 # Copy scripts and agent config
 COPY .agents /app/.agents
-COPY preflight.sh self-improve.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/preflight.sh /usr/local/bin/self-improve.sh
+COPY preflight.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/preflight.sh
 
 ENTRYPOINT ["kley"]
 CMD ["chat"]

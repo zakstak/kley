@@ -71,7 +71,7 @@ warn_if_image_is_stale() {
   local image_stamp
   local workspace_stamp
 
-  image_stamp="$(tr -d '[:space:]' < "$IMAGE_SOURCE_STAMP" 2>/dev/null || true)"
+  image_stamp="$(tr -d '[:space:]' <"$IMAGE_SOURCE_STAMP" 2>/dev/null || true)"
   if [ -z "$image_stamp" ]; then
     return 0
   fi
@@ -85,7 +85,7 @@ warn_if_image_is_stale() {
   fi
 
   printf 'warning: workspace source differs from the baked Docker image; rebuild before the next session to use the latest kley binary\n' >&2
-  printf 'hint: start the next session with `./docker-session.sh` to rebuild first\n' >&2
+  printf "hint: start the next session with \`./docker-session.sh\` to rebuild first\n" >&2
 }
 
 fix_git_mount_ownership() {
@@ -111,8 +111,7 @@ fix_git_mount_ownership() {
     "$WORKSPACE_DIR/.git/refs" \
     "$WORKSPACE_DIR/.git/worktrees" \
     "$WORKSPACE_DIR/.sisyphus/notepads" \
-    "$WORKSPACE_DIR/.git/packed-refs"
-  do
+    "$WORKSPACE_DIR/.git/packed-refs"; do
     if [ -e "$path" ]; then
       git_paths+=("$path")
     fi
@@ -133,18 +132,6 @@ if [ "$#" -eq 0 ]; then
 fi
 
 setup_github_https_credentials
-
-if [ "$1" = "self-improve.sh" ] || [ "$1" = "./self-improve.sh" ] || [ "$1" = "$WORKSPACE_DIR/self-improve.sh" ]; then
-  shift
-  if bash "$WORKSPACE_DIR/self-improve.sh" "$@"; then
-    status=0
-  else
-    status=$?
-  fi
-
-  fix_git_mount_ownership
-  exit "$status"
-fi
 
 if kley "$@"; then
   status=0

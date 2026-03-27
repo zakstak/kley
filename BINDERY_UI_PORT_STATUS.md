@@ -13,7 +13,6 @@ markup:
 - Live assistant message streaming
 - Prompt submit and turn abort
 - Tool activity cards and inspector event log
-- Self-improve panel injection and websocket flow
 
 ## Not implemented yet (UI-only)
 

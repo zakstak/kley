@@ -16,7 +16,6 @@ pub fn app_with_state(state: WebAppState) -> Router {
         .route("/assets/bindery-icon.svg", get(ui::bindery_icon))
         .route("/healthz", get(healthz))
         .route("/ws", any(ws::ws_handler))
-        .route("/ws/self-improve", any(ws::ws_self_improve_handler))
         .route("/ws/mock", any(mock::ws_handler))
         .with_state(state)
 }

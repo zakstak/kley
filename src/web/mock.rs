@@ -3,8 +3,8 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::protocol::{
-    ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession, SelfImproveSnapshotData,
-    SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
+    ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary,
+    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -173,26 +173,6 @@ async fn handle_socket(mut socket: WebSocket) {
                     return;
                 }
             }
-            WebCommand::SelfImproveGet { request_id } => {
-                let data = serde_json::to_value(mock_self_improve_snapshot()).unwrap();
-                if send_response(&mut socket, WebResponse::Ok { request_id, data })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            WebCommand::SelfImproveStart { request_id, .. }
-            | WebCommand::SelfImproveStop { request_id }
-            | WebCommand::SelfImproveRestart { request_id, .. } => {
-                let data = serde_json::to_value(mock_self_improve_snapshot()).unwrap();
-                if send_response(&mut socket, WebResponse::Ok { request_id, data })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
         }
     }
 }
@@ -227,17 +207,6 @@ fn snapshot_data() -> StateSnapshotData {
             output_tokens: None,
             total_tokens: None,
         },
-        self_improve: mock_self_improve_snapshot(),
-    }
-}
-
-fn mock_self_improve_snapshot() -> SelfImproveSnapshotData {
-    SelfImproveSnapshotData {
-        available: true,
-        active_run: None,
-        history: Vec::new(),
-        recent_logs: vec!["cycle-1-20260101T000000.log".to_string()],
-        retrospectives: Vec::new(),
     }
 }
 
