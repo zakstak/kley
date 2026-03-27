@@ -3,15 +3,15 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use kley::tools::Tool;
 use kley::tools::editing::hashline::HashlineEditEngine;
 use kley::tools::editing::{
-    EditEngine, EditFailureKind, EditOperation, EditOutcome, EditRequest,
     EDIT_ALLOW_PATCH_FALLBACK, EDIT_APPLY_IS_ATOMIC, EDIT_SINGLE_FILE_ONLY,
-    EDIT_TOOL_SUMMARY_MAX_CHARS,
+    EDIT_TOOL_SUMMARY_MAX_CHARS, EditEngine, EditFailureKind, EditOperation, EditOutcome,
+    EditRequest,
 };
 use kley::tools::hashline_edit::{HashlineEditRequest, HashlineEditTool};
 use kley::tools::patch::PatchEditEngine;
-use kley::tools::Tool;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -410,6 +410,51 @@ fn hashline_validation_rejects_stale_refs_without_fallback() {
         ambiguous.validate_against_snapshot(&original_snapshot),
         Err(EditFailureKind::AmbiguousAnchor)
     );
+}
+
+#[test]
+fn hashline_engine_rejects_inserts_inside_replace_delete_spans() {
+    let engine = HashlineEditEngine;
+    let original = load_hashline_snapshot("original.txt");
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(original.as_bytes()).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let range_start = anchor_for_line(&original, 4);
+    let range_end = anchor_for_line(&original, 5);
+
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![
+            EditOperation {
+                kind: "replace".to_string(),
+                anchor: range_start.clone(),
+                end_anchor: Some(range_end.clone()),
+                lines: vec!["REPLACED\n".to_string()],
+            },
+            EditOperation {
+                kind: "insert_before".to_string(),
+                anchor: range_end.clone(),
+                end_anchor: None,
+                lines: vec!["BEFORE\n".to_string()],
+            },
+            EditOperation {
+                kind: "insert_after".to_string(),
+                anchor: range_end,
+                end_anchor: None,
+                lines: vec!["AFTER\n".to_string()],
+            },
+        ],
+    });
+
+    assert!(matches!(
+        outcome,
+        EditOutcome::Failed {
+            kind: EditFailureKind::InvalidRequest,
+            ..
+        }
+    ));
 }
 
 #[test]

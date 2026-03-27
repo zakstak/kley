@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::editing::hashline::HashlineEditEngine;
-use super::editing::hashline_anchor::{parse_hashline_anchor, HashlineSnapshot};
+use super::editing::hashline_anchor::{HashlineSnapshot, parse_hashline_anchor};
 use super::editing::observability::finalize_outcome;
 use super::editing::{EditEngine, EditFailureKind, EditOperation, EditRequest};
 use super::{Tool, ToolExecutionResult};

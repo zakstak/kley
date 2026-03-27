@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use super::hashline_anchor::{parse_hashline_anchor, HashlineSnapshot};
+use super::hashline_anchor::{HashlineSnapshot, parse_hashline_anchor};
 use super::io::atomic_replace;
 use super::{
     EditEngine, EditFailureKind, EditObservation, EditOperation, EditOutcome, EditRequest,
@@ -171,19 +171,32 @@ fn resolve_operation(
 }
 
 fn validate_overlaps(operations: &[ResolvedOperation]) -> Result<(), EditFailureKind> {
-    let mut ranges = operations
-        .iter()
-        .filter_map(|op| match op.kind {
-            HashlineOperationKind::InsertBefore | HashlineOperationKind::InsertAfter => None,
-            HashlineOperationKind::Replace | HashlineOperationKind::Delete => {
-                Some((op.start_line, op.end_line))
+    let mut ranges = Vec::new();
+    let mut insert_targets = Vec::new();
+
+    for op in operations {
+        match op.kind {
+            HashlineOperationKind::InsertBefore | HashlineOperationKind::InsertAfter => {
+                insert_targets.push(op.start_line);
             }
-        })
-        .collect::<Vec<_>>();
+            HashlineOperationKind::Replace | HashlineOperationKind::Delete => {
+                ranges.push((op.start_line, op.end_line));
+            }
+        }
+    }
 
     ranges.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     for pair in ranges.windows(2) {
         if pair[1].0 <= pair[0].1 {
+            return Err(EditFailureKind::InvalidRequest);
+        }
+    }
+
+    for &target in &insert_targets {
+        if ranges
+            .iter()
+            .any(|&(start, end)| target > start && target <= end)
+        {
             return Err(EditFailureKind::InvalidRequest);
         }
     }

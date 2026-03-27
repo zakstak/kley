@@ -2,7 +2,7 @@ use crate::text::truncate_with_ascii_ellipsis;
 
 use super::artifacts::persist_observation;
 use super::telemetry::persist_metric;
-use super::{EditFailureKind, EditObservation, EditOutcome, EDIT_TOOL_SUMMARY_MAX_CHARS};
+use super::{EDIT_TOOL_SUMMARY_MAX_CHARS, EditFailureKind, EditObservation, EditOutcome};
 
 pub fn finalize_outcome(tool_name: &str, outcome: EditOutcome) -> (String, Vec<EditObservation>) {
     let first_line = outcome.tool_summary();

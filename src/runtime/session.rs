@@ -598,15 +598,11 @@ impl<'a> SessionRuntime<'a> {
                             "name": call.name,
                             "arguments": call.arguments,
                         }));
-                        let mut output_item = serde_json::json!({
+                        let output_item = serde_json::json!({
                             "type": "function_call_output",
                             "call_id": call.call_id,
                             "output": output,
                         });
-                        if let Some(observation) = &edit_observation {
-                            output_item["edit_observation"] =
-                                serialize_edit_observation_best_effort(observation);
-                        }
                         self.history.push(output_item);
 
                         let (context_used_chars, context_max_chars) = context_usage_chars(
@@ -1195,14 +1191,11 @@ pub fn history_items_from_turns(turns: &[Turn]) -> Vec<serde_json::Value> {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&t.content)
                     .to_string();
-                let mut item = serde_json::json!({
+                let item = serde_json::json!({
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": output,
                 });
-                if let Some(observation) = parsed.get("edit_observation") {
-                    item["edit_observation"] = observation.clone();
-                }
                 items.push(item);
             }
             _ => {
@@ -1235,8 +1228,139 @@ pub use crate::provider::zai::process_zai_sse_line;
 mod tests {
     use super::truncate;
     use super::*;
+    use crate::auth::ResolvedAuth;
+    use crate::compact::CompactConfig;
     use crate::events::event_channel;
-    use crate::store::Session;
+    use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
+    use crate::store::{Session, Store, Turn};
+    use crate::tools::editing::EditObservation;
+    use crate::tools::{Tool, ToolExecutionResult, ToolRegistry};
+    use serde_json::{Value, json};
+
+    struct ObservedTool;
+
+    impl Tool for ObservedTool {
+        fn name(&self) -> &str {
+            "edit_tool"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool that emits an edit observation"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            })
+        }
+
+        fn execute(&self, _args: Value) -> Result<String> {
+            Ok("execute called".to_string())
+        }
+
+        fn execute_with_result(&self, _args: Value) -> Result<ToolExecutionResult> {
+            let observation = EditObservation {
+                engine: "test-engine".to_string(),
+                tool_name: self.name().to_string(),
+                path: "src/lib.rs".to_string(),
+                edit_count: 1,
+                applied_count: 1,
+                stale_reference_count: 0,
+                noop_count: 0,
+                failure_kind: None,
+                duration_ms: 12,
+                artifact_path: Some("/tmp/artifact.json".to_string()),
+                artifact_id: Some("artifact-123".to_string()),
+                model_output_bounded: true,
+            };
+            Ok(ToolExecutionResult {
+                output: "applied edits".to_string(),
+                edit_observations: vec![observation],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn model_history_excludes_edit_metadata() {
+        let store = Store::open_memory().unwrap();
+        let (emitter, receiver) = event_channel();
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ObservedTool));
+
+        let mut runtime = SessionRuntime::new(
+            &store,
+            ResolvedAuth {
+                provider: "test".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: "http://unused".to_string(),
+                account_id: None,
+            },
+            Some("test-model"),
+            None,
+            emitter,
+            CompactConfig::default(),
+            registry,
+            "system".to_string(),
+            RuntimeHooks::default(),
+        )
+        .unwrap();
+
+        let control_block = format!(
+            "{CONTROL_BLOCK_START}{{\"type\":\"tool_call\",\"name\":\"edit_tool\",\"arguments\":{{}}}}{CONTROL_BLOCK_END}"
+        );
+        runtime
+            .submit_prompt(format!("run the edit tool {control_block}"))
+            .await
+            .unwrap();
+
+        let function_call_outputs: Vec<_> = runtime
+            .history
+            .iter()
+            .filter(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+            })
+            .collect();
+        assert!(!function_call_outputs.is_empty());
+        let latest_output = function_call_outputs.last().unwrap();
+        assert!(latest_output.get("edit_observation").is_none());
+        assert!(latest_output.get("artifact_id").is_none());
+        assert!(latest_output.get("artifact_path").is_none());
+
+        let turns = Turn::list_for_session(&store, runtime.session_id()).unwrap();
+        let function_output_turn = turns
+            .iter()
+            .find(|turn| turn.kind == "function_call_output")
+            .expect("function_call_output turn expected");
+        let payload: Value = serde_json::from_str(&function_output_turn.content).unwrap();
+        let observation = payload
+            .get("edit_observation")
+            .and_then(|value| value.as_object())
+            .expect("edit_observation should remain in persisted turn");
+        assert_eq!(
+            observation
+                .get("artifact_id")
+                .and_then(|value| value.as_str()),
+            Some("artifact-123")
+        );
+        assert_eq!(
+            observation
+                .get("artifact_path")
+                .and_then(|value| value.as_str()),
+            Some("/tmp/artifact.json")
+        );
+
+        let tool_event = receiver.drain().into_iter().find_map(|event| match event {
+            AgentEvent::ToolCallCompleted {
+                edit_observation, ..
+            } => edit_observation,
+            _ => None,
+        });
+        assert!(tool_event.is_some());
+    }
 
     #[test]
     fn truncate_preserves_utf8_boundaries() {
