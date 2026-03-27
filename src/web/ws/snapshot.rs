@@ -42,8 +42,6 @@ pub(super) async fn snapshot_data(
             .unwrap_or_else(|| CompactConfig::default().threshold_chars);
         estimate_persisted_context_usage(&turns, compact_threshold)
     };
-    let self_improve = state.self_improve_manager.snapshot().await;
-
     Ok(StateSnapshotData {
         protocol_version: super::super::protocol::PROTOCOL_VERSION,
         session_id: session_id.to_string(),
@@ -52,7 +50,6 @@ pub(super) async fn snapshot_data(
         transcript,
         active_turn,
         context_usage,
-        self_improve,
     })
 }
 
