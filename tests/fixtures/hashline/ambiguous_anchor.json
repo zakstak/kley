@@ -1,0 +1,25 @@
+{
+  "name": "ambiguous_anchor",
+  "request": {
+    "path": "src/tools/patch.rs",
+    "operations": [
+      {
+        "kind": "replace",
+        "anchor": "89#11223344",
+        "end_anchor": "89#11223344",
+        "lines": ["Error: target not found"]
+      }
+    ]
+  },
+  "outcome": {
+    "status": "failed",
+    "kind": "ambiguous_anchor",
+    "summary": "anchor matched multiple candidate lines",
+    "observations": [
+      {
+        "code": "anchor_ambiguous",
+        "message": "2 candidate lines matched the anchor"
+      }
+    ]
+  }
+}

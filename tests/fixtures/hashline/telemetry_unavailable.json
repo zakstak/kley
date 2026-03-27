@@ -1,0 +1,30 @@
+{
+  "name": "telemetry_unavailable",
+  "request": {
+    "path": "src/runtime/session.rs",
+    "operations": [
+      {
+        "kind": "replace",
+        "anchor": "553#a1b2c3d4",
+        "end_anchor": "553#a1b2c3d4",
+        "lines": [
+          "let output_preview = truncate(output.lines().next().unwrap_or(\"(empty)\"), 80);"
+        ]
+      }
+    ]
+  },
+  "outcome": {
+    "status": "failed",
+    "kind": "telemetry_unavailable",
+    "summary": "edit applied but telemetry sink unavailable\nwrite-path metrics were skipped",
+    "observations": [
+      {
+        "code": "telemetry_sink",
+        "message": "metrics backend unavailable",
+        "details": {
+          "retryable": true
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "success",
+  "request": {
+    "path": "src/tools/patch.rs",
+    "operations": [
+      {
+        "kind": "replace",
+        "anchor": "12#abc123",
+        "end_anchor": "12#abc123",
+        "lines": ["pub struct PatchTool;"]
+      }
+    ]
+  },
+  "outcome": {
+    "status": "applied",
+    "summary": "Applied 1 operation to src/tools/patch.rs",
+    "observations": [
+      {
+        "code": "applied",
+        "message": "operation_count=1"
+      }
+    ]
+  }
+}

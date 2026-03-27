@@ -1,0 +1,25 @@
+{
+  "name": "no_op",
+  "request": {
+    "path": "src/tools/mod.rs",
+    "operations": [
+      {
+        "kind": "replace",
+        "anchor": "7#33445566",
+        "end_anchor": "7#33445566",
+        "lines": ["pub mod patch;"]
+      }
+    ]
+  },
+  "outcome": {
+    "status": "failed",
+    "kind": "no_op",
+    "summary": "edit produced no content change",
+    "observations": [
+      {
+        "code": "noop",
+        "message": "replacement equals current content"
+      }
+    ]
+  }
+}

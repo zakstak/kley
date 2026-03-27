@@ -1,0 +1,25 @@
+{
+  "name": "io_error",
+  "request": {
+    "path": "src/tools/editing/mod.rs",
+    "operations": [
+      {
+        "kind": "replace",
+        "anchor": "1#0badc0de",
+        "end_anchor": "1#0badc0de",
+        "lines": ["//! Shared write-path contract (P0 semantics)."]
+      }
+    ]
+  },
+  "outcome": {
+    "status": "failed",
+    "kind": "io_error",
+    "summary": "failed to persist edit to src/tools/editing/mod.rs",
+    "observations": [
+      {
+        "code": "write_failed",
+        "message": "permission denied while writing target file"
+      }
+    ]
+  }
+}
