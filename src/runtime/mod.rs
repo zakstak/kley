@@ -1,5 +1,8 @@
 pub mod manager;
 pub mod session;
+pub(crate) mod settings;
+
+pub(crate) use settings::{SessionSettingsOverrides, canonical_settings_json};
 
 pub use crate::provider::ToolCall;
 pub use manager::{

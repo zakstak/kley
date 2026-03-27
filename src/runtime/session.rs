@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use uuid::Uuid;
 
+use super::{SessionSettingsOverrides, canonical_settings_json};
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter};
@@ -111,6 +112,12 @@ pub struct SessionRuntime<'a> {
     reasoning_effort: Option<String>,
 }
 
+struct InitializedSessionState {
+    session: Session,
+    history: Vec<serde_json::Value>,
+    turn_number: usize,
+}
+
 impl<'a> SessionRuntime<'a> {
     pub fn default_model(provider: &str) -> String {
         match provider {
@@ -176,52 +183,18 @@ impl<'a> SessionRuntime<'a> {
         let model = model_override
             .map(String::from)
             .unwrap_or_else(|| Self::default_model(&resolved.provider));
-
-        let session = match resume_session_id {
-            Some(id) => {
-                let s = Session::get(store, id)?;
-                restore_compact_threshold_from_settings(&mut compact_config, &s);
-                if let Some(hook) = &hooks.on_event {
-                    hook(RuntimeEvent::SessionResumed {
-                        session_id: s.id.clone(),
-                    });
-                }
-                s
-            }
-            None => {
-                let mut s = Session::create(
-                    store,
-                    NewSession {
-                        model: model.clone(),
-                        provider: resolved.provider.clone(),
-                    },
-                )?;
-                let settings_json = serde_json::json!({
-                    "model": model.clone(),
-                    "provider": resolved.provider.clone(),
-                    "compact_threshold": compact_config.threshold_chars,
-                })
-                .to_string();
-                Session::update_settings(store, &s.id, &settings_json)?;
-                s.settings = Some(settings_json);
-                if let Some(hook) = &hooks.on_event {
-                    hook(RuntimeEvent::SessionCreated {
-                        session_id: s.id.clone(),
-                    });
-                }
-                s
-            }
-        };
-
-        let existing_turns = Turn::list_for_session(store, &session.id)?;
-        let history = history_items_from_turns(&existing_turns);
-        if !existing_turns.is_empty()
-            && let Some(hook) = &hooks.on_event
-        {
-            hook(RuntimeEvent::HistoryLoaded {
-                turns: existing_turns.len(),
-            });
-        }
+        let InitializedSessionState {
+            session,
+            history,
+            turn_number,
+        } = initialize_session_state(
+            store,
+            &model,
+            &resolved.provider,
+            resume_session_id,
+            &mut compact_config,
+            &hooks,
+        )?;
 
         let provider = create_provider(&resolved.provider);
         Ok(Self {
@@ -232,7 +205,7 @@ impl<'a> SessionRuntime<'a> {
             model,
             session,
             history,
-            turn_number: existing_turns.len(),
+            turn_number,
             provider,
             registry,
             instructions,
@@ -264,54 +237,19 @@ impl<'a> SessionRuntime<'a> {
         let store_guard = shared_store
             .lock()
             .map_err(|e| anyhow::anyhow!("store mutex poisoned: {e}"))?;
-
-        let session = match resume_session_id {
-            Some(id) => {
-                let s = Session::get(&store_guard, id)?;
-                restore_compact_threshold_from_settings(&mut compact_config, &s);
-                if let Some(hook) = &hooks.on_event {
-                    hook(RuntimeEvent::SessionResumed {
-                        session_id: s.id.clone(),
-                    });
-                }
-                s
-            }
-            None => {
-                let mut s = Session::create(
-                    &store_guard,
-                    NewSession {
-                        model: model.clone(),
-                        provider: resolved.provider.clone(),
-                    },
-                )?;
-                let settings_json = serde_json::json!({
-                    "model": model.clone(),
-                    "provider": resolved.provider.clone(),
-                    "compact_threshold": compact_config.threshold_chars,
-                })
-                .to_string();
-                Session::update_settings(&store_guard, &s.id, &settings_json)?;
-                s.settings = Some(settings_json);
-                if let Some(hook) = &hooks.on_event {
-                    hook(RuntimeEvent::SessionCreated {
-                        session_id: s.id.clone(),
-                    });
-                }
-                s
-            }
-        };
-
-        let existing_turns = Turn::list_for_session(&store_guard, &session.id)?;
+        let InitializedSessionState {
+            session,
+            history,
+            turn_number,
+        } = initialize_session_state(
+            &store_guard,
+            &model,
+            &resolved.provider,
+            resume_session_id,
+            &mut compact_config,
+            &hooks,
+        )?;
         drop(store_guard);
-
-        let history = history_items_from_turns(&existing_turns);
-        if !existing_turns.is_empty()
-            && let Some(hook) = &hooks.on_event
-        {
-            hook(RuntimeEvent::HistoryLoaded {
-                turns: existing_turns.len(),
-            });
-        }
 
         let provider = create_provider(&resolved.provider);
         Ok(Self {
@@ -322,7 +260,7 @@ impl<'a> SessionRuntime<'a> {
             model,
             session,
             history,
-            turn_number: existing_turns.len(),
+            turn_number,
             provider,
             registry,
             instructions,
@@ -854,13 +792,66 @@ impl<'a> SessionRuntime<'a> {
     }
 }
 
-fn restore_compact_threshold_from_settings(compact_config: &mut CompactConfig, session: &Session) {
-    if let Some(settings) = &session.settings
-        && let Ok(json) = serde_json::from_str::<serde_json::Value>(settings)
-        && let Some(threshold) = json.get("compact_threshold").and_then(|v| v.as_u64())
-        && let Ok(threshold_chars) = usize::try_from(threshold)
+fn initialize_session_state(
+    store: &Store,
+    model: &str,
+    provider: &str,
+    resume_session_id: Option<&str>,
+    compact_config: &mut CompactConfig,
+    hooks: &RuntimeHooks,
+) -> Result<InitializedSessionState> {
+    let session = match resume_session_id {
+        Some(id) => {
+            let session = Session::get(store, id)?;
+            restore_compact_threshold_from_settings(compact_config, &session);
+            if let Some(hook) = &hooks.on_event {
+                hook(RuntimeEvent::SessionResumed {
+                    session_id: session.id.clone(),
+                });
+            }
+            session
+        }
+        None => {
+            let mut session = Session::create(
+                store,
+                NewSession {
+                    model: model.to_string(),
+                    provider: provider.to_string(),
+                },
+            )?;
+            let settings_json =
+                canonical_settings_json(model, provider, compact_config.threshold_chars);
+            Session::update_settings(store, &session.id, &settings_json)?;
+            session.settings = Some(settings_json);
+            if let Some(hook) = &hooks.on_event {
+                hook(RuntimeEvent::SessionCreated {
+                    session_id: session.id.clone(),
+                });
+            }
+            session
+        }
+    };
+
+    let existing_turns = Turn::list_for_session(store, &session.id)?;
+    let history = history_items_from_turns(&existing_turns);
+    if !existing_turns.is_empty()
+        && let Some(hook) = &hooks.on_event
     {
-        compact_config.threshold_chars = threshold_chars.max(1);
+        hook(RuntimeEvent::HistoryLoaded {
+            turns: existing_turns.len(),
+        });
+    }
+
+    Ok(InitializedSessionState {
+        session,
+        history,
+        turn_number: existing_turns.len(),
+    })
+}
+
+fn restore_compact_threshold_from_settings(compact_config: &mut CompactConfig, session: &Session) {
+    if let Some(settings) = SessionSettingsOverrides::from_session(session) {
+        settings.apply_compact_threshold(compact_config);
     }
 }
 

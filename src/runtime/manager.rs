@@ -7,6 +7,7 @@ use anyhow::{Context, Result, ensure};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinError;
 
+use super::SessionSettingsOverrides;
 use crate::auth::{CredentialStore, ResolvedAuth};
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, event_channel};
@@ -97,20 +98,9 @@ impl RuntimeWorker {
         let mut model = session.model.clone();
         let mut provider = session.provider.clone();
         let mut compact_config = CompactConfig::default();
-        if let Some(settings) = &session.settings
-            && let Ok(json) = serde_json::from_str::<serde_json::Value>(settings)
-        {
-            if let Some(settings_model) = json.get("model").and_then(|v| v.as_str()) {
-                model = settings_model.to_string();
-            }
-            if let Some(settings_provider) = json.get("provider").and_then(|v| v.as_str()) {
-                provider = settings_provider.to_string();
-            }
-            if let Some(threshold) = json.get("compact_threshold").and_then(|v| v.as_u64())
-                && let Ok(threshold_chars) = usize::try_from(threshold)
-            {
-                compact_config.threshold_chars = threshold_chars.max(1);
-            }
+        if let Some(settings) = SessionSettingsOverrides::from_session(session) {
+            settings.apply_model_provider_overrides(&mut model, &mut provider);
+            settings.apply_compact_threshold(&mut compact_config);
         }
 
         let project_dir = std::env::current_dir().unwrap_or_default();
@@ -710,7 +700,7 @@ fn join_error(err: JoinError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{NewSession, Session};
+    use crate::store::{NewSession, Session, SessionStatus};
     use anyhow::anyhow;
 
     #[test]
@@ -913,6 +903,64 @@ mod tests {
         assert_eq!(
             manager.context_usage_chars(&session.id),
             Some((second_expected, 1000))
+        );
+    }
+
+    #[test]
+    fn runtime_worker_uses_session_settings_overrides() {
+        let session = Session {
+            id: "session-1".to_string(),
+            title: None,
+            status: SessionStatus::Active,
+            model: "stored-model".to_string(),
+            provider: "stored-provider".to_string(),
+            policy: None,
+            settings: Some(
+                serde_json::json!({
+                    "model": "settings-model",
+                    "provider": "settings-provider",
+                    "compact_threshold": 12_345,
+                })
+                .to_string(),
+            ),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let worker = RuntimeWorker::from_session(&session);
+
+        assert_eq!(worker.model, "settings-model");
+        assert_eq!(worker.provider, "settings-provider");
+        assert_eq!(worker.compact_config.threshold_chars, 12_345);
+    }
+
+    #[test]
+    fn runtime_worker_keeps_default_compact_threshold_for_legacy_settings() {
+        let session = Session {
+            id: "session-2".to_string(),
+            title: None,
+            status: SessionStatus::Active,
+            model: "stored-model".to_string(),
+            provider: "stored-provider".to_string(),
+            policy: None,
+            settings: Some(
+                serde_json::json!({
+                    "model": "settings-model",
+                    "provider": "settings-provider",
+                })
+                .to_string(),
+            ),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let worker = RuntimeWorker::from_session(&session);
+
+        assert_eq!(worker.model, "settings-model");
+        assert_eq!(worker.provider, "settings-provider");
+        assert_eq!(
+            worker.compact_config.threshold_chars,
+            CompactConfig::default().threshold_chars
         );
     }
 }
