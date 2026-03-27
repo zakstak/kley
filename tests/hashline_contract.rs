@@ -3,15 +3,15 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use kley::tools::Tool;
 use kley::tools::editing::hashline::HashlineEditEngine;
 use kley::tools::editing::{
+    EditEngine, EditFailureKind, EditOperation, EditOutcome, EditRequest,
     EDIT_ALLOW_PATCH_FALLBACK, EDIT_APPLY_IS_ATOMIC, EDIT_SINGLE_FILE_ONLY,
-    EDIT_TOOL_SUMMARY_MAX_CHARS, EditEngine, EditFailureKind, EditOperation, EditOutcome,
-    EditRequest,
+    EDIT_TOOL_SUMMARY_MAX_CHARS,
 };
 use kley::tools::hashline_edit::{HashlineEditRequest, HashlineEditTool};
 use kley::tools::patch::PatchEditEngine;
+use kley::tools::Tool;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -455,6 +455,181 @@ fn hashline_engine_rejects_inserts_inside_replace_delete_spans() {
             ..
         }
     ));
+}
+
+#[test]
+fn hashline_engine_rejects_insert_after_start_of_multiline_replace_span() {
+    let engine = HashlineEditEngine;
+    let original = load_hashline_snapshot("original.txt");
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(original.as_bytes()).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let range_start = anchor_for_line(&original, 4);
+    let range_end = anchor_for_line(&original, 5);
+
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![
+            EditOperation {
+                kind: "replace".to_string(),
+                anchor: range_start.clone(),
+                end_anchor: Some(range_end.clone()),
+                lines: vec!["REPLACED\n".to_string()],
+            },
+            EditOperation {
+                kind: "insert_after".to_string(),
+                anchor: range_start,
+                end_anchor: None,
+                lines: vec!["AFTER-REPLACE\n".to_string()],
+            },
+        ],
+    });
+
+    assert!(matches!(
+        outcome,
+        EditOutcome::Failed {
+            kind: EditFailureKind::InvalidRequest,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hashline_engine_rejects_insert_after_start_of_multiline_delete_span() {
+    let engine = HashlineEditEngine;
+    let original = load_hashline_snapshot("original.txt");
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(original.as_bytes()).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let range_start = anchor_for_line(&original, 4);
+    let range_end = anchor_for_line(&original, 5);
+
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![
+            EditOperation {
+                kind: "delete".to_string(),
+                anchor: range_start.clone(),
+                end_anchor: Some(range_end.clone()),
+                lines: vec![],
+            },
+            EditOperation {
+                kind: "insert_after".to_string(),
+                anchor: range_start,
+                end_anchor: None,
+                lines: vec!["AFTER-DELETE\n".to_string()],
+            },
+        ],
+    });
+
+    assert!(matches!(
+        outcome,
+        EditOutcome::Failed {
+            kind: EditFailureKind::InvalidRequest,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hashline_engine_allows_insert_before_start_of_multiline_spans() {
+    let engine = HashlineEditEngine;
+    let original = load_hashline_snapshot("original.txt");
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(original.as_bytes()).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let replace_start = anchor_for_line(&original, 2);
+    let replace_end = anchor_for_line(&original, 3);
+    let delete_start = anchor_for_line(&original, 4);
+    let delete_end = anchor_for_line(&original, 5);
+
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![
+            EditOperation {
+                kind: "insert_before".to_string(),
+                anchor: replace_start.clone(),
+                end_anchor: None,
+                lines: vec!["BEFORE-REPLACE\n".to_string()],
+            },
+            EditOperation {
+                kind: "replace".to_string(),
+                anchor: replace_start.clone(),
+                end_anchor: Some(replace_end.clone()),
+                lines: vec!["REPLACED\n".to_string()],
+            },
+            EditOperation {
+                kind: "insert_before".to_string(),
+                anchor: delete_start.clone(),
+                end_anchor: None,
+                lines: vec!["BEFORE-DELETE\n".to_string()],
+            },
+            EditOperation {
+                kind: "delete".to_string(),
+                anchor: delete_start,
+                end_anchor: Some(delete_end.clone()),
+                lines: vec![],
+            },
+        ],
+    });
+
+    assert!(matches!(outcome, EditOutcome::Applied { .. }));
+}
+
+#[test]
+fn hashline_engine_allows_insert_after_start_of_single_line_spans() {
+    let engine = HashlineEditEngine;
+    let original = load_hashline_snapshot("original.txt");
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(original.as_bytes()).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let replace_anchor = anchor_for_line(&original, 2);
+    let delete_anchor = anchor_for_line(&original, 5);
+
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![
+            EditOperation {
+                kind: "insert_after".to_string(),
+                anchor: replace_anchor.clone(),
+                end_anchor: None,
+                lines: vec!["AFTER-REPLACE\n".to_string()],
+            },
+            EditOperation {
+                kind: "replace".to_string(),
+                anchor: replace_anchor.clone(),
+                end_anchor: Some(replace_anchor.clone()),
+                lines: vec!["BETA!\n".to_string()],
+            },
+            EditOperation {
+                kind: "insert_after".to_string(),
+                anchor: delete_anchor.clone(),
+                end_anchor: None,
+                lines: vec!["AFTER-DELETE\n".to_string()],
+            },
+            EditOperation {
+                kind: "delete".to_string(),
+                anchor: delete_anchor.clone(),
+                end_anchor: Some(delete_anchor.clone()),
+                lines: vec![],
+            },
+        ],
+    });
+
+    assert!(matches!(outcome, EditOutcome::Applied { .. }));
+    let updated = fs::read_to_string(path).unwrap();
+    assert_eq!(
+        updated,
+        "alpha\nBETA!\nAFTER-REPLACE\ngamma\nbeta\nAFTER-DELETE\nomega\n"
+    );
 }
 
 #[test]

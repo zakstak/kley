@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use super::hashline_anchor::{HashlineSnapshot, parse_hashline_anchor};
+use super::hashline_anchor::{parse_hashline_anchor, HashlineSnapshot};
 use super::io::atomic_replace;
 use super::{
     EditEngine, EditFailureKind, EditObservation, EditOperation, EditOutcome, EditRequest,
@@ -177,7 +177,7 @@ fn validate_overlaps(operations: &[ResolvedOperation]) -> Result<(), EditFailure
     for op in operations {
         match op.kind {
             HashlineOperationKind::InsertBefore | HashlineOperationKind::InsertAfter => {
-                insert_targets.push(op.start_line);
+                insert_targets.push((op.start_line, op.kind));
             }
             HashlineOperationKind::Replace | HashlineOperationKind::Delete => {
                 ranges.push((op.start_line, op.end_line));
@@ -192,11 +192,15 @@ fn validate_overlaps(operations: &[ResolvedOperation]) -> Result<(), EditFailure
         }
     }
 
-    for &target in &insert_targets {
-        if ranges
-            .iter()
-            .any(|&(start, end)| target > start && target <= end)
-        {
+    for &(target, kind) in &insert_targets {
+        if ranges.iter().any(|&(start, end)| {
+            let inside_span = target > start && target <= end;
+            let insert_after_start_of_multiline =
+                matches!(kind, HashlineOperationKind::InsertAfter)
+                    && target == start
+                    && start < end;
+            inside_span || insert_after_start_of_multiline
+        }) {
             return Err(EditFailureKind::InvalidRequest);
         }
     }
