@@ -382,6 +382,45 @@ mod web {
     }
 
     #[tokio::test]
+    async fn ws_connect_backfills_missing_settings_with_compact_threshold() {
+        let state = test_state();
+        let store = state.store.clone();
+        let seeded_session = store::store_run(&store, |s| {
+            Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket = connect_ws(server.addr).await;
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert_eq!(bootstrap["session_id"], seeded_session.id);
+
+        let stored_settings = store::store_run(&store, {
+            let session_id = seeded_session.id.clone();
+            move |s| Ok(Session::get(s, &session_id)?.settings)
+        })
+        .await
+        .unwrap()
+        .expect("settings should be backfilled");
+
+        let settings: Value = serde_json::from_str(&stored_settings).unwrap();
+        assert_eq!(settings["model"], "test-model");
+        assert_eq!(settings["provider"], "test");
+        assert_eq!(
+            settings["compact_threshold"],
+            serde_json::json!(kley::compact::CompactConfig::default().threshold_chars)
+        );
+    }
+
+    #[tokio::test]
     async fn ws_connect_chooses_available_session_when_latest_is_busy() {
         let state = test_state();
         let store = state.store.clone();
@@ -484,6 +523,61 @@ mod web {
             rejection["error"]["details"]["session_id"],
             first_session.id
         );
+    }
+
+    #[tokio::test]
+    async fn ws_connect_returns_session_busy_when_all_sessions_are_busy() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let (first_session, second_session) = store::store_run(&store, |s| {
+            let first = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+
+            let second = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+
+            Ok((first, second))
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+
+        let mut first_socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={}", first_session.id)).await;
+        let first_bootstrap = recv_json(&mut first_socket).await;
+        assert_eq!(first_bootstrap["session_id"], first_session.id);
+
+        let mut second_socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", second_session.id),
+        )
+        .await;
+        let second_bootstrap = recv_json(&mut second_socket).await;
+        assert_eq!(second_bootstrap["session_id"], second_session.id);
+
+        let mut third_socket = connect_ws(server.addr).await;
+        let rejection = recv_json(&mut third_socket).await;
+        assert_eq!(rejection["type"], "response.error");
+        assert_eq!(rejection["request_id"], "attach");
+        assert_eq!(rejection["error"]["code"], "session_busy");
+        let busy_session_id = rejection["error"]["details"]["session_id"]
+            .as_str()
+            .unwrap();
+        assert!(busy_session_id == first_session.id || busy_session_id == second_session.id);
     }
 
     #[tokio::test]
