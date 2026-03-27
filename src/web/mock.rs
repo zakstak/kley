@@ -288,6 +288,7 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
             tool_call_id,
             tool_name: "read".to_string(),
             success: true,
+            edit_observation: None,
             context_usage: mock_context_usage(34),
         });
     }

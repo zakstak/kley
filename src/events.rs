@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::mpsc;
 
 use crate::text::truncate_with_ascii_ellipsis;
+use crate::tools::editing::EditObservation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
@@ -62,6 +63,7 @@ pub enum AgentEvent {
         tool_call_id: String,
         tool_name: String,
         output_preview: String,
+        edit_observation: Option<Box<EditObservation>>,
         success: bool,
         context_used_chars: usize,
         context_max_chars: usize,
