@@ -5,7 +5,9 @@ use serde_json::Value;
 use super::editing::hashline::HashlineEditEngine;
 use super::editing::hashline_anchor::{parse_hashline_anchor, HashlineSnapshot};
 use super::editing::observability::finalize_outcome;
-use super::editing::{EditEngine, EditFailureKind, EditOperation, EditRequest};
+use super::editing::{
+    EditEngine, EditFailureKind, EditObservation, EditOperation, EditOutcome, EditRequest,
+};
 use super::{Tool, ToolExecutionResult};
 
 pub struct HashlineEditTool;
@@ -70,9 +72,19 @@ impl Tool for HashlineEditTool {
         let request = match serde_json::from_value::<HashlineEditRequest>(args) {
             Ok(request) => request,
             Err(err) => {
-                return Ok(ToolExecutionResult::from_output(format!(
-                    "Error: invalid_request ({err})"
-                )));
+                let mut observation = EditObservation::new("hashline", self.name(), "", 0, 0);
+                observation.failure_kind =
+                    Some(EditFailureKind::InvalidRequest.as_str().to_string());
+                let outcome = EditOutcome::Failed {
+                    kind: EditFailureKind::InvalidRequest,
+                    summary: format!("Error: invalid_request ({err})"),
+                    observations: vec![observation],
+                };
+                let (output, edit_observations) = finalize_outcome(self.name(), outcome);
+                return Ok(ToolExecutionResult {
+                    output,
+                    edit_observations,
+                });
             }
         };
 

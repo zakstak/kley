@@ -78,9 +78,15 @@ impl EditEngine for PatchEditEngine {
             );
         }
 
-        if request.operations.is_empty() {
+        if edit_count != 1 {
+            let summary = if edit_count == 0 {
+                "Error: target is required".to_string()
+            } else {
+                "Error: patch only supports a single operation".to_string()
+            };
+
             return Self::invalid_request(
-                "Error: target is required".to_string(),
+                summary,
                 path,
                 edit_count,
                 started_at.elapsed().as_millis(),
@@ -339,5 +345,40 @@ mod tests {
             .unwrap();
         assert!(result.contains("found 2 matches"));
         assert!(result.contains("disambiguate"));
+    }
+
+    #[test]
+    fn patch_rejects_multiple_operations() {
+        let f = temp_file("abc\n");
+        let path = f.path().to_str().unwrap().to_string();
+        let request = EditRequest {
+            path: path.clone(),
+            operations: vec![
+                EditOperation {
+                    kind: "replace_exact".to_string(),
+                    anchor: "abc".to_string(),
+                    end_anchor: None,
+                    lines: vec!["first".to_string()],
+                },
+                EditOperation {
+                    kind: "replace_exact".to_string(),
+                    anchor: "abc".to_string(),
+                    end_anchor: None,
+                    lines: vec!["second".to_string()],
+                },
+            ],
+        };
+
+        let outcome = PatchEditEngine.apply(&request);
+        match outcome {
+            EditOutcome::Failed { kind, summary, .. } => {
+                assert_eq!(kind, EditFailureKind::InvalidRequest);
+                assert_eq!(summary, "Error: patch only supports a single operation");
+            }
+            other => panic!("Expected invalid request failure, got {other:?}"),
+        }
+
+        let final_contents = std::fs::read_to_string(path).unwrap();
+        assert_eq!(final_contents, "abc\n");
     }
 }

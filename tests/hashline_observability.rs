@@ -4,10 +4,10 @@ use std::sync::{Mutex, OnceLock};
 
 use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
-use kley::events::{AgentEvent, event_channel};
+use kley::events::{event_channel, AgentEvent};
 use kley::runtime::{SessionRuntime, SubmitResult};
 use kley::store::{Store, Turn};
-use kley::tools::editing::{EDIT_TOOL_SUMMARY_MAX_CHARS, EditObservation};
+use kley::tools::editing::{EditObservation, EDIT_TOOL_SUMMARY_MAX_CHARS};
 use kley::tools::hashline_edit::HashlineEditTool;
 use kley::tools::patch::PatchTool;
 use kley::tools::{Tool, ToolExecutionResult, ToolRegistry};
@@ -147,16 +147,12 @@ fn successful_edits_write_structured_artifacts_with_required_fields() {
     assert_eq!(patch_observation.applied_count, 1);
     assert_eq!(patch_observation.stale_reference_count, 0);
     assert_eq!(patch_observation.noop_count, 0);
-    assert!(
-        patch_result
-            .output
-            .contains(patch_observation.artifact_id.as_ref().unwrap())
-    );
-    assert!(
-        patch_result
-            .output
-            .contains(patch_observation.artifact_path.as_ref().unwrap())
-    );
+    assert!(patch_result
+        .output
+        .contains(patch_observation.artifact_id.as_ref().unwrap()));
+    assert!(patch_result
+        .output
+        .contains(patch_observation.artifact_path.as_ref().unwrap()));
 
     let patch_artifact = read_json_artifact(&patch_result);
     let patch_artifact_obs = patch_artifact.get("observation").unwrap();
@@ -305,6 +301,33 @@ fn tool_output_is_bounded_and_artifact_backed() {
     let artifact = read_json_artifact(&result);
     assert_eq!(artifact["observation"]["model_output_bounded"], true);
     assert!(artifact["observation"]["duration_ms"].is_number());
+}
+
+#[test]
+fn malformed_hashline_request_still_records_observation() {
+    let _lock = env_lock().lock().unwrap();
+
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let _env = EnvVarGuard::set(
+        EDIT_ARTIFACT_DIR_ENV,
+        &artifacts_dir.path().to_string_lossy(),
+    );
+
+    let result = HashlineEditTool
+        .execute_with_result(serde_json::json!({
+            "path": "ignored",
+        }))
+        .unwrap();
+
+    assert!(result.output.contains("Error: invalid_request"));
+    assert!(result.output.contains("artifact_id="));
+    assert!(result.output.contains("artifact_path="));
+
+    let observation = result.edit_observations.first().unwrap();
+    assert_eq!(observation.failure_kind.as_deref(), Some("invalid_request"));
+    assert!(observation.artifact_id.is_some());
+    assert!(observation.artifact_path.is_some());
+    assert!(fs::metadata(observation.artifact_path.as_ref().unwrap()).is_ok());
 }
 
 #[tokio::test]
