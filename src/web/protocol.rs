@@ -17,11 +17,31 @@ pub enum WebCommand {
         request_id: String,
         session_id: String,
     },
+    #[serde(rename = "session.settings.update")]
+    SessionSettingsUpdate {
+        request_id: String,
+        session_id: String,
+        provider: String,
+        model: String,
+    },
     #[serde(rename = "prompt.submit")]
     PromptSubmit {
         request_id: String,
         session_id: String,
         prompt: String,
+    },
+    #[serde(rename = "auth.openai.start")]
+    AuthOpenAiStart { request_id: String },
+    #[serde(rename = "auth.openai.complete")]
+    AuthOpenAiComplete {
+        request_id: String,
+        callback_input: String,
+    },
+    #[serde(rename = "auth.login")]
+    AuthLogin {
+        request_id: String,
+        provider: String,
+        api_key: String,
     },
     #[serde(rename = "turn.abort")]
     TurnAbort {
@@ -56,10 +76,23 @@ pub struct StateSnapshotData {
     pub protocol_version: u32,
     pub session_id: String,
     pub selected_session: SelectedSession,
+    pub auth: AuthStateSnapshot,
     pub sessions: Vec<SessionSummary>,
     pub transcript: Vec<TranscriptEntry>,
     pub active_turn: Option<ActiveTurnSnapshot>,
     pub context_usage: ContextUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthStateSnapshot {
+    pub storage_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_provider: Option<String>,
+    pub openai_logged_in: bool,
+    pub zai_logged_in: bool,
+    pub pending_openai_login: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +110,8 @@ pub struct SelectedSession {
     pub session_id: String,
     pub title: String,
     pub status: String,
+    pub provider: String,
+    pub model: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -234,7 +269,11 @@ impl WebCommand {
             WebCommand::StateGet { request_id }
             | WebCommand::SessionsList { request_id }
             | WebCommand::SessionLoad { request_id, .. }
+            | WebCommand::SessionSettingsUpdate { request_id, .. }
             | WebCommand::PromptSubmit { request_id, .. }
+            | WebCommand::AuthOpenAiStart { request_id }
+            | WebCommand::AuthOpenAiComplete { request_id, .. }
+            | WebCommand::AuthLogin { request_id, .. }
             | WebCommand::TurnAbort { request_id, .. } => request_id,
         }
     }

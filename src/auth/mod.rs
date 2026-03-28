@@ -17,6 +17,8 @@ pub struct Credentials {
     pub active_provider: Option<String>,
     /// OpenAI OAuth credentials
     pub openai: Option<OpenAiCredentials>,
+    #[serde(default)]
+    pub openai_api_key: Option<OpenAiApiKeyCredentials>,
     /// ZAI API key
     pub zai: Option<ZaiCredentials>,
 }
@@ -34,6 +36,11 @@ pub struct OpenAiCredentials {
     /// API key obtained via token exchange (this is what we actually use for API calls)
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiApiKeyCredentials {
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,7 +241,9 @@ fn map_decrypt_error(err: age::DecryptError, max_work_factor: u8) -> anyhow::Err
                 )
             }
         }
-        other => anyhow::anyhow!("decryption failed (wrong passphrase?): {other}"),
+        other => anyhow::anyhow!(
+            "decryption failed (wrong passphrase?): {other}; make sure KLEY_PASSPHRASE matches the value used when credentials were created, or recreate credentials (for disposable Docker state, remove ~/.config/kley/credentials.age and log in again)"
+        ),
     }
 }
 
@@ -259,7 +268,8 @@ impl SecretBackend for AgeFileBackend {
 
     fn save(&self, creds: &Credentials) -> Result<()> {
         let plaintext = serde_json::to_string_pretty(creds)?;
-        let recipient = age::scrypt::Recipient::new(self.passphrase.clone());
+        let mut recipient = age::scrypt::Recipient::new(self.passphrase.clone());
+        recipient.set_work_factor(self.max_work_factor);
         let encrypted = age::encrypt(&recipient, plaintext.as_bytes())
             .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?;
 
@@ -344,6 +354,36 @@ impl CredentialStore {
         }
     }
 
+    pub fn open_noninteractive() -> Result<Self> {
+        match select_backend()? {
+            CredentialBackendSelection::Vault(vault) => Ok(Self {
+                backend: Box::new(vault),
+                backend_name: "vault".into(),
+            }),
+            CredentialBackendSelection::AgeFile { path, .. } => {
+                let max_work_factor = configured_age_max_work_factor()?;
+                let passphrase = std::env::var("KLEY_PASSPHRASE").context(
+                    "web auth requires KLEY_PASSPHRASE to access the credential store, or VAULT_ADDR/VAULT_TOKEN for Vault-backed credentials",
+                )?;
+
+                if passphrase.trim().is_empty() {
+                    anyhow::bail!(
+                        "web auth requires a non-empty KLEY_PASSPHRASE, or VAULT_ADDR/VAULT_TOKEN for Vault-backed credentials"
+                    );
+                }
+
+                Ok(Self {
+                    backend: Box::new(AgeFileBackend::with_max_work_factor(
+                        path,
+                        SecretString::from(passphrase),
+                        max_work_factor,
+                    )),
+                    backend_name: "age-file".into(),
+                })
+            }
+        }
+    }
+
     /// Which backend is active.
     #[allow(dead_code)]
     pub fn backend_name(&self) -> &str {
@@ -369,6 +409,17 @@ pub struct ResolvedAuth {
     pub base_url: String,
     /// Optional organization/account header (OpenAI only)
     pub account_id: Option<String>,
+}
+
+pub fn save_openai_oauth_credentials(
+    store: &CredentialStore,
+    credentials: OpenAiCredentials,
+) -> Result<()> {
+    let mut all = store.load()?;
+    all.active_provider = Some("openai".into());
+    all.openai = Some(credentials);
+    all.openai_api_key = None;
+    store.save(&all)
 }
 
 /// Resolve the current auth, refreshing tokens if necessary.
@@ -398,6 +449,19 @@ pub async fn resolve_auth(store: &CredentialStore, events: &EventEmitter) -> Res
 
     match provider {
         "openai" => {
+            if let Some(openai_api_key) = creds.openai_api_key.as_ref() {
+                let api_key = openai_api_key.api_key.trim();
+                if !api_key.is_empty() {
+                    return Ok(ResolvedAuth {
+                        provider: "openai".into(),
+                        api_key: api_key.to_string(),
+                        base_url: std::env::var("OPENAI_BASE_URL")
+                            .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+                        account_id: None,
+                    });
+                }
+            }
+
             let oa = creds
                 .openai
                 .as_mut()
@@ -492,6 +556,7 @@ mod tests {
                 id_token: None,
                 api_key: None,
             }),
+            openai_api_key: None,
             zai: None,
         }
     }
@@ -500,6 +565,7 @@ mod tests {
         Credentials {
             active_provider: Some("zai".into()),
             openai: None,
+            openai_api_key: None,
             zai: Some(ZaiCredentials {
                 api_key: "zai-secret-key".into(),
             }),
@@ -548,6 +614,7 @@ mod tests {
                 id_token: None,
                 api_key: None,
             }),
+            openai_api_key: None,
             zai: Some(ZaiCredentials {
                 api_key: "key".into(),
             }),
@@ -603,7 +670,9 @@ mod tests {
         let reader = AgeFileBackend::new(path, SecretString::from("incorrect".to_owned()));
 
         writer.save(&sample_openai_creds()).unwrap();
-        assert!(reader.load().is_err());
+        let err = reader.load().unwrap_err().to_string();
+        assert!(err.contains("wrong passphrase"), "{err}");
+        assert!(err.contains("KLEY_PASSPHRASE"), "{err}");
     }
 
     #[cfg(unix)]
@@ -661,6 +730,7 @@ mod tests {
         let creds = store.load().unwrap();
         assert!(creds.active_provider.is_none());
         assert!(creds.openai.is_none());
+        assert!(creds.openai_api_key.is_none());
         assert!(creds.zai.is_none());
     }
 
@@ -678,6 +748,43 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.active_provider.as_deref(), Some("openai"));
         assert_eq!(loaded.openai.unwrap().access_token, "sk-test-token");
+    }
+
+    #[test]
+    fn save_openai_oauth_credentials_clears_web_api_key() {
+        let backend = InMemoryBackend::new();
+        backend
+            .save(&Credentials {
+                active_provider: Some("openai".into()),
+                openai: None,
+                openai_api_key: Some(OpenAiApiKeyCredentials {
+                    api_key: "sk-web-api-key".into(),
+                }),
+                zai: None,
+            })
+            .unwrap();
+        let store = CredentialStore {
+            backend: Box::new(backend),
+            backend_name: "test".into(),
+        };
+
+        save_openai_oauth_credentials(
+            &store,
+            OpenAiCredentials {
+                access_token: "oauth-access".into(),
+                refresh_token: "oauth-refresh".into(),
+                expires_at_ms: u64::MAX,
+                account_id: "acct-oauth".into(),
+                id_token: Some("oauth-id".into()),
+                api_key: Some("sk-oauth".into()),
+            },
+        )
+        .unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.active_provider.as_deref(), Some("openai"));
+        assert!(loaded.openai_api_key.is_none());
+        assert_eq!(loaded.openai.unwrap().account_id, "acct-oauth");
     }
 
     // ── Behavioral: resolve_auth produces correct ResolvedAuth ───────────────
@@ -714,6 +821,7 @@ mod tests {
                     id_token: None,
                     api_key: Some("sk-real-api-key".into()),
                 }),
+                openai_api_key: None,
                 zai: None,
             })
             .unwrap();
@@ -728,6 +836,32 @@ mod tests {
         // Has exchanged API key → uses it with standard API URL
         assert_eq!(auth.api_key, "sk-real-api-key");
         assert_eq!(auth.base_url, "https://api.openai.com/v1");
+    }
+
+    #[tokio::test]
+    async fn resolve_auth_openai_with_stored_web_api_key() {
+        let backend = InMemoryBackend::new();
+        backend
+            .save(&Credentials {
+                active_provider: Some("openai".into()),
+                openai: None,
+                openai_api_key: Some(OpenAiApiKeyCredentials {
+                    api_key: "sk-web-ui".into(),
+                }),
+                zai: None,
+            })
+            .unwrap();
+        let store = CredentialStore {
+            backend: Box::new(backend),
+            backend_name: "test".into(),
+        };
+        let (emitter, _receiver) = crate::events::event_channel();
+
+        let auth = resolve_auth(&store, &emitter).await.unwrap();
+        assert_eq!(auth.provider, "openai");
+        assert_eq!(auth.api_key, "sk-web-ui");
+        assert_eq!(auth.base_url, "https://api.openai.com/v1");
+        assert!(auth.account_id.is_none());
     }
 
     #[tokio::test]
@@ -773,6 +907,7 @@ mod tests {
             .save(&Credentials {
                 active_provider: Some("openai".into()),
                 openai: None,
+                openai_api_key: None,
                 zai: None,
             })
             .unwrap();
@@ -798,6 +933,7 @@ mod tests {
             .save(&Credentials {
                 active_provider: Some("unknown-provider".into()),
                 openai: None,
+                openai_api_key: None,
                 zai: None,
             })
             .unwrap();

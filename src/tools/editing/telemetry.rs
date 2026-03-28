@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::Serialize;
 
-use super::artifacts::artifact_root_dir;
 use super::EditObservation;
+use super::artifacts::artifact_root_dir;
 
 const METRICS_JSONL_FILE: &str = "metrics.jsonl";
 const EDIT_METRICS_DIR_ENV: &str = "KLEY_EDIT_METRICS_DIR";

@@ -13,20 +13,13 @@ markup:
 - Live assistant message streaming
 - Prompt submit and turn abort
 - Tool activity cards and inspector event log
+- Session provider/model selection
+- Provider API-key login from the web UI
 
 ## Not implemented yet (UI-only)
 
 These Bindery-style controls are visible in the shell, but they are not backed
 by new Kley behavior yet:
-
-### Model selector
-
-Shown as `Model (UI-only)`.
-
-**Why it is not implemented:** Kley does not currently expose a web command or
-backend route for changing models from the browser. Making this interactive
-would require new protocol commands, state handling, and backend model-selection
-behavior.
 
 ### Fork action
 
@@ -84,3 +77,12 @@ That meant:
 So the migration intentionally ported the **shell and visual structure first**,
 and left unsupported Bindery interactions clearly labeled rather than pretending
 they worked.
+
+## Recent changes
+
+The shell now supports two previously missing workflows directly in the browser:
+
+- choosing the session provider and model via websocket-backed settings updates
+- saving OpenAI or ZAI API-key credentials from the web UI
+
+Those flows are now real Kley behavior, not placeholder controls.

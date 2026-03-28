@@ -33,6 +33,28 @@ setup_github_https_credentials() {
   fi
 }
 
+run_kley_command() {
+  local rust_only_rebuild="${KLEY_RUST_ONLY_REBUILD:-0}"
+  local workspace_manifest="$WORKSPACE_DIR/Cargo.toml"
+
+  if [ "$rust_only_rebuild" = "1" ] && [ -f "$workspace_manifest" ]; then
+    local profile="${KLEY_RUST_BUILD_PROFILE:-release}"
+    local cargo_args=(build --manifest-path "$workspace_manifest" --bin kley)
+    local binary_path="$WORKSPACE_DIR/target/debug/kley"
+
+    if [ "$profile" = "release" ]; then
+      cargo_args+=(--release)
+      binary_path="$WORKSPACE_DIR/target/release/kley"
+    fi
+
+    cargo "${cargo_args[@]}"
+    "$binary_path" "$@"
+    return
+  fi
+
+  kley "$@"
+}
+
 compute_workspace_source_stamp() {
   if [ ! -f "$IMAGE_SOURCE_STAMP" ] || [ ! -d "$WORKSPACE_DIR" ]; then
     return 1
@@ -133,7 +155,7 @@ fi
 
 setup_github_https_credentials
 
-if kley "$@"; then
+if run_kley_command "$@"; then
   status=0
 else
   status=$?

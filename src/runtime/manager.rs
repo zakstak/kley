@@ -132,7 +132,8 @@ impl RuntimeWorker {
             });
         }
 
-        let store = CredentialStore::open().context("failed to open credential store")?;
+        let store =
+            CredentialStore::open_noninteractive().context("failed to open credential store")?;
         let resolved = runtime_rt
             .block_on(crate::auth::resolve_auth(&store, events))
             .context("failed to resolve provider auth")?;

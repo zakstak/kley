@@ -9,7 +9,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
-use super::{CredentialStore, OpenAiCredentials};
+use super::{CredentialStore, OpenAiCredentials, save_openai_oauth_credentials};
 
 // ── Constants (verbatim from the JS) ────────────────────────────────────────
 
@@ -46,6 +46,13 @@ fn generate_state() -> String {
 
 // ── Authorize URL ───────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
+pub struct OpenAiLoginFlow {
+    pub authorize_url: String,
+    pub verifier: String,
+    pub state: String,
+}
+
 fn build_authorize_url(challenge: &str, state: &str) -> Result<String> {
     let mut url = reqwest::Url::parse(AUTHORIZE_URL).context("invalid authorize URL constant")?;
     url.query_pairs_mut()
@@ -60,6 +67,17 @@ fn build_authorize_url(challenge: &str, state: &str) -> Result<String> {
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("originator", "kley");
     Ok(url.to_string())
+}
+
+pub fn start_login_flow() -> Result<OpenAiLoginFlow> {
+    let (verifier, challenge) = generate_pkce();
+    let state = generate_state();
+    let authorize_url = build_authorize_url(&challenge, &state)?;
+    Ok(OpenAiLoginFlow {
+        authorize_url,
+        verifier,
+        state,
+    })
 }
 
 // ── Token exchange ──────────────────────────────────────────────────────────
@@ -132,6 +150,44 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> 
         id_token: id_token_str,
         api_key,
     })
+}
+
+fn extract_code_from_callback_input(input: &str, expected_state: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("missing authorization code");
+    }
+
+    if trimmed.starts_with("http") {
+        let url = reqwest::Url::parse(trimmed).context("invalid redirect URL pasted")?;
+        let mut code = None;
+        let mut state = None;
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "code" => code = Some(value.into_owned()),
+                "state" => state = Some(value.into_owned()),
+                _ => {}
+            }
+        }
+
+        let state = state.context("Could not find 'state' parameter in the pasted URL")?;
+        if state != expected_state {
+            anyhow::bail!("state mismatch");
+        }
+
+        return code.context("Could not find 'code' parameter in the pasted URL");
+    }
+
+    Ok(trimmed.to_string())
+}
+
+pub async fn finish_login_flow(
+    callback_input: &str,
+    verifier: &str,
+    expected_state: &str,
+) -> Result<OpenAiCredentials> {
+    let code = extract_code_from_callback_input(callback_input, expected_state)?;
+    exchange_code(&code, verifier).await
 }
 
 /// Refresh an OpenAI token using the refresh_token grant.
@@ -347,22 +403,7 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
         }
         res = stdin.read_line(&mut line) => {
             res.context("failed to read from stdin")?;
-            let trimmed = line.trim();
-            if trimmed.starts_with("http") {
-                // Try to extract the code from the URL query params
-                let url = reqwest::Url::parse(trimmed).context("invalid redirect URL pasted")?;
-                let mut code = None;
-                for (k, v) in url.query_pairs() {
-                    if k == "code" {
-                        code = Some(v.into_owned());
-                        break;
-                    }
-                }
-                code.context("Could not find 'code' parameter in the pasted URL")?
-            } else {
-                // Assume they just pasted the code directly
-                trimmed.to_string()
-            }
+            extract_code_from_callback_input(&line, &expected_state)?
         }
     };
 
@@ -374,34 +415,30 @@ async fn wait_for_callback(expected_state: &str) -> Result<String> {
 
 /// Run the full interactive OpenAI OAuth login flow.
 pub async fn login_interactive() -> Result<()> {
-    let (verifier, challenge) = generate_pkce();
-    let state = generate_state();
-    let url = build_authorize_url(&challenge, &state)?;
+    let flow = start_login_flow()?;
 
     eprintln!("Opening browser for OpenAI login...");
     eprintln!(
-        "If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {url}\n"
+        "If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {}\n",
+        flow.authorize_url
     );
 
     // Try to open the browser (non-fatal if it fails)
-    let _ = open::that(&url);
+    let _ = open::that(&flow.authorize_url);
 
     eprintln!("Waiting for callback on http://localhost:{CALLBACK_PORT}/auth/callback...");
     eprintln!(
         "(If the browser cannot redirect back to this terminal, copy the final URL from your browser's address bar and paste it here)"
     );
     eprintln!("Paste URL or code > ");
-    let code = wait_for_callback(&state).await?;
+    let code = wait_for_callback(&flow.state).await?;
 
     eprintln!("Exchanging authorization code for tokens...");
-    let creds = exchange_code(&code, &verifier).await?;
+    let creds = finish_login_flow(&code, &flow.verifier, &flow.state).await?;
 
     // Save to credential store
     let store = CredentialStore::open()?;
-    let mut all = store.load()?;
-    all.active_provider = Some("openai".into());
-    all.openai = Some(creds);
-    store.save(&all)?;
+    save_openai_oauth_credentials(&store, creds)?;
 
     eprintln!("✓ OpenAI login successful. Credentials saved.");
     Ok(())
@@ -438,6 +475,33 @@ mod tests {
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("redirect_uri="));
         assert!(url.contains("originator=kley"));
+    }
+
+    #[test]
+    fn test_start_login_flow_builds_authorize_url() {
+        let flow = start_login_flow().unwrap();
+        assert!(flow.authorize_url.starts_with(AUTHORIZE_URL));
+        assert!(flow.authorize_url.contains("redirect_uri="));
+        assert_eq!(flow.verifier.len(), 43);
+        assert_eq!(flow.state.len(), 32);
+    }
+
+    #[test]
+    fn test_extract_code_from_callback_input_validates_state() {
+        let url = "http://localhost:1455/auth/callback?code=abc123&state=expected-state";
+        let code = extract_code_from_callback_input(url, "expected-state").unwrap();
+        assert_eq!(code, "abc123");
+
+        let err = extract_code_from_callback_input(url, "wrong-state")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("state mismatch"));
+    }
+
+    #[test]
+    fn test_extract_code_from_callback_input_accepts_raw_code() {
+        let code = extract_code_from_callback_input("raw-auth-code", "ignored-state").unwrap();
+        assert_eq!(code, "raw-auth-code");
     }
 
     #[test]

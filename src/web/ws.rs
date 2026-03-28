@@ -8,7 +8,10 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::compact::CompactConfig;
 use crate::runtime::{RuntimeEventEnvelope, SubmitPromptOutcome};
+use crate::runtime::{SessionSettingsOverrides, canonical_settings_json};
+use crate::store::{self, Session};
 
 mod context_usage;
 mod errors;
@@ -74,7 +77,7 @@ async fn handle_socket(
 
     let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
 
-    if send_bootstrap_event(&mut socket, &state, &active_session.id)
+    if send_bootstrap_event(&mut socket, &state, &active_session.id, &controller_id)
         .await
         .is_err()
     {
@@ -145,7 +148,7 @@ async fn handle_socket(
 
                 match command {
                     WebCommand::StateGet { request_id } => {
-                        match snapshot_data(&state, &active_session.id).await {
+                        match snapshot_data(&state, &active_session.id, &controller_id).await {
                             Ok(snapshot) => {
                                 if send_response(
                                     &mut socket,
@@ -235,7 +238,12 @@ async fn handle_socket(
                             {
                                 break;
                             }
-                            if send_bootstrap_event(&mut socket, &state, &active_session.id)
+                            if send_bootstrap_event(
+                                &mut socket,
+                                &state,
+                                &active_session.id,
+                                &controller_id,
+                            )
                                 .await
                                 .is_err()
                             {
@@ -311,6 +319,165 @@ async fn handle_socket(
                             }
                         }
                     },
+                    WebCommand::SessionSettingsUpdate {
+                        request_id,
+                        session_id,
+                        provider,
+                        model,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_session".to_string(),
+                                        message: "settings session is not currently attached"
+                                            .to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if let Some(active_turn) = state.runtime_manager.active_turn(&active_session.id)
+                        {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "turn_in_progress".to_string(),
+                                        message: "cannot change model or provider while a turn is still streaming"
+                                            .to_string(),
+                                        details: Some(json!({
+                                            "session_id": active_session.id,
+                                            "turn_id": active_turn.turn_id,
+                                        })),
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        let provider = provider.trim().to_string();
+                        let model = model.trim().to_string();
+
+                        if !is_supported_session_provider(&provider) {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_provider".to_string(),
+                                        message: "provider must be one of openai, zai, or test"
+                                            .to_string(),
+                                        details: Some(json!({ "provider": provider })),
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if model.is_empty() {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_model".to_string(),
+                                        message: "model must not be empty".to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match update_session_runtime_selection(
+                            &state,
+                            &controller_id,
+                            &active_session.id,
+                            &provider,
+                            &model,
+                        )
+                        .await
+                        {
+                            Ok(session) => {
+                                active_session = session;
+                                runtime_events = state.runtime_manager.subscribe(&active_session.id);
+
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: json!({
+                                            "session_id": active_session.id,
+                                            "provider": active_session.provider,
+                                            "model": active_session.model,
+                                            "updated": true,
+                                        }),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                if send_bootstrap_event(
+                                    &mut socket,
+                                    &state,
+                                    &active_session.id,
+                                    &controller_id,
+                                )
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: ResponseError {
+                                            code: "settings_update_failed".to_string(),
+                                            message: error,
+                                            details: None,
+                                        },
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     WebCommand::PromptSubmit {
                         request_id,
                         session_id,
@@ -407,6 +574,253 @@ async fn handle_socket(
                             }
                         }
                     }
+                    WebCommand::AuthOpenAiStart { request_id } => {
+                        match state.start_openai_login(&controller_id) {
+                            Ok(authorize_url) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: json!({
+                                            "started": true,
+                                            "provider": "openai",
+                                            "authorize_url": authorize_url,
+                                        }),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                if send_bootstrap_event(
+                                    &mut socket,
+                                    &state,
+                                    &active_session.id,
+                                    &controller_id,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: ResponseError {
+                                            code: "auth_start_failed".to_string(),
+                                            message: error.to_string(),
+                                            details: Some(json!({ "provider": "openai" })),
+                                        },
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::AuthOpenAiComplete {
+                        request_id,
+                        callback_input,
+                    } => {
+                        let callback_input = callback_input.trim().to_string();
+                        if callback_input.is_empty() {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_auth_callback".to_string(),
+                                        message: "paste the final redirect URL or authorization code"
+                                            .to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match state.complete_openai_login(&controller_id, &callback_input).await {
+                            Ok(()) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: json!({
+                                            "logged_in": true,
+                                            "provider": "openai",
+                                        }),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                if send_bootstrap_event(
+                                    &mut socket,
+                                    &state,
+                                    &active_session.id,
+                                    &controller_id,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: ResponseError {
+                                            code: "auth_completion_failed".to_string(),
+                                            message: error.to_string(),
+                                            details: Some(json!({ "provider": "openai" })),
+                                        },
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::AuthLogin {
+                        request_id,
+                        provider,
+                        api_key,
+                    } => {
+                        let provider = provider.trim().to_string();
+                        let api_key = api_key.trim().to_string();
+
+                        if !matches!(provider.as_str(), "openai" | "zai") {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_provider".to_string(),
+                                        message: "login provider must be openai or zai".to_string(),
+                                        details: Some(json!({ "provider": provider })),
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if provider == "openai" {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "auth_flow_mismatch".to_string(),
+                                        message: "openai login must be completed in the browser"
+                                            .to_string(),
+                                        details: Some(json!({ "provider": provider })),
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if api_key.is_empty() {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_api_key".to_string(),
+                                        message: "API key must not be empty".to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match state.login_zai(&api_key) {
+                            Ok(()) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: json!({
+                                            "logged_in": true,
+                                            "provider": provider,
+                                        }),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                if send_bootstrap_event(
+                                    &mut socket,
+                                    &state,
+                                    &active_session.id,
+                                    &controller_id,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: ResponseError {
+                                            code: "auth_login_failed".to_string(),
+                                            message: error.to_string(),
+                                            details: None,
+                                        },
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     WebCommand::TurnAbort {
                         request_id,
                         session_id,
@@ -487,6 +901,7 @@ async fn handle_socket(
         }
     }
 
+    state.clear_openai_login(&controller_id);
     state
         .runtime_manager
         .release_controller(&active_session.id, &controller_id);
@@ -511,8 +926,11 @@ async fn send_bootstrap_event(
     socket: &mut WebSocket,
     state: &WebAppState,
     session_id: &str,
+    controller_id: &str,
 ) -> std::result::Result<(), ()> {
-    let data = snapshot_data(state, session_id).await.map_err(|_| ())?;
+    let data = snapshot_data(state, session_id, controller_id)
+        .await
+        .map_err(|_| ())?;
 
     send_event(
         socket,
@@ -523,4 +941,61 @@ async fn send_bootstrap_event(
         },
     )
     .await
+}
+
+fn is_supported_session_provider(provider: &str) -> bool {
+    matches!(provider, "openai" | "zai" | "test")
+}
+
+fn compact_threshold_for_session(session: &Session) -> usize {
+    SessionSettingsOverrides::from_session(session)
+        .and_then(|settings| settings.compact_threshold)
+        .unwrap_or_else(|| CompactConfig::default().threshold_chars)
+}
+
+async fn update_session_runtime_selection(
+    state: &WebAppState,
+    controller_id: &str,
+    session_id: &str,
+    provider: &str,
+    model: &str,
+) -> std::result::Result<Session, String> {
+    let session_id_owned = session_id.to_string();
+    let model_owned = model.to_string();
+    let provider_owned = provider.to_string();
+    let store_ref = state.store.clone();
+
+    let session = store::store_run(&store_ref, move |store| {
+        let mut session = Session::find(store, &session_id_owned)?
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+        let compact_threshold = compact_threshold_for_session(&session);
+        let settings_json =
+            canonical_settings_json(&model_owned, &provider_owned, compact_threshold);
+
+        Session::update_runtime_selection(
+            store,
+            &session.id,
+            &model_owned,
+            &provider_owned,
+            &settings_json,
+        )?;
+
+        session.model = model_owned;
+        session.provider = provider_owned;
+        session.settings = Some(settings_json);
+        Ok(session)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    state
+        .runtime_manager
+        .attach_controller(&session, controller_id)
+        .map_err(|error| match error {
+            crate::runtime::AttachControllerError::SessionBusy { .. } => {
+                "session is currently controlled elsewhere".to_string()
+            }
+        })?;
+
+    Ok(session)
 }

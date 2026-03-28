@@ -6,14 +6,16 @@ use super::super::protocol::{
 use super::super::state::WebAppState;
 use super::context_usage::{context_usage_from_chars, estimate_persisted_context_usage};
 use crate::compact::CompactConfig;
-use crate::runtime::ActiveTurnReplay;
+use crate::runtime::{ActiveTurnReplay, SessionSettingsOverrides};
 use crate::store::{self, Session, Turn};
 
 pub(super) async fn snapshot_data(
     state: &WebAppState,
     session_id: &str,
+    controller_id: &str,
 ) -> Result<StateSnapshotData> {
     let selected_session = load_selected_session(state, session_id).await?;
+    let auth = state.auth_summary(controller_id);
     let sessions = list_sessions(state, Some(session_id)).await?;
     let turns = load_turns(state, session_id).await?;
     let transcript = turns_to_transcript(&turns);
@@ -46,6 +48,7 @@ pub(super) async fn snapshot_data(
         protocol_version: super::super::protocol::PROTOCOL_VERSION,
         session_id: session_id.to_string(),
         selected_session,
+        auth,
         sessions,
         transcript,
         active_turn,
@@ -95,6 +98,7 @@ async fn load_selected_session(state: &WebAppState, session_id: &str) -> Result<
         Session::find(store, &session_id)?.ok_or_else(|| anyhow::anyhow!("session not found"))
     })
     .await?;
+    let (model, provider) = effective_model_provider(&session);
 
     Ok(SelectedSession {
         session_id: session.id,
@@ -102,9 +106,20 @@ async fn load_selected_session(state: &WebAppState, session_id: &str) -> Result<
             .title
             .unwrap_or_else(|| "Untitled session".to_string()),
         status: session.status.to_string(),
+        provider,
+        model,
         created_at: session.created_at.to_rfc3339(),
         updated_at: session.updated_at.to_rfc3339(),
     })
+}
+
+fn effective_model_provider(session: &Session) -> (String, String) {
+    let mut model = session.model.clone();
+    let mut provider = session.provider.clone();
+    if let Some(settings) = SessionSettingsOverrides::from_session(session) {
+        settings.apply_model_provider_overrides(&mut model, &mut provider);
+    }
+    (model, provider)
 }
 
 async fn load_turns(state: &WebAppState, session_id: &str) -> Result<Vec<Turn>> {

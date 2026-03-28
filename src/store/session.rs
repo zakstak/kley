@@ -194,6 +194,23 @@ impl Session {
         Ok(())
     }
 
+    pub fn update_runtime_selection(
+        store: &Store,
+        id: &str,
+        model: &str,
+        provider: &str,
+        settings: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        store.conn().execute(
+            "UPDATE sessions
+             SET model = ?1, provider = ?2, settings = ?3, updated_at = ?4
+             WHERE id = ?5",
+            (model, provider, settings, &now, id),
+        )?;
+        Ok(())
+    }
+
     /// Shared row mapper for all queries.
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         let status_str: String = row.get(2)?;
