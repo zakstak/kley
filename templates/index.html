@@ -614,25 +614,6 @@
                 >
                   Open browser login
                 </button>
-                <label class="sr-only" for="login-openai-callback-input"
-                  >OpenAI callback URL or code</label
-                >
-                <input
-                  id="login-openai-callback-input"
-                  data-testid="login-openai-callback-input"
-                  type="text"
-                  autocomplete="off"
-                  placeholder="Paste callback URL or code"
-                  class="shell-input min-w-[240px]"
-                />
-                <button
-                  id="login-openai-complete"
-                  data-testid="login-openai-complete"
-                  type="button"
-                  class="shell-btn"
-                >
-                  Complete
-                </button>
               </div>
               <span
                 id="login-status"
@@ -804,12 +785,6 @@
           loginSubmitButton: document.getElementById("login-submit"),
           loginOpenAiControls: document.getElementById("login-openai-controls"),
           loginOpenAiStartButton: document.getElementById("login-openai-start"),
-          loginOpenAiCallbackInput: document.getElementById(
-            "login-openai-callback-input",
-          ),
-          loginOpenAiCompleteButton: document.getElementById(
-            "login-openai-complete",
-          ),
           loginStatus: document.getElementById("login-status"),
         };
 
@@ -836,8 +811,6 @@
           !dom.loginSubmitButton ||
           !dom.loginOpenAiControls ||
           !dom.loginOpenAiStartButton ||
-          !dom.loginOpenAiCallbackInput ||
-          !dom.loginOpenAiCompleteButton ||
           !dom.loginStatus
         ) {
           return;
@@ -1195,23 +1168,6 @@
             state.auth.openaiLoggedIn;
           dom.loginOpenAiStartButton.style.opacity = dom.loginOpenAiStartButton
             .disabled
-            ? "0.55"
-            : "1";
-
-          const callbackInput = dom.loginOpenAiCallbackInput.value.trim();
-          dom.loginOpenAiCallbackInput.disabled =
-            loginBlocked ||
-            !usingOpenAi ||
-            authStorageUnavailable ||
-            !state.auth.pendingOpenaiLogin;
-          dom.loginOpenAiCompleteButton.disabled =
-            loginBlocked ||
-            !usingOpenAi ||
-            authStorageUnavailable ||
-            !state.auth.pendingOpenaiLogin ||
-            callbackInput.length === 0;
-          dom.loginOpenAiCompleteButton.style.opacity = dom
-            .loginOpenAiCompleteButton.disabled
             ? "0.55"
             : "1";
         }
@@ -1733,7 +1689,6 @@
                 state.openAiAuthWindow.close();
               }
               state.openAiAuthWindow = null;
-              dom.loginOpenAiCallbackInput.value = "";
               setLoginStatus("logged in openai", "ok");
               setStatus("login saved", "ok");
               pushInspectorEvent("openai login completed");
@@ -2037,7 +1992,7 @@
 
           if (!sent) {
             state.loginPending = false;
-            if (state.openAiAuthWindow && !state.openAiAuthWindow.closed) {
+            if (!state.openAiAuthWindow?.closed) {
               state.openAiAuthWindow.close();
             }
             state.openAiAuthWindow = null;
@@ -2050,13 +2005,11 @@
           pushInspectorEvent("openai login start requested");
         }
 
-        function completeOpenAiLogin(callbackInputOverride) {
-          const callbackInput =
-            typeof callbackInputOverride === "string"
-              ? callbackInputOverride.trim()
-              : dom.loginOpenAiCallbackInput.value.trim();
-          if (!callbackInput) {
-            setLoginStatus("paste callback URL or code", "error");
+        function completeOpenAiLogin(callbackInput) {
+          const callback =
+            typeof callbackInput === "string" ? callbackInput.trim() : "";
+          if (!callback) {
+            setLoginStatus("missing browser callback payload", "error");
             syncWorkspaceControls();
             return;
           }
@@ -2070,7 +2023,7 @@
           const sent = sendCommand({
             type: "auth.openai.complete",
             request_id: requestId,
-            callback_input: callbackInput,
+            callback_input: callback,
           });
 
           if (!sent) {
@@ -2085,7 +2038,7 @@
         }
 
         function handleOpenAiCallbackMessage(event) {
-          const payload = event && event.data;
+          const payload = event?.data;
           if (!payload || typeof payload !== "object") {
             return;
           }
@@ -2133,7 +2086,6 @@
             return;
           }
 
-          dom.loginOpenAiCallbackInput.value = callbackInput;
           completeOpenAiLogin(callbackInput);
         }
 
@@ -2254,22 +2206,14 @@
           syncWorkspaceControls();
         });
 
-        dom.loginOpenAiCallbackInput.addEventListener("input", () => {
-          syncWorkspaceControls();
-        });
-
         dom.loginOpenAiStartButton.addEventListener("click", () => {
           startOpenAiLogin();
-        });
-
-        dom.loginOpenAiCompleteButton.addEventListener("click", () => {
-          completeOpenAiLogin();
         });
 
         dom.loginForm.addEventListener("submit", (event) => {
           event.preventDefault();
           if (dom.loginProviderSelect.value === "openai") {
-            completeOpenAiLogin();
+            startOpenAiLogin();
             return;
           }
           submitZaiLogin();

@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    body::{Body, to_bytes},
-    http::{Request, StatusCode, header},
+    body::{to_bytes, Body},
+    http::{header, Request, StatusCode},
 };
 use futures_util::{SinkExt, StreamExt};
 use kley::store::{self, NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
@@ -178,8 +178,6 @@ mod web {
             "data-testid=\"login-submit\"",
             "data-testid=\"login-openai-controls\"",
             "data-testid=\"login-openai-start\"",
-            "data-testid=\"login-openai-callback-input\"",
-            "data-testid=\"login-openai-complete\"",
         ] {
             assert!(html.contains(marker), "missing marker: {marker}");
         }
@@ -290,16 +288,12 @@ mod web {
         assert!(frame["selected_session"]["created_at"].as_str().is_some());
         assert!(frame["selected_session"]["updated_at"].as_str().is_some());
         let transcript = frame["transcript"].as_array().unwrap();
-        assert!(
-            transcript
-                .iter()
-                .any(|entry| entry["content"] == "Persisted bootstrap prompt")
-        );
-        assert!(
-            transcript
-                .iter()
-                .any(|entry| entry["content"] == "Persisted bootstrap reply")
-        );
+        assert!(transcript
+            .iter()
+            .any(|entry| entry["content"] == "Persisted bootstrap prompt"));
+        assert!(transcript
+            .iter()
+            .any(|entry| entry["content"] == "Persisted bootstrap reply"));
     }
 
     #[tokio::test]
@@ -770,13 +764,11 @@ mod web {
             frame["selected_session"]["title"],
             "Requested Older Session"
         );
-        assert!(
-            frame["sessions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["session_id"] == requested_session.id)
-        );
+        assert!(frame["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["session_id"] == requested_session.id));
     }
 
     #[tokio::test]
@@ -860,16 +852,12 @@ mod web {
         assert_eq!(snapshot["selected_session"]["title"], "First Session");
 
         let transcript = snapshot["transcript"].as_array().unwrap();
-        assert!(
-            transcript
-                .iter()
-                .any(|entry| entry["content"] == "First session transcript")
-        );
-        assert!(
-            !transcript
-                .iter()
-                .any(|entry| entry["content"] == "Second session transcript")
-        );
+        assert!(transcript
+            .iter()
+            .any(|entry| entry["content"] == "First session transcript"));
+        assert!(!transcript
+            .iter()
+            .any(|entry| entry["content"] == "Second session transcript"));
     }
 
     #[tokio::test]
@@ -1121,22 +1109,18 @@ mod web {
 
             if event_type == "tool.started" {
                 started_id = frame["tool_call_id"].as_str().map(|s| s.to_string());
-                assert!(
-                    frame["tool_name"]
-                        .as_str()
-                        .unwrap()
-                        .contains("unknown_tool")
-                );
+                assert!(frame["tool_name"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown_tool"));
             }
 
             if event_type == "tool.completed" {
                 completed_id = frame["tool_call_id"].as_str().map(|s| s.to_string());
-                assert!(
-                    frame["tool_name"]
-                        .as_str()
-                        .unwrap()
-                        .contains("unknown_tool")
-                );
+                assert!(frame["tool_name"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown_tool"));
             }
 
             if event_type == "turn.completed" {
@@ -1215,11 +1199,9 @@ mod web {
         assert_eq!(state_frame["request_id"], "req-ui-state-1");
 
         let transcript = state_frame["data"]["transcript"].as_array().unwrap();
-        assert!(
-            transcript
-                .iter()
-                .any(|entry| entry["role"] == "user" && entry["content"] == "please use a tool")
-        );
+        assert!(transcript
+            .iter()
+            .any(|entry| entry["role"] == "user" && entry["content"] == "please use a tool"));
         assert!(transcript.iter().any(|entry| {
             entry["role"] == "assistant"
                 && entry["content"]
@@ -1309,28 +1291,20 @@ mod web {
         assert_eq!(snapshot["selected_session"]["title"], "First Session");
 
         let transcript = snapshot["transcript"].as_array().unwrap();
-        assert!(
-            transcript
-                .iter()
-                .any(|entry| entry["content"] == "First session transcript")
-        );
-        assert!(
-            !transcript
-                .iter()
-                .any(|entry| entry["content"] == "Second session transcript")
-        );
+        assert!(transcript
+            .iter()
+            .any(|entry| entry["content"] == "First session transcript"));
+        assert!(!transcript
+            .iter()
+            .any(|entry| entry["content"] == "Second session transcript"));
 
         let sessions = snapshot["sessions"].as_array().unwrap();
-        assert!(
-            sessions
-                .iter()
-                .any(|entry| entry["session_id"] == first_session.id)
-        );
-        assert!(
-            sessions
-                .iter()
-                .any(|entry| entry["session_id"] == second_session.id)
-        );
+        assert!(sessions
+            .iter()
+            .any(|entry| entry["session_id"] == first_session.id));
+        assert!(sessions
+            .iter()
+            .any(|entry| entry["session_id"] == second_session.id));
     }
 
     #[tokio::test]
@@ -1409,11 +1383,9 @@ mod web {
         assert!(state_after["data"]["active_turn"].is_null());
 
         let transcript = state_after["data"]["transcript"].as_array().unwrap();
-        assert!(
-            transcript
-                .iter()
-                .any(|entry| entry["role"] == "user" && entry["content"] == "hello after abort")
-        );
+        assert!(transcript
+            .iter()
+            .any(|entry| entry["role"] == "user" && entry["content"] == "hello after abort"));
     }
 
     #[tokio::test]
@@ -1513,15 +1485,13 @@ mod web {
         assert_eq!(bootstrap2["session_id"], seeded_session.id);
 
         let transcript = bootstrap2["transcript"].as_array().unwrap();
-        assert!(
-            transcript
-                .iter()
-                .any(|turn| turn["content"] == "Persisted history message")
-        );
-        assert!(
-            transcript.iter().any(|turn| turn["role"] == "user"
-                && turn["content"] == "abortable response please stop")
-        );
+        assert!(transcript
+            .iter()
+            .any(|turn| turn["content"] == "Persisted history message"));
+        assert!(transcript
+            .iter()
+            .any(|turn| turn["role"] == "user"
+                && turn["content"] == "abortable response please stop"));
 
         assert_eq!(bootstrap2["active_turn"]["request_id"], "req-reconnect-1");
         let replayed_content = bootstrap2["active_turn"]["content"].as_str().unwrap();
