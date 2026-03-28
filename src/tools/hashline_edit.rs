@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::editing::hashline::HashlineEditEngine;
-use super::editing::hashline_anchor::{HashlineSnapshot, parse_hashline_anchor};
+use super::editing::hashline_anchor::{parse_hashline_anchor, HashlineSnapshot};
 use super::editing::observability::finalize_outcome;
 use super::editing::{EditEngine, EditFailureKind, EditOperation, EditRequest};
 use super::{Tool, ToolExecutionResult};
@@ -33,29 +33,29 @@ impl Tool for HashlineEditTool {
                     "minItems": 1,
                     "items": {
                         "type": "object",
-                        "properties": {
-                            "kind": {
-                                "type": "string",
-                                "enum": ["replace", "insert_before", "insert_after", "delete"],
-                                "description": "Edit kind"
-                            },
-                            "start": {
-                                "type": "string",
-                                "description": "Start anchor as LINE#HASH"
-                            },
-                            "end": {
-                                "type": "string",
-                                "description": "Optional end anchor as LINE#HASH"
-                            },
-                            "replacement": {
-                                "type": "string",
-                                "description": "Replacement text"
-                            }
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["replace", "insert_before", "insert_after", "delete"],
+                            "description": "Edit kind"
                         },
-                        "required": ["kind", "start"],
-                        "additionalProperties": false
-                    }
+                        "start": {
+                            "type": "string",
+                            "description": "Start anchor as LINE#HASH"
+                        },
+                        "end": {
+                            "type": ["string", "null"],
+                            "description": "Optional end anchor as LINE#HASH"
+                        },
+                        "replacement": {
+                            "type": ["string", "null"],
+                            "description": "Replacement text"
+                        }
+                    },
+                    "required": ["kind", "start", "end", "replacement"],
+                    "additionalProperties": false
                 }
+            }
             },
             "required": ["path", "edits"],
             "additionalProperties": false

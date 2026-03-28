@@ -3,15 +3,15 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use kley::tools::Tool;
 use kley::tools::editing::hashline::HashlineEditEngine;
 use kley::tools::editing::{
+    EditEngine, EditFailureKind, EditOperation, EditOutcome, EditRequest,
     EDIT_ALLOW_PATCH_FALLBACK, EDIT_APPLY_IS_ATOMIC, EDIT_SINGLE_FILE_ONLY,
-    EDIT_TOOL_SUMMARY_MAX_CHARS, EditEngine, EditFailureKind, EditOperation, EditOutcome,
-    EditRequest,
+    EDIT_TOOL_SUMMARY_MAX_CHARS,
 };
 use kley::tools::hashline_edit::{HashlineEditRequest, HashlineEditTool};
 use kley::tools::patch::PatchEditEngine;
+use kley::tools::Tool;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -329,15 +329,15 @@ fn hashline_request_schema_is_strict() {
                                 "description": "Start anchor as LINE#HASH"
                             },
                             "end": {
-                                "type": "string",
+                                "type": ["string", "null"],
                                 "description": "Optional end anchor as LINE#HASH"
                             },
                             "replacement": {
-                                "type": "string",
+                                "type": ["string", "null"],
                                 "description": "Replacement text"
                             }
                         },
-                        "required": ["kind", "start"],
+                        "required": ["kind", "start", "end", "replacement"],
                         "additionalProperties": false
                     }
                 }
