@@ -126,16 +126,19 @@ fn extract_controlled_response(prompt: &str) -> Option<TurnResult> {
 }
 
 fn has_control_block(history: &[serde_json::Value]) -> bool {
-    history.iter().rev().any(|item| {
-        item.get("type").and_then(|v| v.as_str()) == Some("message")
-            && item.get("role").and_then(|v| v.as_str()) == Some("user")
-            && item
-                .get("content")
-                .and_then(|v| v.as_str())
-                .is_some_and(|content| {
-                    content.contains(CONTROL_BLOCK_START) && content.contains(CONTROL_BLOCK_END)
-                })
-    })
+    history
+        .iter()
+        .rev()
+        .find(|item| {
+            item.get("type").and_then(|v| v.as_str()) == Some("message")
+                && item.get("role").and_then(|v| v.as_str()) == Some("user")
+        })
+        .and_then(|item| {
+            item.get("content").and_then(|v| v.as_str()).map(|content| {
+                content.contains(CONTROL_BLOCK_START) && content.contains(CONTROL_BLOCK_END)
+            })
+        })
+        .unwrap_or(false)
 }
 
 async fn run_test_provider(
@@ -212,4 +215,51 @@ fn response_chunks(response: &str, target_parts: usize) -> Vec<String> {
 enum ControlledResponse {
     ToolCall { name: String, arguments: Value },
     Text { content: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn control_block_text() -> String {
+        format!(
+            "{}{{\"type\":\"text\",\"content\":\"ok\"}}{}",
+            CONTROL_BLOCK_START, CONTROL_BLOCK_END
+        )
+    }
+
+    #[test]
+    fn control_block_detects_latest_user_turn() {
+        let history = vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": control_block_text()
+        })];
+
+        assert!(has_control_block(&history));
+    }
+
+    #[test]
+    fn stale_control_block_not_sticky_across_turns() {
+        let history = vec![
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": control_block_text()
+            }),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": "anything"
+            }),
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": "just chat"
+            }),
+        ];
+
+        assert!(!has_control_block(&history));
+    }
 }
