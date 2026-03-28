@@ -60,7 +60,7 @@ pub async fn openai_callback(Query(query): Query<OpenAiCallbackQuery>) -> Html<S
       if (fallback) {{
         fallback.style.display = "block";
         fallback.textContent = payload.callback_input
-          ? `Automatic handoff unavailable. Paste this callback URL in the app:\n\n${{payload.callback_input}}`
+          ? `Automatic handoff unavailable. Return to the app and click Open browser login again.\n\nCallback URL:\n${{payload.callback_input}}`
           : "Automatic handoff unavailable. Return to the app and retry login.";
       }}
       if (status) {{

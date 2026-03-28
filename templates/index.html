@@ -1032,10 +1032,6 @@
           }
           syncLoginProviderOptions();
 
-          if (state.auth.openaiLoggedIn || !state.auth.pendingOpenaiLogin) {
-            dom.loginOpenAiCallbackInput.value = "";
-          }
-
           syncWorkspaceControls();
           if (!state.loginPending) {
             syncLoginStatusFromAuth();
