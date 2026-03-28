@@ -4,6 +4,8 @@
 //! The registry generates the OpenAI Responses API `tools` array and dispatches
 //! calls by name.
 
+pub mod editing;
+pub mod hashline_edit;
 pub mod patch;
 pub mod read_file;
 pub mod read_skill;
@@ -12,6 +14,29 @@ pub mod shell;
 
 use anyhow::Result;
 use serde_json::Value;
+
+use crate::tools::editing::EditObservation;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolExecutionResult {
+    pub output: String,
+    pub edit_observations: Vec<EditObservation>,
+}
+
+impl ToolExecutionResult {
+    pub fn from_output(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            edit_observations: Vec::new(),
+        }
+    }
+}
+
+impl From<String> for ToolExecutionResult {
+    fn from(value: String) -> Self {
+        Self::from_output(value)
+    }
+}
 
 /// A tool that the agent can invoke during a conversation.
 pub trait Tool: Send + Sync {
@@ -32,6 +57,10 @@ pub trait Tool: Send + Sync {
     /// exited non-zero) should be returned as `Ok(error_message)` so the
     /// model can see them and adapt.
     fn execute(&self, args: Value) -> Result<String>;
+
+    fn execute_with_result(&self, args: Value) -> Result<ToolExecutionResult> {
+        self.execute(args).map(ToolExecutionResult::from_output)
+    }
 }
 
 /// Registry of available tools. Handles schema generation and dispatch.
@@ -88,6 +117,7 @@ pub fn default_registry(project_dir: std::path::PathBuf) -> ToolRegistry {
     reg.register(Box::new(shell::ShellTool::new()));
     reg.register(Box::new(read_file::ReadFileTool));
     reg.register(Box::new(patch::PatchTool));
+    reg.register(Box::new(hashline_edit::HashlineEditTool));
     reg.register(Box::new(read_skill::ReadSkillTool::new(project_dir)));
     reg.register(Box::new(report_status::ReportStatusTool));
     reg
@@ -176,7 +206,15 @@ mod tests {
         assert!(reg.get("shell").is_some());
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("patch").is_some());
+        assert!(reg.get("hashline_edit").is_some());
         assert!(reg.get("read_skill").is_some());
         assert!(reg.get("report_status").is_some());
+    }
+
+    #[test]
+    fn tool_execution_result_from_output_defaults_to_no_observations() {
+        let result = ToolExecutionResult::from_output("ok");
+        assert_eq!(result.output, "ok");
+        assert!(result.edit_observations.is_empty());
     }
 }

@@ -577,7 +577,7 @@ mod runtime {
     #[tokio::test]
     async fn on_tool_approval_denies_execution() {
         let store = Store::open_memory().unwrap();
-        let (emitter, _receiver) = event_channel();
+        let (emitter, receiver) = event_channel();
         let (executed, execution_happened) = (
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
@@ -626,9 +626,32 @@ mod runtime {
 
         let session = runtime.session_id().to_string();
         let turns = Turn::list_for_session(&store.lock().unwrap(), &session).unwrap();
-        assert!(turns.iter().any(|turn| {
-            turn.kind == "function_call_output"
-                && turn.content.contains("Tool execution denied by user")
-        }));
+        let function_output = turns
+            .iter()
+            .find(|turn| turn.kind == "function_call_output")
+            .expect("function_call_output turn expected");
+        let payload: serde_json::Value = serde_json::from_str(&function_output.content).unwrap();
+        assert!(
+            payload["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Tool execution denied by user")
+        );
+        assert!(payload.get("edit_observation").is_none());
+
+        let events = receiver.drain();
+        let denied_tool_event = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolCallCompleted {
+                    success,
+                    edit_observation,
+                    ..
+                } => Some((*success, edit_observation)),
+                _ => None,
+            })
+            .expect("expected ToolCallCompleted event");
+        assert!(!denied_tool_event.0);
+        assert!(denied_tool_event.1.is_none());
     }
 }

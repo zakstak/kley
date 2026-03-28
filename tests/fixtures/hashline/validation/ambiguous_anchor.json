@@ -1,0 +1,10 @@
+{
+  "path": "tests/fixtures/hashline/snapshots/original.txt",
+  "edits": [
+    {
+      "kind": "replace",
+      "start": "3#f44e64e7",
+      "replacement": "gamma updated"
+    }
+  ]
+}

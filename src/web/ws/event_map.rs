@@ -91,6 +91,7 @@ pub(super) fn runtime_event_to_ui_event(
             turn_id,
             tool_call_id,
             tool_name,
+            edit_observation,
             success,
             context_used_chars,
             context_max_chars,
@@ -104,6 +105,7 @@ pub(super) fn runtime_event_to_ui_event(
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
             success: *success,
+            edit_observation: edit_observation.as_deref().cloned(),
             context_usage: context_usage_from_event(
                 *context_used_chars,
                 *context_max_chars,

@@ -1,0 +1,16 @@
+{
+  "path": "tests/fixtures/hashline/snapshots/original.txt",
+  "edits": [
+    {
+      "kind": "replace",
+      "start": "2#f44e64e7",
+      "end": "4#f44e64e7",
+      "replacement": "beta\ngamma\nbeta\n"
+    },
+    {
+      "kind": "delete",
+      "start": "4#f44e64e7",
+      "end": "5#4f4a9410"
+    }
+  ]
+}

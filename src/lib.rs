@@ -7,6 +7,7 @@ pub mod agent;
 pub mod auth;
 pub mod compact;
 pub mod events;
+pub mod harness;
 pub mod preflight;
 pub mod provider;
 pub mod runtime;

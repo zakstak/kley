@@ -1,0 +1,28 @@
+{
+  "name": "stale_reference",
+  "request": {
+    "path": "src/runtime/session.rs",
+    "operations": [
+      {
+        "kind": "replace",
+        "anchor": "553#deadbeef",
+        "end_anchor": "553#deadbeef",
+        "lines": [
+          "let output_preview = truncate(output.lines().next().unwrap_or(\"(empty)\"), 80);"
+        ]
+      }
+    ]
+  },
+  "outcome": {
+    "status": "failed",
+    "kind": "stale_reference",
+    "summary": "stale hashline reference for src/runtime/session.rs",
+    "observations": [
+      {
+        "code": "stale_anchor",
+        "message": "anchor hash no longer matches source",
+        "line": 553
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "path": "tests/fixtures/hashline/snapshots/original.txt",
+  "edits": [
+    {
+      "kind": "delete",
+      "start": "5#4f4a9410",
+      "end": "6#304b4a90"
+    },
+    {
+      "kind": "replace",
+      "start": "2#f44e64e7",
+      "replacement": "beta updated"
+    }
+  ]
+}

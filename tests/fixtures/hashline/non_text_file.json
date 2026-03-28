@@ -1,0 +1,25 @@
+{
+  "name": "non_text_file",
+  "request": {
+    "path": "assets/logo.png",
+    "operations": [
+      {
+        "kind": "replace",
+        "anchor": "1#ffeedd",
+        "end_anchor": "1#ffeedd",
+        "lines": ["binary patch"]
+      }
+    ]
+  },
+  "outcome": {
+    "status": "failed",
+    "kind": "non_text_file",
+    "summary": "target file is not UTF-8 text",
+    "observations": [
+      {
+        "code": "content_type",
+        "message": "binary file cannot be edited via hashline contract"
+      }
+    ]
+  }
+}

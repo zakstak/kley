@@ -2,6 +2,10 @@
 
 Run chat with `./docker-session.sh`.
 
+Supported platform: Linux only. Windows and other non-Linux targets are
+unsupported, and this repo does not accept platform-compatibility work for them
+unless policy changes.
+
 ## Notes
 
 - [Bindery UI port status](./BINDERY_UI_PORT_STATUS.md) — what is wired today

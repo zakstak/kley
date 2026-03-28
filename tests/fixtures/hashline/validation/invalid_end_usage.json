@@ -1,0 +1,11 @@
+{
+  "path": "tests/fixtures/hashline/snapshots/original.txt",
+  "edits": [
+    {
+      "kind": "insert_after",
+      "start": "2#f44e64e7",
+      "end": "3#be9d587d",
+      "replacement": "// invalid trailing anchor"
+    }
+  ]
+}

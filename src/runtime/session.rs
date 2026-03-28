@@ -12,6 +12,7 @@ use crate::provider::{Provider, SendContext, TokenUsage, ToolCall, TurnResult, m
 use crate::store::{NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::ToolRegistry;
+use crate::tools::editing::EditObservation;
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
 const DEFAULT_ZAI_MODEL: &str = "glm-4.7";
@@ -41,6 +42,7 @@ pub enum RuntimeEvent {
         call_id: String,
         name: String,
         output_preview: String,
+        edit_observation: Option<Box<EditObservation>>,
     },
 }
 
@@ -524,9 +526,10 @@ impl<'a> SessionRuntime<'a> {
                             None => true,
                         };
 
-                        let (output, success) = if !approved {
+                        let (output, edit_observation, success) = if !approved {
                             (
-                                                                "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.".to_string(),
+                                "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.".to_string(),
+                                None,
                                 false,
                             )
                         } else {
@@ -541,35 +544,46 @@ impl<'a> SessionRuntime<'a> {
                                     }
                                     let args: serde_json::Value =
                                         serde_json::from_str(&call.arguments).unwrap_or_default();
-                                    match tool.execute(args) {
-                                        Ok(result) => (result, true),
-                                        Err(e) => (format!("Tool error: {e:#}"), false),
+                                    match tool.execute_with_result(args) {
+                                        Ok(result) => (
+                                            result.output,
+                                            result.edit_observations.first().cloned(),
+                                            true,
+                                        ),
+                                        Err(e) => (format!("Tool error: {e:#}"), None, false),
                                     }
                                 }
-                                None => (format!("Error: unknown tool '{}'", call.name), false),
+                                None => {
+                                    (format!("Error: unknown tool '{}'", call.name), None, false)
+                                }
                             }
                         };
 
                         let output_preview =
-                            truncate(output.lines().next().unwrap_or("(empty)"), 80);
+                            tool_output_preview(&output, edit_observation.as_ref());
                         self.emit_runtime_event(RuntimeEvent::ToolCallCompleted {
                             call_id: call.call_id.clone(),
                             name: call.name.clone(),
                             output_preview: output_preview.clone(),
+                            edit_observation: edit_observation.clone().map(Box::new),
                         });
 
                         self.with_store(|store| {
+                            let mut content = serde_json::json!({
+                                "call_id": call.call_id,
+                                "output": output.clone(),
+                            });
+                            if let Some(observation) = &edit_observation {
+                                content["edit_observation"] =
+                                    serialize_edit_observation_best_effort(observation);
+                            }
                             Turn::append(
                                 store,
                                 NewTurn {
                                     session_id: self.session.id.clone(),
                                     kind: "function_call_output".into(),
                                     role: "tool".into(),
-                                    content: serde_json::json!({
-                                        "call_id": call.call_id,
-                                        "output": output.clone(),
-                                    })
-                                    .to_string(),
+                                    content: content.to_string(),
                                     model: None,
                                     tokens_in: None,
                                     tokens_out: None,
@@ -584,11 +598,12 @@ impl<'a> SessionRuntime<'a> {
                             "name": call.name,
                             "arguments": call.arguments,
                         }));
-                        self.history.push(serde_json::json!({
+                        let output_item = serde_json::json!({
                             "type": "function_call_output",
                             "call_id": call.call_id,
                             "output": output,
-                        }));
+                        });
+                        self.history.push(output_item);
 
                         let (context_used_chars, context_max_chars) = context_usage_chars(
                             &self.history,
@@ -606,6 +621,7 @@ impl<'a> SessionRuntime<'a> {
                             tool_call_id: call.call_id.clone(),
                             tool_name: call.name.clone(),
                             output_preview,
+                            edit_observation: edit_observation.map(Box::new),
                             success,
                             context_used_chars,
                             context_max_chars,
@@ -857,6 +873,35 @@ fn restore_compact_threshold_from_settings(compact_config: &mut CompactConfig, s
 
 fn truncate(s: &str, max: usize) -> String {
     truncate_with_ascii_ellipsis(s, max)
+}
+
+fn tool_output_preview(output: &str, edit_observation: Option<&EditObservation>) -> String {
+    if let Some(observation) = edit_observation
+        && let Some(artifact_id) = observation.artifact_id.as_deref()
+    {
+        return truncate(&format!("artifact_id={artifact_id}"), 80);
+    }
+
+    if let Some(artifact_line) = output
+        .lines()
+        .find(|line| line.trim_start().starts_with("artifact_id="))
+    {
+        return truncate(artifact_line.trim(), 80);
+    }
+
+    truncate(output.lines().next().unwrap_or("(empty)"), 80)
+}
+
+fn serialize_edit_observation_best_effort(observation: &EditObservation) -> serde_json::Value {
+    serde_json::to_value(observation).unwrap_or_else(|_| {
+        serde_json::json!({
+            "engine": observation.engine.clone(),
+            "tool_name": observation.tool_name.clone(),
+            "path": observation.path.clone(),
+            "failure_kind": observation.failure_kind.clone(),
+            "model_output_bounded": observation.model_output_bounded,
+        })
+    })
 }
 
 /// Create a boxed provider for the given provider name.
@@ -1146,11 +1191,12 @@ pub fn history_items_from_turns(turns: &[Turn]) -> Vec<serde_json::Value> {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&t.content)
                     .to_string();
-                items.push(serde_json::json!({
+                let item = serde_json::json!({
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": output,
-                }));
+                });
+                items.push(item);
             }
             _ => {
                 items.push(serde_json::json!({
@@ -1182,8 +1228,139 @@ pub use crate::provider::zai::process_zai_sse_line;
 mod tests {
     use super::truncate;
     use super::*;
+    use crate::auth::ResolvedAuth;
+    use crate::compact::CompactConfig;
     use crate::events::event_channel;
-    use crate::store::Session;
+    use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
+    use crate::store::{Session, Store, Turn};
+    use crate::tools::editing::EditObservation;
+    use crate::tools::{Tool, ToolExecutionResult, ToolRegistry};
+    use serde_json::{Value, json};
+
+    struct ObservedTool;
+
+    impl Tool for ObservedTool {
+        fn name(&self) -> &str {
+            "edit_tool"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool that emits an edit observation"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            })
+        }
+
+        fn execute(&self, _args: Value) -> Result<String> {
+            Ok("execute called".to_string())
+        }
+
+        fn execute_with_result(&self, _args: Value) -> Result<ToolExecutionResult> {
+            let observation = EditObservation {
+                engine: "test-engine".to_string(),
+                tool_name: self.name().to_string(),
+                path: "src/lib.rs".to_string(),
+                edit_count: 1,
+                applied_count: 1,
+                stale_reference_count: 0,
+                noop_count: 0,
+                failure_kind: None,
+                duration_ms: 12,
+                artifact_path: Some("/tmp/artifact.json".to_string()),
+                artifact_id: Some("artifact-123".to_string()),
+                model_output_bounded: true,
+            };
+            Ok(ToolExecutionResult {
+                output: "applied edits".to_string(),
+                edit_observations: vec![observation],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn model_history_excludes_edit_metadata() {
+        let store = Store::open_memory().unwrap();
+        let (emitter, receiver) = event_channel();
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ObservedTool));
+
+        let mut runtime = SessionRuntime::new(
+            &store,
+            ResolvedAuth {
+                provider: "test".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: "http://unused".to_string(),
+                account_id: None,
+            },
+            Some("test-model"),
+            None,
+            emitter,
+            CompactConfig::default(),
+            registry,
+            "system".to_string(),
+            RuntimeHooks::default(),
+        )
+        .unwrap();
+
+        let control_block = format!(
+            "{CONTROL_BLOCK_START}{{\"type\":\"tool_call\",\"name\":\"edit_tool\",\"arguments\":{{}}}}{CONTROL_BLOCK_END}"
+        );
+        runtime
+            .submit_prompt(format!("run the edit tool {control_block}"))
+            .await
+            .unwrap();
+
+        let function_call_outputs: Vec<_> = runtime
+            .history
+            .iter()
+            .filter(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+            })
+            .collect();
+        assert!(!function_call_outputs.is_empty());
+        let latest_output = function_call_outputs.last().unwrap();
+        assert!(latest_output.get("edit_observation").is_none());
+        assert!(latest_output.get("artifact_id").is_none());
+        assert!(latest_output.get("artifact_path").is_none());
+
+        let turns = Turn::list_for_session(&store, runtime.session_id()).unwrap();
+        let function_output_turn = turns
+            .iter()
+            .find(|turn| turn.kind == "function_call_output")
+            .expect("function_call_output turn expected");
+        let payload: Value = serde_json::from_str(&function_output_turn.content).unwrap();
+        let observation = payload
+            .get("edit_observation")
+            .and_then(|value| value.as_object())
+            .expect("edit_observation should remain in persisted turn");
+        assert_eq!(
+            observation
+                .get("artifact_id")
+                .and_then(|value| value.as_str()),
+            Some("artifact-123")
+        );
+        assert_eq!(
+            observation
+                .get("artifact_path")
+                .and_then(|value| value.as_str()),
+            Some("/tmp/artifact.json")
+        );
+
+        let tool_event = receiver.drain().into_iter().find_map(|event| match event {
+            AgentEvent::ToolCallCompleted {
+                edit_observation, ..
+            } => edit_observation,
+            _ => None,
+        });
+        assert!(tool_event.is_some());
+    }
 
     #[test]
     fn truncate_preserves_utf8_boundaries() {

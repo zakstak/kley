@@ -15,6 +15,11 @@ use serde_json::Value;
 
 use super::Tool;
 
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "Kley's shell tool is Linux-only today; do not add Windows or other non-Linux compatibility work unless repo policy changes."
+);
+
 /// Maximum output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KB
 const MAX_CAPTURE_BYTES: u64 = (MAX_OUTPUT_BYTES as u64) * 2;
@@ -479,17 +484,9 @@ where
         .collect();
 
     if processes.is_empty() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
+        use std::os::unix::process::ExitStatusExt;
 
-            return Ok(std::process::ExitStatus::from_raw(0));
-        }
-
-        #[cfg(not(unix))]
-        {
-            return Command::new("true").status();
-        }
+        return Ok(std::process::ExitStatus::from_raw(0));
     }
 
     let mut command = Command::new("kill");
@@ -505,7 +502,6 @@ fn child_exited(child: &mut Child) -> bool {
     matches!(child.try_wait(), Ok(Some(_)) | Err(_))
 }
 
-#[cfg(target_os = "linux")]
 fn reap_known_children_nonblocking(known_processes: &[u32]) {
     const WNOHANG: i32 = 1;
 
@@ -523,10 +519,6 @@ fn reap_known_children_nonblocking(known_processes: &[u32]) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn reap_known_children_nonblocking(_known_processes: &[u32]) {}
-
-#[cfg(target_os = "linux")]
 fn descendant_processes(root_pid: u32) -> Vec<u32> {
     use std::collections::HashMap;
 
@@ -564,12 +556,6 @@ fn descendant_processes(root_pid: u32) -> Vec<u32> {
     descendants
 }
 
-#[cfg(not(target_os = "linux"))]
-fn descendant_processes(_root_pid: u32) -> Vec<u32> {
-    Vec::new()
-}
-
-#[cfg(target_os = "linux")]
 fn parse_parent_pid(status: &str) -> Option<u32> {
     status.lines().find_map(|line| {
         let value = line.strip_prefix("PPid:")?.trim();
@@ -577,17 +563,10 @@ fn parse_parent_pid(status: &str) -> Option<u32> {
     })
 }
 
-#[cfg(target_os = "linux")]
 fn process_exists(pid: u32) -> bool {
     PathBuf::from(format!("/proc/{pid}")).exists()
 }
 
-#[cfg(not(target_os = "linux"))]
-fn process_exists(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(target_os = "linux")]
 fn process_group_id(pid: u32) -> Option<u32> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let right_paren = stat.rfind(')')?;
@@ -599,12 +578,6 @@ fn process_group_id(pid: u32) -> Option<u32> {
     process_group.parse().ok()
 }
 
-#[cfg(not(target_os = "linux"))]
-fn process_group_id(_pid: u32) -> Option<u32> {
-    None
-}
-
-#[cfg(target_os = "linux")]
 fn processes_holding_capture_files(capture_paths: &[&PathBuf]) -> Vec<u32> {
     use std::collections::HashSet;
     use std::os::unix::fs::MetadataExt;
@@ -654,11 +627,6 @@ fn processes_holding_capture_files(capture_paths: &[&PathBuf]) -> Vec<u32> {
     }
 
     holders
-}
-
-#[cfg(not(target_os = "linux"))]
-fn processes_holding_capture_files(_capture_paths: &[&PathBuf]) -> Vec<u32> {
-    Vec::new()
 }
 
 fn spawn_shell_child(
@@ -718,15 +686,11 @@ fn build_direct_spawn_command(
     Ok(cmd)
 }
 
-#[cfg(unix)]
 fn configure_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
 
     command.process_group(0);
 }
-
-#[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
 
 fn create_capture_file(stream_name: &str) -> std::io::Result<(PathBuf, File)> {
     let temp_dir = std::env::temp_dir();
@@ -743,12 +707,9 @@ fn create_capture_file(stream_name: &str) -> std::io::Result<(PathBuf, File)> {
 
         let mut open_options = OpenOptions::new();
         open_options.create_new(true).write(true).read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::OpenOptionsExt;
 
-            open_options.mode(0o600);
-        }
+        open_options.mode(0o600);
 
         match open_options.open(&path) {
             Ok(file) => return Ok((path, file)),

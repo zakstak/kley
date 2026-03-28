@@ -1,0 +1,55 @@
+{
+  "kind": "hashline_harness_scenario",
+  "name": "success",
+  "description": "Apply one correct edit and verify the final workspace state.",
+  "workspace": {
+    "files": [
+      {
+        "path": "src/sample.txt",
+        "content": "alpha\nbeta\ngamma\n"
+      }
+    ]
+  },
+  "engines": {
+    "patch": {
+      "prompt": "Use the patch tool exactly once to replace `beta` with `BETA` in `src/sample.txt`.",
+      "offline_provider_result": {
+        "type": "tool_call",
+        "arguments": {
+          "path": "src/sample.txt",
+          "target": "beta",
+          "replacement": "BETA"
+        }
+      },
+      "expected_files": [
+        {
+          "path": "src/sample.txt",
+          "content": "alpha\nBETA\ngamma\n"
+        }
+      ]
+    },
+    "hashline_edit": {
+      "prompt": "Use the hashline_edit tool exactly once to replace the line `beta` with `BETA` in `src/sample.txt`.",
+      "offline_provider_result": {
+        "type": "tool_call",
+        "arguments": {
+          "path": "src/sample.txt",
+          "edits": [
+            {
+              "kind": "replace",
+              "start": "2#f44e64e7",
+              "end": "2#f44e64e7",
+              "replacement": "BETA\n"
+            }
+          ]
+        }
+      },
+      "expected_files": [
+        {
+          "path": "src/sample.txt",
+          "content": "alpha\nBETA\ngamma\n"
+        }
+      ]
+    }
+  }
+}

@@ -263,25 +263,17 @@ impl SecretBackend for AgeFileBackend {
         let encrypted = age::encrypt(&recipient, plaintext.as_bytes())
             .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?;
 
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&self.path)
-                .with_context(|| format!("failed to write {}", self.path.display()))?;
-            file.write_all(&encrypted)?;
-        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
 
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&self.path, &encrypted)
-                .with_context(|| format!("failed to write {}", self.path.display()))?;
-        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&self.path)
+            .with_context(|| format!("failed to write {}", self.path.display()))?;
+        file.write_all(&encrypted)?;
 
         Ok(())
     }
@@ -612,6 +604,21 @@ mod tests {
 
         writer.save(&sample_openai_creds()).unwrap();
         assert!(reader.load().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn age_file_backend_writes_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("creds.age");
+        let backend = AgeFileBackend::new(path.clone(), SecretString::from("correct".to_owned()));
+
+        backend.save(&sample_openai_creds()).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

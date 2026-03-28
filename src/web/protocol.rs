@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::tools::editing::EditObservation;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +150,8 @@ pub enum UiEvent {
         tool_call_id: String,
         tool_name: String,
         success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        edit_observation: Option<EditObservation>,
         context_usage: ContextUsage,
     },
     #[serde(rename = "turn.completed")]
