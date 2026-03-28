@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::Serialize;
 
-use super::EditObservation;
 use super::artifacts::artifact_root_dir;
+use super::EditObservation;
 
 const METRICS_JSONL_FILE: &str = "metrics.jsonl";
 const EDIT_METRICS_DIR_ENV: &str = "KLEY_EDIT_METRICS_DIR";
@@ -65,13 +65,13 @@ pub fn persist_metric(
         telemetry_failure_kind,
     };
 
-    let line = serde_json::to_string(&record).map_err(std::io::Error::other)?;
+    let mut line = serde_json::to_string(&record).map_err(std::io::Error::other)?;
+    line.push('\n');
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(root.join(METRICS_JSONL_FILE))?;
     file.write_all(line.as_bytes())?;
-    file.write_all(b"\n")?;
     Ok(())
 }
 
@@ -110,4 +110,39 @@ pub fn with_metrics_root_override<T>(path: &Path, action: impl FnOnce() -> T) ->
     });
     let _guard = ResetGuard { previous };
     action()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn sample_observation() -> EditObservation {
+        EditObservation::new("hashline", "hashline_edit", "src/lib.rs", 1, 10)
+    }
+
+    #[test]
+    fn persist_metric_writes_complete_jsonl_line() {
+        let metrics_root = tempdir().unwrap();
+        with_metrics_root_override(metrics_root.path(), || {
+            let obs = sample_observation();
+            persist_metric(&obs, "metric-one", None, None).unwrap();
+            let mut obs2 = sample_observation();
+            obs2.tool_name = "hashline_edit_2".to_string();
+            persist_metric(&obs2, "metric-two", None, None).unwrap();
+        });
+
+        let metrics_path = metrics_root.path().join(METRICS_JSONL_FILE);
+        let contents = fs::read_to_string(metrics_path).unwrap();
+        let newline_count = contents.chars().filter(|c| *c == '\n').count();
+        assert_eq!(
+            newline_count, 2,
+            "two commands should produce two newline-terminated lines"
+        );
+        assert!(
+            contents.ends_with('\n'),
+            "metrics file should end with newline"
+        );
+    }
 }

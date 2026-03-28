@@ -97,16 +97,48 @@ pub fn persist_observation(
     let json_bytes = serde_json::to_vec_pretty(&record)?;
     fs::write(&artifact_path, json_bytes)?;
 
-    let jsonl_line = serde_json::to_string(&record)?;
+    let mut jsonl_line = serde_json::to_string(&record)?;
+    jsonl_line.push('\n');
     let mut runs = OpenOptions::new()
         .create(true)
         .append(true)
         .open(runs_jsonl)?;
     runs.write_all(jsonl_line.as_bytes())?;
-    runs.write_all(b"\n")?;
 
     Ok(PersistedArtifact {
         artifact_id,
         artifact_path: artifact_path_string,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn sample_observation() -> EditObservation {
+        EditObservation::new("hashline", "hashline_edit", "src/lib.rs", 1, 10)
+    }
+
+    #[test]
+    fn persist_observation_writes_complete_jsonl_line() {
+        let artifact_root = tempdir().unwrap();
+        with_artifact_root_override(artifact_root.path(), || {
+            let obs = sample_observation();
+            persist_observation(&obs, "summary-one").unwrap();
+            let mut obs2 = sample_observation();
+            obs2.tool_name = "hashline_edit_2".to_string();
+            persist_observation(&obs2, "summary-two").unwrap();
+        });
+
+        let runs_path = artifact_root.path().join("runs.jsonl");
+        let contents = fs::read_to_string(runs_path).unwrap();
+        let newline_count = contents.chars().filter(|c| *c == '\n').count();
+        assert_eq!(newline_count, 2, "each record should end with a newline");
+        assert!(
+            contents.ends_with('\n'),
+            "runs file should terminate with newline"
+        );
+    }
 }
