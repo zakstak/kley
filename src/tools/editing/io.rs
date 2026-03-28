@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+#[cfg(not(unix))]
+compile_error!(
+    "Kley only supports Unix write paths today; do not add Windows or other non-Unix compatibility work unless repo policy changes."
+);
+
 const MAX_SYMLINK_CHAIN_HOPS: usize = 64;
 
 fn resolve_final_target(path: &Path) -> io::Result<PathBuf> {
@@ -150,14 +155,18 @@ mod tests {
 
         atomic_replace(&entry_point, b"updated").unwrap();
 
-        assert!(fs::symlink_metadata(&entry_point)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(fs::symlink_metadata(&mid_link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            fs::symlink_metadata(&entry_point)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            fs::symlink_metadata(&mid_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
         assert_eq!(fs::read_to_string(&mid_link).unwrap(), "updated");
         assert_eq!(fs::read_to_string(&entry_point).unwrap(), "updated");

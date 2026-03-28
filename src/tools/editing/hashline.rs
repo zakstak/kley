@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use super::hashline_anchor::{parse_hashline_anchor, HashlineSnapshot};
+use super::hashline_anchor::{HashlineSnapshot, parse_hashline_anchor};
 use super::io::atomic_replace;
 use super::{
     EditEngine, EditFailureKind, EditObservation, EditOperation, EditOutcome, EditRequest,
