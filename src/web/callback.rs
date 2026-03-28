@@ -3,6 +3,15 @@ use axum::response::Html;
 use serde::Deserialize;
 use serde_json::json;
 
+fn callback_input_url(code: &str, state: &str) -> String {
+    let mut url = reqwest::Url::parse("http://localhost:1455/auth/callback")
+        .expect("callback URL should be valid");
+    url.query_pairs_mut()
+        .append_pair("code", code)
+        .append_pair("state", state);
+    url.to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OpenAiCallbackQuery {
     pub code: Option<String>,
@@ -20,9 +29,7 @@ pub async fn openai_callback(Query(query): Query<OpenAiCallbackQuery>) -> Html<S
         })
     } else {
         let callback_input = match (query.code, query.state) {
-            (Some(code), Some(state)) => {
-                format!("http://localhost:1455/auth/callback?code={code}&state={state}")
-            }
+            (Some(code), Some(state)) => callback_input_url(&code, &state),
             _ => String::new(),
         };
         json!({
@@ -92,5 +99,15 @@ mod tests {
         assert!(html.contains("kley.openai.callback"));
         assert!(html.contains("code-123"));
         assert!(html.contains("state-abc"));
+    }
+
+    #[test]
+    fn callback_input_url_encodes_reserved_characters() {
+        let encoded = callback_input_url("a+b&c=d", "state/with?symbols=#");
+        assert!(encoded.contains("code=a%2Bb%26c%3Dd"), "{encoded}");
+        assert!(
+            encoded.contains("state=state%2Fwith%3Fsymbols%3D%23"),
+            "{encoded}"
+        );
     }
 }
