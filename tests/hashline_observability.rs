@@ -4,10 +4,10 @@ use std::sync::{Mutex, OnceLock};
 
 use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
-use kley::events::{event_channel, AgentEvent};
+use kley::events::{AgentEvent, event_channel};
 use kley::runtime::{SessionRuntime, SubmitResult};
 use kley::store::{Store, Turn};
-use kley::tools::editing::{EditObservation, EDIT_TOOL_SUMMARY_MAX_CHARS};
+use kley::tools::editing::{EDIT_TOOL_SUMMARY_MAX_CHARS, EditObservation};
 use kley::tools::hashline_edit::HashlineEditTool;
 use kley::tools::patch::PatchTool;
 use kley::tools::{Tool, ToolExecutionResult, ToolRegistry};
@@ -147,12 +147,16 @@ fn successful_edits_write_structured_artifacts_with_required_fields() {
     assert_eq!(patch_observation.applied_count, 1);
     assert_eq!(patch_observation.stale_reference_count, 0);
     assert_eq!(patch_observation.noop_count, 0);
-    assert!(patch_result
-        .output
-        .contains(patch_observation.artifact_id.as_ref().unwrap()));
-    assert!(patch_result
-        .output
-        .contains(patch_observation.artifact_path.as_ref().unwrap()));
+    assert!(
+        patch_result
+            .output
+            .contains(patch_observation.artifact_id.as_ref().unwrap())
+    );
+    assert!(
+        patch_result
+            .output
+            .contains(patch_observation.artifact_path.as_ref().unwrap())
+    );
 
     let patch_artifact = read_json_artifact(&patch_result);
     let patch_artifact_obs = patch_artifact.get("observation").unwrap();

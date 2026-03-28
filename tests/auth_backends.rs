@@ -31,6 +31,7 @@ fn sample_creds() -> Credentials {
             id_token: None,
             api_key: None,
         }),
+        openai_api_key: None,
         zai: Some(ZaiCredentials {
             api_key: "zai-integration-key".into(),
         }),
@@ -160,6 +161,7 @@ fn overwrite_replaces_data() {
     let zai_only = Credentials {
         active_provider: Some("zai".into()),
         openai: None,
+        openai_api_key: None,
         zai: Some(ZaiCredentials {
             api_key: "new-key".into(),
         }),
@@ -173,6 +175,22 @@ fn overwrite_replaces_data() {
         "openai should be gone after overwrite"
     );
     assert_eq!(loaded.zai.unwrap().api_key, "new-key");
+}
+
+#[test]
+fn save_uses_backend_work_factor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("creds.age");
+    let passphrase = SecretString::from("work-factor-pass".to_owned());
+
+    let writer = AgeFileBackend::with_max_work_factor(path.clone(), passphrase.clone(), 4);
+    writer.save(&sample_creds()).unwrap();
+
+    let strict_reader = AgeFileBackend::with_max_work_factor(path.clone(), passphrase.clone(), 3);
+    assert!(strict_reader.load().is_err());
+
+    let matching_reader = AgeFileBackend::with_max_work_factor(path, passphrase, 4);
+    assert!(matching_reader.load().unwrap().is_some());
 }
 
 // ── Missing file returns None ───────────────────────────────────────────────

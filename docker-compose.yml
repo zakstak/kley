@@ -1,3 +1,4 @@
+---
 services:
   kley:
     build:
@@ -8,9 +9,10 @@ services:
     network_mode: host
     environment:
       # Set this so the credential store works non-interactively.
-      # Must match the passphrase used during `kley login openai`.
-      - KLEY_PASSPHRASE=${KLEY_PASSPHRASE:-}
-      # Optional bounded override for trusted credentials.age files with higher scrypt work.
+      - KLEY_PASSPHRASE=${KLEY_PASSPHRASE-kley-dev-passphrase}
+      - KLEY_WEB_AUTH_AUTO_RESET=${KLEY_WEB_AUTH_AUTO_RESET-1}
+      # Optional bounded override for trusted credentials.age files.
+      # Use when encrypted files were created with a higher scrypt work factor.
       - KLEY_AGE_MAX_WORK_FACTOR=${KLEY_AGE_MAX_WORK_FACTOR:-}
     volumes:
       # Mount the agent's working copy as the workspace

@@ -6,7 +6,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use kley::store::{self, NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
-use kley::web::state::WebAppState;
+use kley::web::state::{MockWebAuthService, WebAppState, WebAuthService};
 use serde_json::Value;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::util::ServiceExt;
@@ -46,6 +46,15 @@ mod web {
     fn test_state() -> WebAppState {
         let store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
         WebAppState::new(store)
+    }
+
+    fn test_state_with_auth_service(auth_service: Arc<dyn WebAuthService>) -> WebAppState {
+        let store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
+        WebAppState::with_auth_service(store, auth_service)
+    }
+
+    fn test_state_with_mock_openai() -> WebAppState {
+        test_state_with_auth_service(Arc::new(MockWebAuthService::default()))
     }
 
     async fn connect_ws(
@@ -158,6 +167,19 @@ mod web {
             "data-testid=\"tool-card\"",
             "data-testid=\"inspector-panel\"",
             "data-testid=\"status-pill\"",
+            "data-testid=\"session-settings-form\"",
+            "data-testid=\"provider-select\"",
+            "data-testid=\"model-select\"",
+            "data-testid=\"session-settings-submit\"",
+            "data-testid=\"login-form\"",
+            "data-testid=\"login-provider-select\"",
+            "data-testid=\"login-zai-controls\"",
+            "data-testid=\"login-api-key\"",
+            "data-testid=\"login-submit\"",
+            "data-testid=\"login-openai-controls\"",
+            "data-testid=\"login-openai-start\"",
+            "data-testid=\"login-openai-callback-input\"",
+            "data-testid=\"login-openai-complete\"",
         ] {
             assert!(html.contains(marker), "missing marker: {marker}");
         }
@@ -264,6 +286,7 @@ mod web {
         assert_eq!(frame["selected_session"]["session_id"], seeded_session.id);
         assert_eq!(frame["selected_session"]["title"], "Bootstrap Session");
         assert_eq!(frame["selected_session"]["status"], "active");
+        assert!(frame["auth"].is_object());
         assert!(frame["selected_session"]["created_at"].as_str().is_some());
         assert!(frame["selected_session"]["updated_at"].as_str().is_some());
         let transcript = frame["transcript"].as_array().unwrap();
@@ -358,6 +381,174 @@ mod web {
             settings["compact_threshold"],
             serde_json::json!(kley::compact::CompactConfig::default().threshold_chars)
         );
+    }
+
+    #[tokio::test]
+    async fn session_settings_update_persists_model_and_provider() {
+        let state = test_state();
+        let store = state.store.clone();
+        let seeded_session = store::store_run(&store, |s| {
+            Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", seeded_session.id),
+        )
+        .await;
+
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert_eq!(bootstrap["selected_session"]["provider"], "test");
+        assert_eq!(bootstrap["selected_session"]["model"], "test-model");
+
+        socket
+            .send(Message::Text(format!(
+                r#"{{"type":"session.settings.update","request_id":"req-settings-1","session_id":"{}","provider":"openai","model":"gpt-4.1"}}"#,
+                seeded_session.id
+            )))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        assert_eq!(ack["request_id"], "req-settings-1");
+        assert_eq!(ack["data"]["updated"], true);
+        assert_eq!(ack["data"]["provider"], "openai");
+        assert_eq!(ack["data"]["model"], "gpt-4.1");
+
+        let snapshot = recv_json(&mut socket).await;
+        assert_eq!(snapshot["type"], "state.snapshot");
+        assert_eq!(snapshot["selected_session"]["provider"], "openai");
+        assert_eq!(snapshot["selected_session"]["model"], "gpt-4.1");
+
+        let stored = store::store_run(&store, {
+            let session_id = seeded_session.id.clone();
+            move |s| Session::get(s, &session_id)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(stored.provider, "openai");
+        assert_eq!(stored.model, "gpt-4.1");
+        let settings: Value =
+            serde_json::from_str(&stored.settings.expect("settings should exist")).unwrap();
+        assert_eq!(settings["provider"], "openai");
+        assert_eq!(settings["model"], "gpt-4.1");
+        assert_eq!(
+            settings["compact_threshold"],
+            serde_json::json!(kley::compact::CompactConfig::default().threshold_chars)
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_api_key_login_is_rejected_in_web_ui() {
+        let server = spawn_server_with_state(test_state_with_mock_openai())
+            .await
+            .unwrap();
+        let mut socket = connect_ws(server.addr).await;
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"auth.login","request_id":"req-openai-api-key","provider":"openai","api_key":"sk-not-allowed"}"#
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let rejection = recv_json(&mut socket).await;
+        assert_eq!(rejection["type"], "response.error");
+        assert_eq!(rejection["request_id"], "req-openai-api-key");
+        assert_eq!(rejection["error"]["code"], "auth_flow_mismatch");
+    }
+
+    #[tokio::test]
+    async fn openai_browser_login_start_and_complete_updates_auth_snapshot() {
+        let server = spawn_server_with_state(test_state_with_mock_openai())
+            .await
+            .unwrap();
+        let mut socket = connect_ws(server.addr).await;
+
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert_eq!(bootstrap["auth"]["openai_logged_in"], false);
+        assert_eq!(bootstrap["auth"]["pending_openai_login"], false);
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"auth.openai.start","request_id":"req-openai-start"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        assert_eq!(ack["request_id"], "req-openai-start");
+        assert_eq!(ack["data"]["provider"], "openai");
+        assert_eq!(ack["data"]["started"], true);
+        assert!(ack["data"]["authorize_url"].as_str().is_some());
+
+        let pending_snapshot = recv_json(&mut socket).await;
+        assert_eq!(pending_snapshot["type"], "state.snapshot");
+        assert_eq!(pending_snapshot["auth"]["pending_openai_login"], true);
+        assert_eq!(pending_snapshot["auth"]["openai_logged_in"], false);
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"auth.openai.complete","request_id":"req-openai-complete","callback_input":"mock-openai-code"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let completion = recv_json(&mut socket).await;
+        assert_eq!(completion["type"], "response.ok");
+        assert_eq!(completion["request_id"], "req-openai-complete");
+        assert_eq!(completion["data"]["provider"], "openai");
+        assert_eq!(completion["data"]["logged_in"], true);
+
+        let logged_in_snapshot = recv_json(&mut socket).await;
+        assert_eq!(logged_in_snapshot["type"], "state.snapshot");
+        assert_eq!(logged_in_snapshot["auth"]["pending_openai_login"], false);
+        assert_eq!(logged_in_snapshot["auth"]["openai_logged_in"], true);
+        assert_eq!(logged_in_snapshot["auth"]["active_provider"], "openai");
+    }
+
+    #[tokio::test]
+    async fn zai_login_updates_auth_snapshot() {
+        let server = spawn_server_with_state(test_state_with_mock_openai())
+            .await
+            .unwrap();
+        let mut socket = connect_ws(server.addr).await;
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"auth.login","request_id":"req-zai-login","provider":"zai","api_key":"zai-test-key"}"#
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        assert_eq!(ack["request_id"], "req-zai-login");
+        assert_eq!(ack["data"]["provider"], "zai");
+        assert_eq!(ack["data"]["logged_in"], true);
+
+        let snapshot = recv_json(&mut socket).await;
+        assert_eq!(snapshot["type"], "state.snapshot");
+        assert_eq!(snapshot["auth"]["zai_logged_in"], true);
+        assert_eq!(snapshot["auth"]["active_provider"], "zai");
     }
 
     #[tokio::test]

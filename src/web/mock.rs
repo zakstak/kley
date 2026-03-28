@@ -3,8 +3,8 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::protocol::{
-    ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession, SessionSummary,
-    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
+    AuthStateSnapshot, ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession,
+    SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -13,8 +13,19 @@ pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
 
 async fn handle_socket(mut socket: WebSocket) {
     let mut prompt_counter: usize = 0;
+    let mut auth = AuthStateSnapshot {
+        storage_available: true,
+        storage_error: None,
+        active_provider: None,
+        openai_logged_in: false,
+        zai_logged_in: false,
+        pending_openai_login: false,
+    };
 
-    if send_event(&mut socket, bootstrap_event()).await.is_err() {
+    if send_event(&mut socket, bootstrap_event(&auth))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -80,7 +91,7 @@ async fn handle_socket(mut socket: WebSocket) {
 
         match command {
             WebCommand::StateGet { request_id } => {
-                let data = serde_json::to_value(snapshot_data()).unwrap();
+                let data = serde_json::to_value(snapshot_data(&auth)).unwrap();
                 if send_response(&mut socket, WebResponse::Ok { request_id, data })
                     .await
                     .is_err()
@@ -106,6 +117,89 @@ async fn handle_socket(mut socket: WebSocket) {
                 let data = json!({
                     "session_id": session_id,
                     "protocol_version": PROTOCOL_VERSION,
+                });
+                if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            WebCommand::AuthOpenAiStart { request_id } => {
+                auth.pending_openai_login = true;
+                let data = json!({
+                    "started": true,
+                    "provider": "openai",
+                    "authorize_url": "about:blank#kley-openai-auth",
+                });
+                if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if send_event(&mut socket, bootstrap_event(&auth))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            WebCommand::AuthOpenAiComplete {
+                request_id,
+                callback_input,
+            } => {
+                if callback_input.trim().is_empty() {
+                    if send_response(
+                        &mut socket,
+                        WebResponse::Error {
+                            request_id,
+                            error: ResponseError {
+                                code: "auth_completion_failed".to_string(),
+                                message: "missing authorization code".to_string(),
+                                details: Some(json!({ "provider": "openai" })),
+                            },
+                        },
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+
+                auth.pending_openai_login = false;
+                auth.active_provider = Some("openai".to_string());
+                auth.openai_logged_in = true;
+                let data = json!({
+                    "logged_in": true,
+                    "provider": "openai",
+                });
+                if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if send_event(&mut socket, bootstrap_event(&auth))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            WebCommand::SessionSettingsUpdate {
+                request_id,
+                session_id,
+                provider,
+                model,
+            } => {
+                let data = json!({
+                    "updated": true,
+                    "session_id": session_id,
+                    "provider": provider,
+                    "model": model,
                 });
                 if send_response(&mut socket, WebResponse::Ok { request_id, data })
                     .await
@@ -173,19 +267,64 @@ async fn handle_socket(mut socket: WebSocket) {
                     return;
                 }
             }
+            WebCommand::AuthLogin {
+                request_id,
+                provider,
+                api_key: _,
+            } => {
+                if provider == "openai" {
+                    if send_response(
+                        &mut socket,
+                        WebResponse::Error {
+                            request_id,
+                            error: ResponseError {
+                                code: "auth_flow_mismatch".to_string(),
+                                message: "openai login must be completed in the browser"
+                                    .to_string(),
+                                details: Some(json!({ "provider": provider })),
+                            },
+                        },
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+
+                auth.active_provider = Some(provider.clone());
+                auth.zai_logged_in = true;
+                let data = json!({
+                    "logged_in": true,
+                    "provider": provider,
+                });
+                if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if send_event(&mut socket, bootstrap_event(&auth))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
     }
 }
 
-fn bootstrap_event() -> UiEvent {
+fn bootstrap_event(auth: &AuthStateSnapshot) -> UiEvent {
     UiEvent::StateSnapshot {
         event_id: "evt-bootstrap-0001".to_string(),
         ts: ts(1),
-        data: snapshot_data(),
+        data: snapshot_data(auth),
     }
 }
 
-fn snapshot_data() -> StateSnapshotData {
+fn snapshot_data(auth: &AuthStateSnapshot) -> StateSnapshotData {
     StateSnapshotData {
         protocol_version: PROTOCOL_VERSION,
         session_id: "sess-mock-001".to_string(),
@@ -193,9 +332,12 @@ fn snapshot_data() -> StateSnapshotData {
             session_id: "sess-mock-001".to_string(),
             title: "Mock Session".to_string(),
             status: "active".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         },
+        auth: auth.clone(),
         sessions: sessions(),
         transcript: Vec::<TranscriptEntry>::new(),
         active_turn: None,
