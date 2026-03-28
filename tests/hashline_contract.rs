@@ -736,6 +736,55 @@ fn hashline_engine_preserves_crlf_and_bom() {
 }
 
 #[test]
+fn hashline_engine_preserves_mixed_line_endings_for_untouched_lines() {
+    let engine = HashlineEditEngine;
+    let original_bytes = b"alpha\nbeta\r\ngamma\n".to_vec();
+    let canonical_snapshot = "alpha\nbeta\ngamma\n";
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(&original_bytes).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![EditOperation {
+            kind: "replace".to_string(),
+            anchor: anchor_for_line(canonical_snapshot, 1),
+            end_anchor: Some(anchor_for_line(canonical_snapshot, 1)),
+            lines: vec!["ALPHA!\n".to_string()],
+        }],
+    });
+
+    assert!(matches!(outcome, EditOutcome::Applied { .. }));
+    let updated = fs::read(path).unwrap();
+    assert_eq!(updated, b"ALPHA!\nbeta\r\ngamma\n");
+}
+
+#[test]
+fn hashline_engine_deleting_all_content_leaves_empty_file() {
+    let engine = HashlineEditEngine;
+    let original = "alpha\nbeta\n";
+
+    let mut target = tempfile::NamedTempFile::new().unwrap();
+    target.write_all(original.as_bytes()).unwrap();
+    let path = target.path().to_string_lossy().to_string();
+
+    let outcome = engine.apply(&EditRequest {
+        path: path.clone(),
+        operations: vec![EditOperation {
+            kind: "delete".to_string(),
+            anchor: anchor_for_line(original, 1),
+            end_anchor: Some(anchor_for_line(original, 2)),
+            lines: vec![],
+        }],
+    });
+
+    assert!(matches!(outcome, EditOutcome::Applied { .. }));
+    let updated = fs::read_to_string(path).unwrap();
+    assert!(updated.is_empty());
+}
+
+#[test]
 fn hashline_engine_rejects_noop_and_non_utf8_inputs() {
     let engine = HashlineEditEngine;
     let original = load_hashline_snapshot("bottom_up_original.txt");

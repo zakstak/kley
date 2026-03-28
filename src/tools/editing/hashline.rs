@@ -41,18 +41,19 @@ impl EditEngine for HashlineEditEngine {
             }
         };
 
-        let (original_canonical, fidelity) = match canonicalize_utf8_text(&original_bytes) {
-            Ok(text) => text,
-            Err(kind) => {
-                return failure_outcome(
-                    kind,
-                    format!("Error: {}", kind.as_str()),
-                    path,
-                    edit_count,
-                    started_at.elapsed().as_millis(),
-                );
-            }
-        };
+        let (original_canonical, fidelity, mut updated_lines) =
+            match canonicalize_utf8_text(&original_bytes) {
+                Ok(text) => text,
+                Err(kind) => {
+                    return failure_outcome(
+                        kind,
+                        format!("Error: {}", kind.as_str()),
+                        path,
+                        edit_count,
+                        started_at.elapsed().as_millis(),
+                    );
+                }
+            };
 
         let snapshot = HashlineSnapshot::from_text(&original_canonical);
         let mut resolved = Vec::with_capacity(request.operations.len());
@@ -81,7 +82,6 @@ impl EditEngine for HashlineEditEngine {
             );
         }
 
-        let mut updated_lines = text_to_lines(&original_canonical);
         resolved.sort_by(|left, right| {
             right
                 .start_line
@@ -94,7 +94,8 @@ impl EditEngine for HashlineEditEngine {
             apply_resolved_operation(&mut updated_lines, op);
         }
 
-        let rewritten_canonical = lines_to_text(&updated_lines, fidelity.has_final_newline);
+        apply_line_fidelity(&mut updated_lines, &fidelity);
+        let rewritten_canonical = canonical_text_from_lines(&updated_lines);
         if rewritten_canonical == original_canonical {
             return failure_outcome(
                 EditFailureKind::NoOp,
@@ -105,7 +106,7 @@ impl EditEngine for HashlineEditEngine {
             );
         }
 
-        let rewritten_bytes = render_with_fidelity(&rewritten_canonical, &fidelity);
+        let rewritten_bytes = render_with_fidelity(&updated_lines, &fidelity);
         if let Err(err) = atomic_replace(std::path::Path::new(path), &rewritten_bytes) {
             return failure_outcome(
                 EditFailureKind::IoError,
@@ -208,7 +209,7 @@ fn validate_overlaps(operations: &[ResolvedOperation]) -> Result<(), EditFailure
     Ok(())
 }
 
-fn apply_resolved_operation(lines: &mut Vec<String>, op: &ResolvedOperation) {
+fn apply_resolved_operation(lines: &mut Vec<TextLine>, op: &ResolvedOperation) {
     match op.kind {
         HashlineOperationKind::Replace => {
             lines.splice(
@@ -234,14 +235,20 @@ fn apply_resolved_operation(lines: &mut Vec<String>, op: &ResolvedOperation) {
     }
 }
 
-fn replacement_to_lines(replacement: &str) -> Vec<String> {
+fn replacement_to_lines(replacement: &str) -> Vec<TextLine> {
     if replacement.is_empty() {
-        return vec![String::new()];
+        return vec![TextLine {
+            content: String::new(),
+            ending: None,
+        }];
     }
 
     let mut lines = replacement
         .split('\n')
-        .map(ToString::to_string)
+        .map(|content| TextLine {
+            content: content.to_string(),
+            ending: None,
+        })
         .collect::<Vec<_>>();
     if replacement.ends_with('\n') {
         lines.pop();
@@ -249,30 +256,9 @@ fn replacement_to_lines(replacement: &str) -> Vec<String> {
     lines
 }
 
-fn text_to_lines(text: &str) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-
-    let mut lines = text
-        .split('\n')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if text.ends_with('\n') {
-        lines.pop();
-    }
-    lines
-}
-
-fn lines_to_text(lines: &[String], has_final_newline: bool) -> String {
-    let mut text = lines.join("\n");
-    if has_final_newline {
-        text.push('\n');
-    }
-    text
-}
-
-fn canonicalize_utf8_text(bytes: &[u8]) -> Result<(String, TextFidelity), EditFailureKind> {
+fn canonicalize_utf8_text(
+    bytes: &[u8],
+) -> Result<(String, TextFidelity, Vec<TextLine>), EditFailureKind> {
     let (has_bom, body) = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         (true, &bytes[3..])
     } else {
@@ -280,38 +266,115 @@ fn canonicalize_utf8_text(bytes: &[u8]) -> Result<(String, TextFidelity), EditFa
     };
 
     let text = String::from_utf8(body.to_vec()).map_err(|_| EditFailureKind::NonTextFile)?;
-    let line_ending = if text.contains("\r\n") {
-        LineEndingStyle::Crlf
-    } else {
-        LineEndingStyle::Lf
-    };
-
-    let canonical = match line_ending {
-        LineEndingStyle::Lf => text,
-        LineEndingStyle::Crlf => text.replace("\r\n", "\n"),
-    };
+    let lines = text_to_fidelity_lines(&text);
+    let canonical = canonical_text_from_lines(&lines);
 
     Ok((
         canonical.clone(),
         TextFidelity {
             has_bom,
-            line_ending,
-            has_final_newline: canonical.ends_with('\n'),
+            preferred_line_ending: preferred_line_ending(&lines),
+            has_final_newline: lines.last().and_then(|line| line.ending).is_some(),
         },
+        lines,
     ))
 }
 
-fn render_with_fidelity(canonical_text: &str, fidelity: &TextFidelity) -> Vec<u8> {
-    let mut text = match fidelity.line_ending {
-        LineEndingStyle::Lf => canonical_text.to_string(),
-        LineEndingStyle::Crlf => canonical_text.replace('\n', "\r\n"),
-    };
+fn render_with_fidelity(lines: &[TextLine], fidelity: &TextFidelity) -> Vec<u8> {
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line.content);
+        match line.ending {
+            Some(LineEndingStyle::Lf) => text.push('\n'),
+            Some(LineEndingStyle::Crlf) => text.push_str("\r\n"),
+            None => {}
+        }
+    }
 
     if fidelity.has_bom {
         text.insert(0, '\u{FEFF}');
     }
 
     text.into_bytes()
+}
+
+fn apply_line_fidelity(lines: &mut [TextLine], fidelity: &TextFidelity) {
+    if lines.is_empty() {
+        return;
+    }
+
+    let last_index = lines.len() - 1;
+    for line in &mut lines[..last_index] {
+        if line.ending.is_none() {
+            line.ending = Some(fidelity.preferred_line_ending);
+        }
+    }
+
+    let last_line = &mut lines[last_index];
+    if fidelity.has_final_newline {
+        if last_line.ending.is_none() {
+            last_line.ending = Some(fidelity.preferred_line_ending);
+        }
+    } else {
+        last_line.ending = None;
+    }
+}
+
+fn text_to_fidelity_lines(text: &str) -> Vec<TextLine> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    text.split_inclusive('\n')
+        .map(|segment| {
+            if let Some(content) = segment.strip_suffix("\r\n") {
+                TextLine {
+                    content: content.to_string(),
+                    ending: Some(LineEndingStyle::Crlf),
+                }
+            } else if let Some(content) = segment.strip_suffix('\n') {
+                TextLine {
+                    content: content.to_string(),
+                    ending: Some(LineEndingStyle::Lf),
+                }
+            } else {
+                TextLine {
+                    content: segment.to_string(),
+                    ending: None,
+                }
+            }
+        })
+        .collect()
+}
+
+fn canonical_text_from_lines(lines: &[TextLine]) -> String {
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line.content);
+        if line.ending.is_some() {
+            text.push('\n');
+        }
+    }
+    text
+}
+
+fn preferred_line_ending(lines: &[TextLine]) -> LineEndingStyle {
+    let mut saw_lf = false;
+    let mut saw_crlf = false;
+
+    for line in lines {
+        match line.ending {
+            Some(LineEndingStyle::Lf) => saw_lf = true,
+            Some(LineEndingStyle::Crlf) => saw_crlf = true,
+            None => {}
+        }
+    }
+
+    if saw_crlf && !saw_lf {
+        LineEndingStyle::Crlf
+    } else {
+        LineEndingStyle::Lf
+    }
 }
 
 fn failure_outcome(
@@ -411,9 +474,15 @@ enum LineEndingStyle {
     Crlf,
 }
 
+#[derive(Debug, Clone)]
+struct TextLine {
+    content: String,
+    ending: Option<LineEndingStyle>,
+}
+
 #[derive(Debug, Copy, Clone)]
 struct TextFidelity {
     has_bom: bool,
-    line_ending: LineEndingStyle,
+    preferred_line_ending: LineEndingStyle,
     has_final_newline: bool,
 }
