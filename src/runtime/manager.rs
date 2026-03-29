@@ -361,6 +361,12 @@ impl RuntimeManager {
         Some(entry.runtime.compact_config.threshold_chars.max(1))
     }
 
+    pub fn system_prompt_chars(&self, session_id: &str) -> Option<usize> {
+        let sessions = self.lock_sessions();
+        let entry = sessions.get(session_id)?;
+        Some(entry.runtime.instructions.len())
+    }
+
     pub fn token_usage(
         &self,
         session_id: &str,

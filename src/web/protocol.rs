@@ -103,6 +103,26 @@ pub struct ContextUsage {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
     pub total_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breakdown: Option<ContextUsageBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextUsageBreakdown {
+    pub system_prompt: ContextUsageBucket,
+    pub user_input: ContextUsageBucket,
+    pub assistant_output: ContextUsageBucket,
+    pub skill_calls: ContextUsageBucket,
+    pub mcp_calls: ContextUsageBucket,
+    pub tool_calls: ContextUsageBucket,
+    pub other: ContextUsageBucket,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextUsageBucket {
+    pub chars_estimate: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_estimate: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

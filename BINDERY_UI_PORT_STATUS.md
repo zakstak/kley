@@ -15,6 +15,7 @@ markup:
 - Tool activity cards and inspector event log
 - Session provider/model selection
 - Provider API-key login from the web UI
+- Live context usage meter updates from websocket events
 
 ## Not implemented yet (UI-only)
 
@@ -55,14 +56,6 @@ Shown as the visual timeline bar strip above the main feed.
 emit Bindery-style timeline segment/grouping metadata that would let the UI
 render a meaningful interactive timeline.
 
-### Context meter
-
-Shown in the status strip as a visual meter with `ui-only` text.
-
-**Why it is not implemented:** Kley's page does not currently receive a live
-context-usage stream for the browser UI. The meter is only a shell visual right
-now, not a real usage indicator.
-
 ## Why these features were left UI-only
 
 The goal of this port was to **bring the Bindery UI into Kley while keeping
@@ -84,5 +77,7 @@ The shell now supports two previously missing workflows directly in the browser:
 
 - choosing the session provider and model via websocket-backed settings updates
 - saving OpenAI or ZAI API-key credentials from the web UI
+- rendering context usage (percent/chars/tokens) from websocket snapshot + turn
+  events
 
 Those flows are now real Kley behavior, not placeholder controls.

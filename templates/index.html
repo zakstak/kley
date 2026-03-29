@@ -78,28 +78,28 @@
         );
         z-index: -1;
       }
-      .bg-bg1 {
+      .app-surface-1 {
         background-color: var(--color-bg1);
       }
-      .bg-bg2 {
+      .app-surface-2 {
         background-color: var(--color-bg2);
       }
-      .bg-bg3 {
+      .app-surface-3 {
         background-color: var(--color-bg3);
       }
-      .text-txt {
+      .app-text-1 {
         color: var(--color-txt);
       }
-      .text-txt2 {
+      .app-text-2 {
         color: var(--color-txt2);
       }
-      .text-txt3 {
+      .app-text-3 {
         color: var(--color-txt3);
       }
-      .border-bdr {
+      .app-border-1 {
         border-color: var(--color-bdr);
       }
-      .border-bdr2 {
+      .app-border-2 {
         border-color: var(--color-bdr2);
       }
       ::-webkit-scrollbar {
@@ -436,10 +436,10 @@
         background: var(--surface-muted);
         color: var(--color-txt2);
       }
-      #session-list > button.border-bdr2 {
+      #session-list > button.app-border-2 {
         border-color: var(--border-tone-strong);
       }
-      #session-list > button.bg-bg3 {
+      #session-list > button.app-surface-3 {
         background: var(--surface-elevated);
         color: var(--color-txt);
       }
@@ -479,21 +479,22 @@
       }
     </style>
   </head>
-  <body class="h-full text-txt overflow-hidden">
+  <body class="h-full app-text-1 overflow-hidden">
     <div
       data-testid="app-shell"
       data-ws-path="{{ ws_path }}"
       data-protocol-version="{{ protocol_version }}"
+      data-context-max-chars="{{ context_max_chars }}"
       class="h-full overflow-hidden"
     >
       <div class="chrome-shell h-full flex flex-col">
         <header class="top-bar">
           <img src="/assets/bindery-icon.svg" alt="Kley icon" class="h-5 w-5" />
-          <div class="text-[11px] uppercase tracking-[0.2em] text-txt3">
+          <div class="text-[11px] uppercase tracking-[0.2em] app-text-3">
             Kley
           </div>
-          <span class="h-4 w-px bg-bdr2/80"></span>
-          <div class="text-[11px] text-txt2 truncate max-w-[240px]">
+          <span class="h-4 w-px bg-bdr2 opacity-80"></span>
+          <div class="text-[11px] app-text-2 truncate max-w-[240px]">
             Bindery shell port
           </div>
           <div class="flex-1"></div>
@@ -522,9 +523,16 @@
             <div class="status-pair">
               <span class="status-inline-label">context</span>
               <div class="status-meter">
-                <div class="status-meter-fill"></div>
+                <div id="context-meter-fill" class="status-meter-fill"></div>
               </div>
-              <span class="status-inline-value">ui-only</span>
+              <span id="context-usage-label" class="status-inline-value"
+                >0% · 0/0 chars</span
+              >
+              <span
+                id="context-types-label"
+                class="status-inline-value app-text-3"
+                >types pending</span
+              >
             </div>
             <div class="status-pair">
               <span class="status-inline-label">timeline</span>
@@ -639,7 +647,7 @@
           class="layout-grid flex-1 min-h-0 grid grid-cols-[240px_minmax(0,1fr)_300px]"
         >
           <aside
-            class="shell-side border-r border-bdr p-3 md:p-4 overflow-y-auto"
+            class="shell-side border-r app-border-1 p-3 md:p-4 overflow-y-auto"
           >
             <div class="flex items-center justify-between gap-2 mb-3">
               <div class="panel-title">Sessions</div>
@@ -647,14 +655,14 @@
             <div data-testid="session-list" id="session-list" class="space-y-2">
               <button
                 type="button"
-                class="session-btn w-full text-left rounded-lg border border-bdr2 bg-bg2 px-3 py-2 text-sm text-txt"
+                class="session-btn w-full text-left rounded-lg border app-border-2 app-surface-2 px-3 py-2 text-sm app-text-1"
               >
                 Active session
               </button>
             </div>
           </aside>
 
-          <main class="shell-main min-h-0 flex flex-col border-r border-bdr">
+          <main class="shell-main min-h-0 flex flex-col border-r app-border-1">
             <div class="feed-controls">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="filter-chip" aria-disabled="true">All</span>
@@ -667,10 +675,10 @@
 
             <section
               data-testid="transcript"
-              class="min-h-0 flex-1 overflow-y-auto border-b border-bdr px-4 py-3"
+              class="min-h-0 flex-1 overflow-y-auto border-b app-border-1 px-4 py-3"
             >
               <div
-                class="feed-sticky-head sticky top-0 z-10 -mx-4 px-4 py-2 border-b border-bdr backdrop-blur-[2px] flex items-center justify-between gap-2 mb-3"
+                class="feed-sticky-head sticky top-0 z-10 -mx-4 px-4 py-2 border-b app-border-1 backdrop-blur-[2px] flex items-center justify-between gap-2 mb-3"
               >
                 <span class="panel-title">Timeline feed</span>
                 <span class="meta-note uppercase"
@@ -679,10 +687,10 @@
               </div>
               <div id="transcript-rows" class="space-y-3">
                 <article
-                  class="shell-card rounded-lg border border-bdr bg-bg2 p-3"
+                  class="shell-card rounded-lg border app-border-1 app-surface-2 p-3"
                 >
                   <div class="meta-kicker">System</div>
-                  <p class="mt-2 text-sm text-txt2">
+                  <p class="mt-2 text-sm app-text-2">
                     Bindery-style shell active. Kley protocol and websocket
                     behavior unchanged.
                   </p>
@@ -692,7 +700,7 @@
 
             <section
               data-testid="composer"
-              class="px-4 py-3 bg-bg1 border-t border-bdr"
+              class="px-4 py-3 app-surface-1 border-t app-border-1"
             >
               <form id="composer-form" class="flex gap-2 items-end">
                 <label class="sr-only" for="prompt-input">Prompt</label>
@@ -700,7 +708,7 @@
                   id="prompt-input"
                   rows="1"
                   placeholder="Write a prompt..."
-                  class="composer-input min-h-10 max-h-40 flex-1 resize-y rounded-lg border border-bdr2 bg-bg3 px-3 py-2 text-sm text-txt"
+                  class="composer-input min-h-10 max-h-40 flex-1 resize-y rounded-lg border app-border-2 app-surface-3 px-3 py-2 text-sm app-text-1"
                 ></textarea>
                 <button
                   data-testid="composer-submit"
@@ -722,7 +730,7 @@
 
           <aside
             data-testid="inspector-panel"
-            class="shell-side border-l border-bdr p-3 md:p-4 overflow-y-auto"
+            class="shell-side border-l app-border-1 p-3 md:p-4 overflow-y-auto"
           >
             <div class="flex items-center justify-between gap-2 mb-3">
               <div class="panel-title">Inspector</div>
@@ -731,16 +739,16 @@
             <div id="tool-cards" class="space-y-2">
               <article
                 data-testid="tool-card"
-                class="shell-card rounded-lg border border-bdr2 bg-bg2 p-3"
+                class="shell-card rounded-lg border app-border-2 app-surface-2 p-3"
               >
                 <div class="meta-kicker">Tool Activity</div>
-                <p class="mt-2 text-sm text-txt2">No tool events yet.</p>
+                <p class="mt-2 text-sm app-text-2">No tool events yet.</p>
               </article>
             </div>
             <div class="panel-title mt-4 mb-2">Events</div>
             <div
               id="inspector-events"
-              class="space-y-1 text-xs text-txt2"
+              class="space-y-1 text-xs app-text-2"
             ></div>
           </aside>
         </div>
@@ -786,6 +794,9 @@
           loginOpenAiControls: document.getElementById("login-openai-controls"),
           loginOpenAiStartButton: document.getElementById("login-openai-start"),
           loginStatus: document.getElementById("login-status"),
+          contextMeterFill: document.getElementById("context-meter-fill"),
+          contextUsageLabel: document.getElementById("context-usage-label"),
+          contextTypesLabel: document.getElementById("context-types-label"),
         };
 
         if (
@@ -811,7 +822,10 @@
           !dom.loginSubmitButton ||
           !dom.loginOpenAiControls ||
           !dom.loginOpenAiStartButton ||
-          !dom.loginStatus
+          !dom.loginStatus ||
+          !dom.contextMeterFill ||
+          !dom.contextUsageLabel ||
+          !dom.contextTypesLabel
         ) {
           return;
         }
@@ -819,6 +833,10 @@
         const wsPath = appShell.getAttribute("data-ws-path") || "/ws";
         const expectedProtocolVersion = Number(
           appShell.getAttribute("data-protocol-version") || "1",
+        );
+        const initialContextMaxChars = Math.max(
+          Number(appShell.getAttribute("data-context-max-chars") || "1") || 1,
+          1,
         );
         dom.protocolVersionLabel.textContent = `v${expectedProtocolVersion}`;
         const selectedSessionStorageKey = "kley:selected-session-id";
@@ -865,6 +883,15 @@
           openAiAuthWindow: null,
           settingsPending: false,
           loginPending: false,
+          contextUsage: {
+            usedChars: 0,
+            maxChars: initialContextMaxChars,
+            percentUsed: 0,
+            inputTokens: null,
+            outputTokens: null,
+            totalTokens: null,
+          },
+          contextBreakdown: null,
         };
 
         const OPENAI_CALLBACK_MESSAGE_TYPE = "kley.openai.callback";
@@ -906,6 +933,140 @@
 
         function setLoginStatus(text, tone) {
           setControlStatus(dom.loginStatus, text, tone);
+        }
+
+        function normalizeContextUsage(raw) {
+          if (!raw || typeof raw !== "object") {
+            return {
+              usedChars:
+                state.contextUsage.maxChars > 0
+                  ? 0
+                  : state.contextUsage.usedChars,
+              maxChars: state.contextUsage.maxChars,
+              percentUsed: 0,
+              inputTokens: null,
+              outputTokens: null,
+              totalTokens: null,
+            };
+          }
+
+          const maxChars = Math.max(
+            Number.isFinite(raw.max_chars)
+              ? Number(raw.max_chars)
+              : state.contextUsage.maxChars,
+            1,
+          );
+          const usedChars = Math.max(
+            0,
+            Number.isFinite(raw.used_chars)
+              ? Number(raw.used_chars)
+              : state.contextUsage.usedChars,
+          );
+          const computedPercent = Math.min(
+            100,
+            Math.round((Math.min(usedChars, maxChars) * 100) / maxChars),
+          );
+          const framePercent = Number.isFinite(raw.percent_used)
+            ? Number(raw.percent_used)
+            : computedPercent;
+
+          return {
+            usedChars,
+            maxChars,
+            percentUsed: Math.min(100, Math.max(0, framePercent)),
+            inputTokens:
+              Number.isFinite(raw.input_tokens) && Number(raw.input_tokens) >= 0
+                ? Number(raw.input_tokens)
+                : null,
+            outputTokens:
+              Number.isFinite(raw.output_tokens) &&
+              Number(raw.output_tokens) >= 0
+                ? Number(raw.output_tokens)
+                : null,
+            totalTokens:
+              Number.isFinite(raw.total_tokens) && Number(raw.total_tokens) >= 0
+                ? Number(raw.total_tokens)
+                : null,
+          };
+        }
+
+        function renderContextUsage(rawUsage) {
+          const usage = normalizeContextUsage(rawUsage);
+          state.contextUsage = usage;
+
+          dom.contextMeterFill.style.width = `${usage.percentUsed}%`;
+          if (usage.percentUsed >= 90) {
+            dom.contextMeterFill.style.background =
+              "linear-gradient(90deg, #f97316, #fb7185)";
+          } else if (usage.percentUsed >= 70) {
+            dom.contextMeterFill.style.background =
+              "linear-gradient(90deg, #f59e0b, #eab308)";
+          } else {
+            dom.contextMeterFill.style.background =
+              "linear-gradient(90deg, #8b5cf6, #e879f9)";
+          }
+
+          const tokenSummary =
+            typeof usage.totalTokens === "number"
+              ? `${usage.totalTokens.toLocaleString()} tok`
+              : "no token sample";
+          dom.contextUsageLabel.textContent = `${usage.percentUsed}% · ${usage.usedChars.toLocaleString()}/${usage.maxChars.toLocaleString()} chars · ${tokenSummary}`;
+
+          const incomingBreakdown = rawUsage?.breakdown;
+          if (incomingBreakdown && typeof incomingBreakdown === "object") {
+            state.contextBreakdown = incomingBreakdown;
+          }
+
+          const breakdown = state.contextBreakdown;
+          if (!breakdown || typeof breakdown !== "object") {
+            dom.contextTypesLabel.textContent = "types: estimate unavailable";
+            return;
+          }
+
+          const entries = [
+            ["system", breakdown.system_prompt],
+            ["user", breakdown.user_input],
+            ["assistant", breakdown.assistant_output],
+            ["skill", breakdown.skill_calls],
+            ["mcp", breakdown.mcp_calls],
+            ["tool", breakdown.tool_calls],
+            ["other", breakdown.other],
+          ]
+            .map(([label, bucket]) => {
+              if (!bucket || typeof bucket !== "object") {
+                return null;
+              }
+              const chars = Number.isFinite(bucket.chars_estimate)
+                ? Number(bucket.chars_estimate)
+                : 0;
+              const tokens = Number.isFinite(bucket.tokens_estimate)
+                ? Number(bucket.tokens_estimate)
+                : null;
+              if (chars <= 0 && tokens === null) {
+                return null;
+              }
+              return { label, chars, tokens };
+            })
+            .filter(Boolean)
+            .sort((left, right) => right.chars - left.chars);
+
+          if (!entries.length) {
+            dom.contextTypesLabel.textContent = "types: no active buckets";
+            return;
+          }
+
+          const summary = entries
+            .slice(0, 4)
+            .map((entry) => {
+              const tokenText =
+                typeof entry.tokens === "number"
+                  ? `/${entry.tokens.toLocaleString()}t`
+                  : "";
+              return `${entry.label} ${entry.chars.toLocaleString()}c${tokenText}`;
+            })
+            .join(" · ");
+
+          dom.contextTypesLabel.textContent = `types: ${summary}`;
         }
 
         function hasProvider(provider) {
@@ -1209,7 +1370,7 @@
 
         function createTranscriptRow(role, kind, content, attrs) {
           const row = document.createElement("article");
-          row.className = "shell-card rounded-lg border bg-bg2 p-3";
+          row.className = "shell-card rounded-lg border app-surface-2 p-3";
           row.style.borderColor = borderForRole(role, kind);
 
           if (attrs?.messageId) {
@@ -1224,7 +1385,7 @@
           heading.textContent = roleLabel(role, kind);
 
           const body = document.createElement("p");
-          body.className = "mt-2 whitespace-pre-wrap text-sm text-txt";
+          body.className = "mt-2 whitespace-pre-wrap text-sm app-text-1";
           body.dataset.field = "content";
           body.textContent = content || "";
 
@@ -1276,12 +1437,12 @@
           if (!rows.length && !activeTurnSnapshot) {
             const empty = document.createElement("article");
             empty.className =
-              "shell-card rounded-lg border border-bdr bg-bg2 p-3";
+              "shell-card rounded-lg border app-border-1 app-surface-2 p-3";
             const heading = document.createElement("div");
             heading.className = "meta-kicker";
             heading.textContent = "Transcript";
             const body = document.createElement("p");
-            body.className = "mt-2 text-sm text-txt2";
+            body.className = "mt-2 text-sm app-text-2";
             body.textContent = "No messages yet.";
             empty.appendChild(heading);
             empty.appendChild(body);
@@ -1293,7 +1454,7 @@
           clearChildren(dom.sessionList);
           if (!state.sessions.length) {
             const empty = document.createElement("p");
-            empty.className = "text-xs text-txt2";
+            empty.className = "text-xs app-text-2";
             empty.textContent = "No sessions available.";
             dom.sessionList.appendChild(empty);
             return;
@@ -1307,9 +1468,17 @@
             const selected = session.session_id === state.selectedSessionId;
             const switchingBlocked = state.busy && !selected;
             if (selected) {
-              button.classList.add("border-bdr2", "bg-bg3", "text-txt");
+              button.classList.add(
+                "app-border-2",
+                "app-surface-3",
+                "app-text-1",
+              );
             } else {
-              button.classList.add("border-bdr", "bg-bg2", "text-txt2");
+              button.classList.add(
+                "app-border-1",
+                "app-surface-2",
+                "app-text-2",
+              );
             }
             if (switchingBlocked) {
               button.disabled = true;
@@ -1346,14 +1515,14 @@
             card.dataset.testid = "tool-card";
             card.setAttribute("data-testid", "tool-card");
             card.className =
-              "shell-card rounded-lg border border-bdr2 bg-bg2 p-3";
+              "shell-card rounded-lg border app-border-2 app-surface-2 p-3";
 
             const heading = document.createElement("div");
             heading.className = "meta-kicker";
             heading.textContent = "Tool Activity";
 
             const body = document.createElement("p");
-            body.className = "mt-2 text-sm text-txt2";
+            body.className = "mt-2 text-sm app-text-2";
             body.textContent = "No tool events yet.";
 
             card.appendChild(heading);
@@ -1371,7 +1540,7 @@
             const card = document.createElement("details");
             card.setAttribute("data-testid", "tool-card");
             card.className =
-              "tool-card-shell shell-card rounded-lg border border-bdr2 bg-bg2 p-3";
+              "tool-card-shell shell-card rounded-lg border app-border-2 app-surface-2 p-3";
 
             const summary = document.createElement("summary");
             summary.className = "tool-card-summary";
@@ -1385,7 +1554,7 @@
             const status = document.createElement("p");
             status.className = "mt-2 text-sm";
             if (tool.status === "running") {
-              status.classList.add("text-txt2");
+              status.classList.add("app-text-2");
               status.textContent = "Running";
             } else if (tool.success) {
               status.style.color = "var(--color-ok)";
@@ -1413,7 +1582,7 @@
             meta.textContent = `Call ID: ${tool.toolCallId}`;
 
             const outcome = document.createElement("p");
-            outcome.className = "mt-2 text-xs text-txt2";
+            outcome.className = "mt-2 text-xs app-text-2";
             outcome.textContent =
               tool.status === "running"
                 ? "Execution in progress."
@@ -1537,6 +1706,7 @@
           persistSelectedSession();
           hydrateSessionSettings(frame.selected_session || null);
           hydrateAuthState(frame.auth);
+          renderContextUsage(frame.context_usage);
 
           renderSessionList();
           renderTranscriptFromSnapshot(frame.transcript, frame.active_turn);
@@ -1742,6 +1912,7 @@
               if (!isActiveSession(frame.session_id)) {
                 return;
               }
+              renderContextUsage(frame.context_usage);
               {
                 const pendingPrompt = state.pendingPromptText.get(
                   frame.request_id,
@@ -1807,12 +1978,14 @@
                 return;
               }
               applyToolComplete(frame);
+              renderContextUsage(frame.context_usage);
               pushInspectorEvent(`tool completed ${frame.tool_name}`);
               return;
             case "turn.completed":
               if (!isActiveSession(frame.session_id)) {
                 return;
               }
+              renderContextUsage(frame.context_usage);
               state.activeTurn = null;
               state.activeMessageId = null;
               setBusy(false);
@@ -2288,6 +2461,7 @@
         syncLoginStatusFromAuth();
         renderSessionList();
         renderToolCards();
+        renderContextUsage(state.contextUsage);
         syncComposerState();
         syncWorkspaceControls();
         connect();

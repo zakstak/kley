@@ -4,7 +4,9 @@ use super::super::protocol::{
     ActiveTurnSnapshot, SelectedSession, SessionSummary, StateSnapshotData, TranscriptEntry,
 };
 use super::super::state::WebAppState;
-use super::context_usage::{context_usage_from_chars, estimate_persisted_context_usage};
+use super::context_usage::{
+    context_usage_from_chars, estimate_context_breakdown, estimate_persisted_context_usage,
+};
 use crate::compact::CompactConfig;
 use crate::runtime::{ActiveTurnReplay, SessionSettingsOverrides};
 use crate::store::{self, Session, Turn};
@@ -23,6 +25,10 @@ pub(super) async fn snapshot_data(
         .runtime_manager
         .active_turn(session_id)
         .map(active_turn_snapshot);
+    let system_prompt_chars = state
+        .runtime_manager
+        .system_prompt_chars(session_id)
+        .unwrap_or(0);
     let context_usage = if let Some((used_chars, max_chars)) =
         state.runtime_manager.context_usage_chars(session_id)
     {
@@ -36,13 +42,21 @@ pub(super) async fn snapshot_data(
             input_tokens,
             output_tokens,
             total_tokens,
+            estimate_context_breakdown(
+                &turns,
+                used_chars,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                system_prompt_chars,
+            ),
         )
     } else {
         let compact_threshold = state
             .runtime_manager
             .compact_threshold_chars(session_id)
             .unwrap_or_else(|| CompactConfig::default().threshold_chars);
-        estimate_persisted_context_usage(&turns, compact_threshold)
+        estimate_persisted_context_usage(&turns, compact_threshold, system_prompt_chars)
     };
     Ok(StateSnapshotData {
         protocol_version: super::super::protocol::PROTOCOL_VERSION,

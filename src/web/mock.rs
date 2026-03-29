@@ -348,6 +348,7 @@ fn snapshot_data(auth: &AuthStateSnapshot) -> StateSnapshotData {
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            breakdown: None,
         },
     }
 }
@@ -448,6 +449,7 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
             input_tokens: Some(2200),
             output_tokens: Some(300),
             total_tokens: Some(2500),
+            breakdown: None,
         },
     });
 
@@ -468,6 +470,7 @@ fn mock_context_usage(percent_used: u8) -> ContextUsage {
         input_tokens: None,
         output_tokens: None,
         total_tokens: None,
+        breakdown: None,
     }
 }
 
