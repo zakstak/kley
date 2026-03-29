@@ -1,10 +1,12 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
+
+use crate::tools::editing::EditObservation;
 
 use super::protocol::{
-    AuthStateSnapshot, ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession,
-    SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
+    AuthStateSnapshot, ContextUsage, ResponseError, SelectedSession, SessionSummary,
+    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse, PROTOCOL_VERSION,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -214,9 +216,13 @@ async fn handle_socket(mut socket: WebSocket) {
                 prompt,
             } => {
                 prompt_counter += 1;
+                let turn_id = format!("turn-mock-{prompt_counter:04}");
+                let message_id = format!("msg-mock-{prompt_counter:04}");
                 let response_data = json!({
                     "accepted": true,
                     "session_id": session_id,
+                    "turn_id": turn_id,
+                    "message_id": message_id,
                 });
                 if send_response(
                     &mut socket,
@@ -365,7 +371,10 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
     let turn_id = format!("turn-mock-{index:04}");
     let message_id = format!("msg-mock-{index:04}");
     let tool_call_id = format!("tool-mock-{index:04}");
-    let has_tool_activity = prompt.to_lowercase().contains("tool");
+    let prompt_lower = prompt.to_lowercase();
+    let has_tool_activity = prompt_lower.contains("tool");
+    let has_edit_observation =
+        prompt_lower.contains("edit observation") || prompt_lower.contains("edit_observation");
     let mut events = vec![
         UiEvent::TurnStarted {
             event_id: format!("evt-turn-started-{index:04}"),
@@ -431,7 +440,20 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
             tool_call_id,
             tool_name: "read".to_string(),
             success: true,
-            edit_observation: None,
+            edit_observation: has_edit_observation.then(|| EditObservation {
+                engine: "mock-engine".to_string(),
+                tool_name: "read".to_string(),
+                path: "templates/index.html".to_string(),
+                edit_count: 3,
+                applied_count: 2,
+                stale_reference_count: 1,
+                noop_count: 0,
+                failure_kind: None,
+                duration_ms: 42,
+                artifact_path: Some("/tmp/mock-edit-artifact.json".to_string()),
+                artifact_id: Some("mock-artifact-001".to_string()),
+                model_output_bounded: true,
+            }),
             context_usage: mock_context_usage(34),
         });
     }
