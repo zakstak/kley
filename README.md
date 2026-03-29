@@ -2,7 +2,7 @@
 
 Kley is a minimal coding agent with both terminal and web entry points. It is
 intentionally small: a Rust CLI, a shared session runtime, a websocket-driven
-web shell, and a Docker workflow aimed at Linux development environments.
+web shell, and a local Linux workflow that is environment-manager agnostic.
 
 ![Kley web UI](./kley-web-ui.png)
 
@@ -27,38 +27,24 @@ codebase, that is the niche this repo is trying to fill.
 
 ## Quick start
 
-The supported path is the Docker wrapper:
+The supported path is local Linux execution. Use any environment manager you
+prefer (for example Nix, direnv, or a plain host toolchain):
 
 ```bash
 ./preflight.sh
-./docker-session.sh login openai
-./docker-session.sh chat
+./kley-run.sh login openai
+./kley-run.sh chat
 ```
 
-Docker runs set `KLEY_PASSPHRASE` automatically to `kley-dev-passphrase` unless
-you override it from your shell. To use your own passphrase instead, export it
+`./kley-run.sh` sets `KLEY_PASSPHRASE` to `kley-dev-passphrase` unless you
+override it from your shell. To use your own passphrase instead, export it
 before running login/web/chat:
 
 ```bash
 export KLEY_PASSPHRASE="your-passphrase"
 ```
 
-`./docker-session.sh` now reuses the existing image and rebuilds only the Rust
-binary inside the container before running `kley`.
-
-To force a full image rebuild:
-
-```bash
-KLEY_DOCKER_FULL_REBUILD=1 ./docker-session.sh web
-```
-
-To force a full image rebuild without layer cache:
-
-```bash
-KLEY_DOCKER_FULL_REBUILD=1 KLEY_DOCKER_NO_CACHE=1 ./docker-session.sh web
-```
-
-If you pass no arguments, `./docker-session.sh` defaults to `chat`.
+If you pass no arguments, `./kley-run.sh` defaults to `chat`.
 
 If you see:
 
@@ -69,22 +55,17 @@ auth storage unavailable: decryption failed (wrong passphrase?): Decryption fail
 your current `KLEY_PASSPHRASE` does not match the passphrase used when
 credentials were created.
 
-In normal Docker flow this now auto-recovers by resetting stale encrypted auth
-storage (`KLEY_WEB_AUTH_AUTO_RESET=1` by default), so you should not need to run
-manual reset commands.
-
-If you disabled auto-reset, fix by either exporting the original passphrase, or
-recreating credentials for disposable Docker state:
+If credentials are stale for your current passphrase, reset and recreate them:
 
 ```bash
-./docker-session.sh auth-reset
-./docker-session.sh login openai
+./kley-run.sh auth-reset
+./kley-run.sh login openai
 ```
 
 To launch the web UI instead:
 
 ```bash
-./docker-session.sh web
+./kley-run.sh web
 ```
 
 Then open `http://127.0.0.1:3210` in a browser.
@@ -157,8 +138,15 @@ the same underlying runtime concepts, not two separate agent implementations.
 
 ## Running locally
 
-Docker is the default workflow, but you can also run the binary directly if you
-already have a Rust toolchain set up:
+Local execution is the default workflow:
+
+```bash
+./kley-run.sh <subcommand>
+```
+
+If you use Nix, run `nix develop` first and then the same command above.
+
+You can still invoke Cargo directly if you already have a Rust toolchain set up:
 
 ```bash
 cargo run --bin kley -- <subcommand>
@@ -169,7 +157,8 @@ binary, depending on what is available.
 
 ## Development notes
 
-- `./docker-session.sh` rebuilds the image before launching a fresh session.
+- `./kley-run.sh` is the canonical runner (Cargo from repo or installed binary).
+- `./kley-session.sh` and `./docker-session.sh` are compatibility wrappers.
 - Rust integration tests live in `tests/`.
 - Browser coverage lives in `playwright/` and is driven by
   `playwright.config.ts`.

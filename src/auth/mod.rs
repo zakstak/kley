@@ -242,7 +242,7 @@ fn map_decrypt_error(err: age::DecryptError, max_work_factor: u8) -> anyhow::Err
             }
         }
         other => anyhow::anyhow!(
-            "decryption failed (wrong passphrase?): {other}; make sure KLEY_PASSPHRASE matches the value used when credentials were created, or recreate credentials (for disposable Docker state, remove ~/.config/kley/credentials.age and log in again)"
+            "decryption failed (wrong passphrase?): {other}; make sure KLEY_PASSPHRASE matches the value used when credentials were created, or recreate credentials (for disposable dev state, remove ~/.config/kley/credentials.age and log in again)"
         ),
     }
 }

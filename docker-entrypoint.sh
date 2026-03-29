@@ -106,8 +106,8 @@ warn_if_image_is_stale() {
     return 0
   fi
 
-  printf 'warning: workspace source differs from the baked Docker image; rebuild before the next session to use the latest kley binary\n' >&2
-  printf "hint: start the next session with \`./docker-session.sh\` to rebuild first\n" >&2
+  printf 'warning: workspace source differs from the baked Docker image; rebuild before the next Docker run to use the latest kley binary\n' >&2
+  printf "hint: run \`./build-docker.sh\` before the next Docker session\n" >&2
 }
 
 fix_git_mount_ownership() {

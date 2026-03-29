@@ -7,7 +7,7 @@ SERVICE_NAME="${KLEY_DOCKER_SERVICE:-kley}"
 printf 'Building Docker image for compose service %s...\n' "$SERVICE_NAME"
 docker compose build "$SERVICE_NAME"
 
-printf '\nBuild complete. Start a fresh rebuilt session with:\n\n'
-printf '    ./docker-session.sh\n\n'
-printf 'Or pass a specific command to the container:\n\n'
-printf '    ./docker-session.sh web --bind 127.0.0.1:8080\n'
+printf '\nBuild complete. Run inside Docker only when needed:\n\n'
+printf '    docker compose run --rm %s chat\n\n' "$SERVICE_NAME"
+printf 'Default local workflow remains:\n\n'
+printf '    ./kley-run.sh chat\n'
