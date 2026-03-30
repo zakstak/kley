@@ -314,6 +314,22 @@
         font-family: "Fira Code", monospace;
         font-size: var(--text-meta-size);
       }
+      button.filter-chip {
+        cursor: pointer;
+        transition:
+          color 0.12s,
+          border-color 0.12s,
+          background 0.12s;
+      }
+      button.filter-chip:hover {
+        color: var(--text-meta-strong);
+        border-color: rgba(56, 189, 248, 0.42);
+      }
+      button.filter-chip[aria-pressed="true"] {
+        color: var(--color-txt);
+        border-color: rgba(56, 189, 248, 0.5);
+        background: rgba(56, 189, 248, 0.14);
+      }
       .filter-chip[aria-disabled="true"] {
         opacity: 0.72;
       }
@@ -660,17 +676,62 @@
                 Active session
               </button>
             </div>
+            <article
+              id="selected-session-meta"
+              data-testid="selected-session-meta"
+              class="shell-card mt-3 rounded-lg border app-border-2 app-surface-2 p-3"
+            >
+              <div class="meta-kicker">Selected Session</div>
+              <p id="selected-session-status" class="meta-note mt-2">
+                status: —
+              </p>
+              <p id="selected-session-provider-model" class="meta-note mt-1">
+                provider/model: —
+              </p>
+              <p id="selected-session-created-at" class="meta-note mt-1">
+                created: —
+              </p>
+              <p id="selected-session-updated-at" class="meta-note mt-1">
+                updated: —
+              </p>
+            </article>
           </aside>
 
           <main class="shell-main min-h-0 flex flex-col border-r app-border-1">
             <div class="feed-controls">
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="filter-chip" aria-disabled="true">All</span>
-                <span class="filter-chip" aria-disabled="true">Messages</span>
-                <span class="filter-chip" aria-disabled="true">Tools</span>
+                <button
+                  id="filter-chip-all"
+                  data-testid="filter-chip-all"
+                  type="button"
+                  class="filter-chip"
+                  aria-pressed="true"
+                >
+                  All
+                </button>
+                <button
+                  id="filter-chip-messages"
+                  data-testid="filter-chip-messages"
+                  type="button"
+                  class="filter-chip"
+                  aria-pressed="false"
+                >
+                  Messages
+                </button>
+                <button
+                  id="filter-chip-tools"
+                  data-testid="filter-chip-tools"
+                  type="button"
+                  class="filter-chip"
+                  aria-pressed="false"
+                >
+                  Tools
+                </button>
                 <span class="filter-chip" aria-disabled="true">UI</span>
               </div>
-              <span class="meta-note">filters: UI-only affordance</span>
+              <span class="meta-note"
+                >filters: backend feed + UI placeholder</span
+              >
             </div>
 
             <section
@@ -797,6 +858,22 @@
           contextMeterFill: document.getElementById("context-meter-fill"),
           contextUsageLabel: document.getElementById("context-usage-label"),
           contextTypesLabel: document.getElementById("context-types-label"),
+          selectedSessionMeta: document.getElementById("selected-session-meta"),
+          selectedSessionStatus: document.getElementById(
+            "selected-session-status",
+          ),
+          selectedSessionProviderModel: document.getElementById(
+            "selected-session-provider-model",
+          ),
+          selectedSessionCreatedAt: document.getElementById(
+            "selected-session-created-at",
+          ),
+          selectedSessionUpdatedAt: document.getElementById(
+            "selected-session-updated-at",
+          ),
+          filterChipAll: document.getElementById("filter-chip-all"),
+          filterChipMessages: document.getElementById("filter-chip-messages"),
+          filterChipTools: document.getElementById("filter-chip-tools"),
         };
 
         if (
@@ -825,7 +902,15 @@
           !dom.loginStatus ||
           !dom.contextMeterFill ||
           !dom.contextUsageLabel ||
-          !dom.contextTypesLabel
+          !dom.contextTypesLabel ||
+          !dom.selectedSessionMeta ||
+          !dom.selectedSessionStatus ||
+          !dom.selectedSessionProviderModel ||
+          !dom.selectedSessionCreatedAt ||
+          !dom.selectedSessionUpdatedAt ||
+          !dom.filterChipAll ||
+          !dom.filterChipMessages ||
+          !dom.filterChipTools
         ) {
           return;
         }
@@ -868,7 +953,9 @@
           pendingPromptText: new Map(),
           toolOrder: [],
           toolsByCallId: new Map(),
+          toolRowsByCallId: new Map(),
           busy: false,
+          activeTranscriptFilter: "all",
           selectedProvider: defaultProvider,
           selectedModel: defaultModel,
           loginProvider: defaultProvider,
@@ -920,6 +1007,35 @@
           while (node.firstChild) {
             node.removeChild(node.firstChild);
           }
+        }
+
+        function formatTimestampForUi(isoValue) {
+          if (typeof isoValue !== "string" || !isoValue.trim()) {
+            return "—";
+          }
+          const parsed = new Date(isoValue);
+          if (Number.isNaN(parsed.getTime())) {
+            return isoValue;
+          }
+          return parsed.toLocaleString();
+        }
+
+        function updateSelectedSessionMetadata(selectedSession) {
+          if (!selectedSession || typeof selectedSession !== "object") {
+            dom.selectedSessionStatus.textContent = "status: —";
+            dom.selectedSessionProviderModel.textContent = "provider/model: —";
+            dom.selectedSessionCreatedAt.textContent = "created: —";
+            dom.selectedSessionUpdatedAt.textContent = "updated: —";
+            return;
+          }
+
+          const status = selectedSession.status || "unknown";
+          const provider = selectedSession.provider || "unknown";
+          const model = selectedSession.model || "unknown";
+          dom.selectedSessionStatus.textContent = `status: ${status}`;
+          dom.selectedSessionProviderModel.textContent = `provider/model: ${provider}/${model}`;
+          dom.selectedSessionCreatedAt.textContent = `created: ${formatTimestampForUi(selectedSession.created_at)}`;
+          dom.selectedSessionUpdatedAt.textContent = `updated: ${formatTimestampForUi(selectedSession.updated_at)}`;
         }
 
         function setControlStatus(node, text, tone) {
@@ -1355,6 +1471,19 @@
           return role || "Event";
         }
 
+        function feedCategoryForRow(role, kind, explicitCategory) {
+          if (explicitCategory === "tools" || explicitCategory === "messages") {
+            return explicitCategory;
+          }
+          if (kind === "function_call" || kind === "function_call_output") {
+            return "tools";
+          }
+          if (role === "tool") {
+            return "tools";
+          }
+          return "messages";
+        }
+
         function borderForRole(role, kind) {
           if (kind === "function_call" || kind === "function_call_output") {
             return "rgba(56, 189, 248, 0.45)";
@@ -1379,6 +1508,11 @@
           if (attrs?.turnId) {
             row.dataset.turnId = attrs.turnId;
           }
+          row.dataset.feedCategory = feedCategoryForRow(
+            role,
+            kind,
+            attrs?.category,
+          );
 
           const heading = document.createElement("div");
           heading.className = "meta-kicker";
@@ -1394,9 +1528,46 @@
           return row;
         }
 
+        function renderTranscriptFilterChips() {
+          dom.filterChipAll.setAttribute(
+            "aria-pressed",
+            state.activeTranscriptFilter === "all" ? "true" : "false",
+          );
+          dom.filterChipMessages.setAttribute(
+            "aria-pressed",
+            state.activeTranscriptFilter === "messages" ? "true" : "false",
+          );
+          dom.filterChipTools.setAttribute(
+            "aria-pressed",
+            state.activeTranscriptFilter === "tools" ? "true" : "false",
+          );
+        }
+
+        function applyTranscriptFilter() {
+          const rows = dom.transcriptRows.querySelectorAll("article");
+          rows.forEach((row) => {
+            const category = row.dataset.feedCategory || "messages";
+            const visible =
+              state.activeTranscriptFilter === "all" ||
+              category === state.activeTranscriptFilter;
+            row.hidden = !visible;
+          });
+          renderTranscriptFilterChips();
+        }
+
+        function setTranscriptFilter(filterName) {
+          if (!["all", "messages", "tools"].includes(filterName)) {
+            return;
+          }
+          state.activeTranscriptFilter = filterName;
+          applyTranscriptFilter();
+          pushInspectorEvent(`feed filter ${filterName}`);
+        }
+
         function renderTranscriptFromSnapshot(transcript, activeTurnSnapshot) {
           clearChildren(dom.transcriptRows);
           state.messageRows.clear();
+          state.toolRowsByCallId.clear();
 
           const rows = Array.isArray(transcript) ? transcript : [];
           rows.forEach((entry) => {
@@ -1438,6 +1609,7 @@
             const empty = document.createElement("article");
             empty.className =
               "shell-card rounded-lg border app-border-1 app-surface-2 p-3";
+            empty.dataset.feedCategory = "messages";
             const heading = document.createElement("div");
             heading.className = "meta-kicker";
             heading.textContent = "Transcript";
@@ -1448,6 +1620,8 @@
             empty.appendChild(body);
             dom.transcriptRows.appendChild(empty);
           }
+
+          applyTranscriptFilter();
         }
 
         function renderSessionList() {
@@ -1484,7 +1658,13 @@
               button.disabled = true;
               button.classList.add("cursor-not-allowed", "opacity-60");
             }
-            button.textContent = session.title || session.session_id;
+            const title = document.createElement("div");
+            title.textContent = session.title || session.session_id;
+            const updated = document.createElement("div");
+            updated.className = "meta-note mt-1";
+            updated.textContent = `updated ${formatTimestampForUi(session.updated_at)}`;
+            button.appendChild(title);
+            button.appendChild(updated);
             button.addEventListener("click", () => {
               if (
                 button.disabled ||
@@ -1593,6 +1773,38 @@
             body.appendChild(meta);
             body.appendChild(outcome);
 
+            if (tool.editObservation) {
+              const editHeader = document.createElement("p");
+              editHeader.className = "mt-3 text-xs app-text-2";
+              editHeader.textContent = "Edit observation";
+
+              const editMeta = document.createElement("p");
+              editMeta.className = "tool-card-meta mt-1";
+              editMeta.textContent = `Engine: ${tool.editObservation.engine || "n/a"} · Path: ${tool.editObservation.path || "n/a"}`;
+
+              const editCounts = document.createElement("p");
+              editCounts.className = "tool-card-meta mt-1";
+              editCounts.textContent = `Applied ${tool.editObservation.applied_count}/${tool.editObservation.edit_count} · stale ${tool.editObservation.stale_reference_count} · noop ${tool.editObservation.noop_count} · ${tool.editObservation.duration_ms}ms`;
+
+              body.appendChild(editHeader);
+              body.appendChild(editMeta);
+              body.appendChild(editCounts);
+
+              if (tool.editObservation.failure_kind) {
+                const failure = document.createElement("p");
+                failure.className = "tool-card-meta mt-1";
+                failure.textContent = `Failure kind: ${tool.editObservation.failure_kind}`;
+                body.appendChild(failure);
+              }
+
+              if (tool.editObservation.artifact_path) {
+                const artifact = document.createElement("p");
+                artifact.className = "tool-card-meta mt-1";
+                artifact.textContent = `Artifact: ${tool.editObservation.artifact_path}`;
+                body.appendChild(artifact);
+              }
+            }
+
             card.appendChild(summary);
             card.appendChild(body);
             dom.toolCards.appendChild(card);
@@ -1602,6 +1814,7 @@
         function resetHydratedInspectorState() {
           state.toolOrder = [];
           state.toolsByCallId.clear();
+          state.toolRowsByCallId.clear();
           clearChildren(dom.inspectorEvents);
           renderToolCards();
         }
@@ -1615,6 +1828,7 @@
             toolName: frame.tool_name,
             status: "running",
             success: false,
+            editObservation: null,
           });
           renderToolCards();
         }
@@ -1626,11 +1840,61 @@
             toolName: frame.tool_name,
             status: "completed",
             success: Boolean(frame.success),
+            editObservation:
+              frame.edit_observation &&
+              typeof frame.edit_observation === "object"
+                ? frame.edit_observation
+                : null,
           });
           if (!existing) {
             state.toolOrder.unshift(frame.tool_call_id);
           }
           renderToolCards();
+        }
+
+        function ensureToolTranscriptRow(toolCallId, turnId, toolName) {
+          const existing = state.toolRowsByCallId.get(toolCallId);
+          if (existing) {
+            return existing;
+          }
+
+          const row = createTranscriptRow(
+            "tool",
+            "function_call",
+            `${toolName} · running`,
+            {
+              turnId,
+              category: "tools",
+            },
+          );
+          row.dataset.toolCallId = toolCallId;
+          dom.transcriptRows.appendChild(row);
+          state.toolRowsByCallId.set(toolCallId, row);
+          applyTranscriptFilter();
+          return row;
+        }
+
+        function updateToolTranscriptRow(frame) {
+          const row = ensureToolTranscriptRow(
+            frame.tool_call_id,
+            frame.turn_id,
+            frame.tool_name,
+          );
+          const body = row.querySelector('[data-field="content"]');
+          if (!body) {
+            return;
+          }
+
+          const observation =
+            frame.edit_observation && typeof frame.edit_observation === "object"
+              ? frame.edit_observation
+              : null;
+          const statusText = frame.success ? "completed" : "failed";
+          const observationSummary = observation
+            ? `\n${observation.applied_count}/${observation.edit_count} edits applied · stale ${observation.stale_reference_count} · noop ${observation.noop_count}`
+            : "";
+          body.textContent = `${frame.tool_name} · ${statusText}${observationSummary}`;
+          applyTranscriptFilter();
         }
 
         function ensureAssistantMessageRow(messageId, turnId, startingContent) {
@@ -1653,6 +1917,7 @@
           );
           dom.transcriptRows.appendChild(row);
           state.messageRows.set(messageId, row);
+          applyTranscriptFilter();
           return row;
         }
 
@@ -1705,6 +1970,7 @@
             : [];
           persistSelectedSession();
           hydrateSessionSettings(frame.selected_session || null);
+          updateSelectedSessionMetadata(frame.selected_session || null);
           hydrateAuthState(frame.auth);
           renderContextUsage(frame.context_usage);
 
@@ -1770,6 +2036,7 @@
               state.pendingPromptText.delete(frame.request_id);
               setBusy(false);
               state.activeTurn = null;
+              state.activeMessageId = null;
             }
             return;
           }
@@ -1930,6 +2197,7 @@
                     ),
                   );
                   state.pendingPromptText.delete(frame.request_id);
+                  applyTranscriptFilter();
                 }
               }
               state.activeTurn = {
@@ -1971,6 +2239,11 @@
                 return;
               }
               upsertToolStart(frame);
+              ensureToolTranscriptRow(
+                frame.tool_call_id,
+                frame.turn_id,
+                frame.tool_name,
+              );
               pushInspectorEvent(`tool started ${frame.tool_name}`);
               return;
             case "tool.completed":
@@ -1978,6 +2251,7 @@
                 return;
               }
               applyToolComplete(frame);
+              updateToolTranscriptRow(frame);
               renderContextUsage(frame.context_usage);
               pushInspectorEvent(`tool completed ${frame.tool_name}`);
               return;
@@ -2085,6 +2359,44 @@
           state.reconnectDelayMs = Math.min(state.reconnectDelayMs * 2, 4000);
         }
 
+        function resetPendingStateAfterTransportLoss() {
+          const hadPendingWork =
+            state.pendingRequests.size > 0 ||
+            state.pendingPromptText.size > 0 ||
+            state.settingsPending ||
+            state.loginPending ||
+            state.busy ||
+            Boolean(state.activeTurn);
+
+          state.pendingRequests.clear();
+          state.pendingPromptText.clear();
+          state.settingsPending = false;
+          state.loginPending = false;
+          state.activeTurn = null;
+          state.activeMessageId = null;
+          setBusy(false);
+
+          if (state.openAiAuthWindow && !state.openAiAuthWindow.closed) {
+            state.openAiAuthWindow.close();
+          }
+          state.openAiAuthWindow = null;
+
+          if (state.selectedSessionId) {
+            setSettingsStatus(
+              "connection lost; retry when reconnected",
+              "error",
+            );
+          } else {
+            setSettingsStatus("select a session", "idle");
+          }
+          syncLoginStatusFromAuth();
+          syncWorkspaceControls();
+
+          if (hadPendingWork) {
+            pushInspectorEvent("cleared pending state after transport loss");
+          }
+        }
+
         function connect() {
           if (
             state.socket &&
@@ -2126,6 +2438,7 @@
 
           socket.addEventListener("close", () => {
             setConnected(false);
+            resetPendingStateAfterTransportLoss();
             setStatus("reconnecting", "error");
             pushInspectorEvent("transport closed");
             scheduleReconnect();
@@ -2390,6 +2703,16 @@
 
         window.addEventListener("message", handleOpenAiCallbackMessage);
 
+        dom.filterChipAll.addEventListener("click", () => {
+          setTranscriptFilter("all");
+        });
+        dom.filterChipMessages.addEventListener("click", () => {
+          setTranscriptFilter("messages");
+        });
+        dom.filterChipTools.addEventListener("click", () => {
+          setTranscriptFilter("tools");
+        });
+
         function submitPromptInput() {
           const prompt = dom.promptInput.value.trim();
           if (!prompt || !state.selectedSessionId) {
@@ -2461,7 +2784,9 @@
         syncLoginStatusFromAuth();
         renderSessionList();
         renderToolCards();
+        updateSelectedSessionMetadata(null);
         renderContextUsage(state.contextUsage);
+        renderTranscriptFilterChips();
         syncComposerState();
         syncWorkspaceControls();
         connect();

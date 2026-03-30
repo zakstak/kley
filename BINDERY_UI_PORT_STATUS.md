@@ -9,12 +9,19 @@ These parts are connected to Kley's existing web backend and are not just static
 markup:
 
 - Session list rendering and session switching
+- Session metadata surfaces selected status/provider/model/created/updated
+  timestamps
+- Session list metadata surfaces each session `updated_at`
 - Transcript hydration from existing session history
 - Live assistant message streaming
 - Prompt submit and turn abort
 - Tool activity cards and inspector event log
+- Tool cards render `tool.completed.edit_observation` details when present
+- Transcript filter chips for backend-backed categories (`All`, `Messages`,
+  `Tools`)
 - Session provider/model selection
-- Provider API-key login from the web UI
+- ZAI API-key login from the web UI
+- OpenAI browser login from the web UI
 - Live context usage meter updates from websocket events
 
 ## Not implemented yet (UI-only)
@@ -39,14 +46,16 @@ Shown as `Inspector drawer (UI-only)`.
 persistent panel, not a drawer with open/close state. The Bindery-style drawer
 control was kept as a visual affordance, but the behavior was not added.
 
-### Feed filter chips
+### UI feed filter chip
 
-Shown as `All`, `Messages`, `Tools`, and `UI` under
-`filters: UI-only affordance`.
+The `UI` chip is still a placeholder (`aria-disabled="true"`) and is not backed
+by websocket feed data.
 
-**Why it is not implemented:** Kley's transcript view currently renders a single
-event/message stream. There is no client-side or backend filtering model yet for
-separating the feed into Bindery-style filtered views.
+`All`, `Messages`, and `Tools` now filter the transcript client-side using
+existing backend-backed transcript/tool event categories.
+
+**Why UI remains unimplemented:** Kley still has no backend event-feed model for
+UI-only feed entries, so only the backend-backed categories were activated.
 
 ### Timeline strip
 
@@ -76,7 +85,8 @@ they worked.
 The shell now supports two previously missing workflows directly in the browser:
 
 - choosing the session provider and model via websocket-backed settings updates
-- saving OpenAI or ZAI API-key credentials from the web UI
+- saving ZAI API-key credentials from the web UI
+- completing OpenAI browser login from the web UI callback flow
 - rendering context usage (percent/chars/tokens) from websocket snapshot + turn
   events
 

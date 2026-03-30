@@ -178,6 +178,10 @@ mod web {
             "data-testid=\"login-submit\"",
             "data-testid=\"login-openai-controls\"",
             "data-testid=\"login-openai-start\"",
+            "data-testid=\"selected-session-meta\"",
+            "data-testid=\"filter-chip-all\"",
+            "data-testid=\"filter-chip-messages\"",
+            "data-testid=\"filter-chip-tools\"",
         ] {
             assert!(html.contains(marker), "missing marker: {marker}");
         }
@@ -287,6 +291,13 @@ mod web {
         assert!(frame["auth"].is_object());
         assert!(frame["selected_session"]["created_at"].as_str().is_some());
         assert!(frame["selected_session"]["updated_at"].as_str().is_some());
+        assert_eq!(frame["selected_session"]["provider"], "test");
+        assert_eq!(frame["selected_session"]["model"], "test-model");
+        assert!(frame["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["updated_at"].as_str().is_some()));
         let transcript = frame["transcript"].as_array().unwrap();
         assert!(transcript
             .iter()
@@ -1056,6 +1067,8 @@ mod web {
         assert_eq!(ack["request_id"], "req-mock-prompt-1");
         assert_eq!(ack["data"]["session_id"], "sess-mock-001");
         assert!(ack["data"]["accepted"].as_bool().unwrap_or(false));
+        assert_eq!(ack["data"]["turn_id"], "turn-mock-0001");
+        assert_eq!(ack["data"]["message_id"], "msg-mock-0001");
 
         let mut event_types = Vec::new();
         loop {
@@ -1077,6 +1090,49 @@ mod web {
                 "message.completed",
                 "turn.completed",
             ],
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_tool_completed_can_emit_edit_observation() {
+        let server = spawn_server().await;
+        let mut socket = connect_mock_ws(server.addr).await;
+
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"prompt.submit","request_id":"req-mock-edit-observation","session_id":"sess-mock-001","prompt":"please run tool with edit observation"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        assert_eq!(ack["request_id"], "req-mock-edit-observation");
+
+        let completed = recv_until_type(&mut socket, "tool.completed").await;
+        assert_eq!(completed["tool_name"], "read");
+        assert_eq!(
+            completed["edit_observation"]["engine"],
+            serde_json::json!("mock-engine")
+        );
+        assert_eq!(
+            completed["edit_observation"]["path"],
+            serde_json::json!("templates/index.html")
+        );
+        assert_eq!(
+            completed["edit_observation"]["applied_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            completed["edit_observation"]["stale_reference_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            completed["edit_observation"]["artifact_path"],
+            serde_json::json!("/tmp/mock-edit-artifact.json")
         );
     }
 
