@@ -41,7 +41,7 @@ impl Tool for ReportStatusTool {
                     "description": "Optional task event replay cursor. Returns events with sequence > after_sequence."
                 }
             },
-            "required": ["summary"],
+            "required": ["summary", "task_id", "after_sequence"],
             "additionalProperties": false,
         })
     }

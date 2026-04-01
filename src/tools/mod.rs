@@ -66,7 +66,16 @@ impl Tool for DelegateTaskTool {
                     "description": "Optional task event replay cursor for initial status subscription."
                 }
             },
-            "required": ["parent_task_id", "handoff_brief"],
+            "required": [
+                "parent_task_id",
+                "child_task_id",
+                "title",
+                "priority",
+                "handoff_brief",
+                "artifact_ids",
+                "requested_policy_json",
+                "after_sequence"
+            ],
             "additionalProperties": false,
         })
     }
