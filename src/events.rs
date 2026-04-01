@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::mpsc;
 
+use crate::store::TaskEventRecord;
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::editing::EditObservation;
 
@@ -98,6 +99,15 @@ pub enum AgentEvent {
         turn_id: Option<String>,
         old_items: usize,
         new_chars: usize,
+    },
+    TaskLifecycle {
+        sequence: i64,
+        task_id: String,
+        attempt_id: String,
+        child_session_id: Option<String>,
+        event_type: String,
+        payload: String,
+        recorded_at: String,
     },
 }
 
@@ -234,6 +244,22 @@ impl fmt::Display for AgentEvent {
                     "compacted history: {old_items} items -> {new_chars} char summary"
                 )
             }
+            AgentEvent::TaskLifecycle {
+                task_id,
+                attempt_id,
+                event_type,
+                child_session_id,
+                ..
+            } => {
+                if let Some(child_session_id) = child_session_id {
+                    write!(
+                        f,
+                        "task {task_id} attempt {attempt_id} {event_type} [{child_session_id}]"
+                    )
+                } else {
+                    write!(f, "task {task_id} attempt {attempt_id} {event_type}")
+                }
+            }
         }
     }
 }
@@ -280,6 +306,20 @@ pub fn event_channel() -> (EventEmitter, EventReceiver) {
 impl EventEmitter {
     pub fn emit(&self, event: AgentEvent) {
         let _ = self.tx.send(event);
+    }
+}
+
+impl AgentEvent {
+    pub fn from_task_event_record(record: &TaskEventRecord) -> Self {
+        Self::TaskLifecycle {
+            sequence: record.sequence,
+            task_id: record.task_id.clone(),
+            attempt_id: record.attempt_id.clone(),
+            child_session_id: record.session_id.clone(),
+            event_type: record.event_type.clone(),
+            payload: record.payload.clone(),
+            recorded_at: record.recorded_at.to_rfc3339(),
+        }
     }
 }
 

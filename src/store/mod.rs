@@ -4,7 +4,11 @@ mod schema;
 mod session;
 mod turn;
 
-pub use session::{NewSession, Session, SessionStatus};
+pub use session::{
+    AttemptLifecycleState, NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord, NewTaskEventRecord,
+    NewTaskRecord, Session, SessionStatus, TaskAttemptRecord, TaskEdgeRecord, TaskEventRecord,
+    TaskLifecycleState, TaskRecord,
+};
 pub use turn::{NewTurn, Turn};
 
 use anyhow::{Context, Result};

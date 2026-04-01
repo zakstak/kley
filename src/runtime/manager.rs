@@ -1,18 +1,30 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, ensure};
+use chrono::Utc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinError;
+use uuid::Uuid;
 
 use super::SessionSettingsOverrides;
+use super::session::{
+    ChildSessionBootstrapMode, DelegatedChildBootstrapOutcome, bootstrap_delegated_child_session,
+};
+use super::settings::{
+    InheritedSettingsSnapshot,
+    spawn_autonomous_child_task_with_policy as spawn_autonomous_child_task_with_policy_impl,
+};
 use crate::auth::{CredentialStore, ResolvedAuth};
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, event_channel};
 use crate::runtime::{RuntimeHooks, SessionRuntime, SubmitResult, TurnCorrelation};
-use crate::store::{Session, SharedStore};
+use crate::store::{
+    AttemptLifecycleState, NewTaskAttemptRecord, Session, SharedStore, Store, TaskAttemptRecord,
+    TaskEdgeRecord, TaskLifecycleState, TaskRecord,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedRuntime {
@@ -227,6 +239,27 @@ pub struct RuntimeManager {
     sessions: Mutex<HashMap<String, ManagedSession>>,
 }
 
+pub fn spawn_autonomous_child_task_with_policy(
+    store: &Store,
+    parent_task_id: &str,
+    child_task_id: &str,
+    title: Option<String>,
+    priority: i64,
+    requested_policy_json: Option<&str>,
+) -> Result<TaskRecord> {
+    let project_dir = std::env::current_dir().unwrap_or_default();
+    let registry = crate::tools::default_registry(project_dir);
+    spawn_autonomous_child_task_with_policy_impl(
+        store,
+        &registry,
+        parent_task_id,
+        child_task_id,
+        title,
+        priority,
+        requested_policy_json,
+    )
+}
+
 impl RuntimeManager {
     pub fn new() -> Self {
         Self::default()
@@ -408,6 +441,226 @@ impl RuntimeManager {
                 entry.active_turn = None;
             }
         }
+    }
+
+    pub async fn execute_scheduler_ready_graph_nodes(
+        &self,
+        shared_store: SharedStore,
+        parent_session_id: &str,
+        owner_id: &str,
+        lease_ttl_seconds: i64,
+    ) -> Result<usize> {
+        let mut completed_nodes = 0usize;
+
+        loop {
+            let Some(candidate) = self.select_next_runnable_candidate(&shared_store)? else {
+                break;
+            };
+
+            let claim_succeeded = {
+                let store = lock_shared_store(&shared_store)?;
+                TaskAttemptRecord::claim_runnable_with_lease(
+                    &store,
+                    &candidate.attempt_id,
+                    owner_id,
+                    lease_ttl_seconds,
+                    Utc::now(),
+                )?
+            };
+            if !claim_succeeded {
+                continue;
+            }
+
+            {
+                let store = lock_shared_store(&shared_store)?;
+                if TaskRecord::current_state(&store, &candidate.task_id)?
+                    == TaskLifecycleState::Ready
+                {
+                    TaskRecord::transition_state(
+                        &store,
+                        &candidate.task_id,
+                        &candidate.attempt_id,
+                        TaskLifecycleState::Running,
+                    )?;
+                }
+            }
+
+            let child_session_id = {
+                let store = lock_shared_store(&shared_store)?;
+                let bootstrap_mode = candidate
+                    .recovery_child_session_id
+                    .as_ref()
+                    .map(|session_id| ChildSessionBootstrapMode::LinkExisting {
+                        session_id: session_id.clone(),
+                    })
+                    .unwrap_or(ChildSessionBootstrapMode::CreateNew);
+                let bootstrap = bootstrap_delegated_child_session(
+                    &store,
+                    &candidate.task_id,
+                    &candidate.attempt_id,
+                    Some(parent_session_id),
+                    candidate.recovery_inherited_settings.clone(),
+                    &candidate.handoff_summary,
+                    candidate.handoff_artifact_ids.clone(),
+                    bootstrap_mode,
+                )?;
+                match bootstrap {
+                    DelegatedChildBootstrapOutcome::Started {
+                        child_session_id: Some(session_id),
+                        ..
+                    } => Some(session_id),
+                    DelegatedChildBootstrapOutcome::Started {
+                        child_session_id: None,
+                        ..
+                    }
+                    | DelegatedChildBootstrapOutcome::InterruptedRetryable { .. } => None,
+                }
+            };
+
+            let Some(child_session_id) = child_session_id else {
+                continue;
+            };
+
+            let child_session = {
+                let store = lock_shared_store(&shared_store)?;
+                Session::get(&store, &child_session_id)?
+            };
+
+            let worker = RuntimeWorker::from_session(&child_session);
+            let correlation = TurnCorrelation {
+                turn_id: Uuid::new_v4().to_string(),
+                message_id: Uuid::new_v4().to_string(),
+            };
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+
+            let result = worker
+                .submit_prompt_stream(
+                    Arc::clone(&shared_store),
+                    candidate.execution_prompt.clone(),
+                    correlation,
+                    Arc::new(AtomicBool::new(false)),
+                    event_tx,
+                )
+                .await;
+
+            let store = lock_shared_store(&shared_store)?;
+            match result {
+                Ok(SubmitResult::Completed { .. }) => {
+                    transition_attempt_if_needed(
+                        &store,
+                        &candidate.attempt_id,
+                        AttemptLifecycleState::Completed,
+                    )?;
+                    transition_task_if_needed(
+                        &store,
+                        &candidate.task_id,
+                        &candidate.attempt_id,
+                        TaskLifecycleState::Completed,
+                    )?;
+                    completed_nodes = completed_nodes.saturating_add(1);
+                }
+                Ok(SubmitResult::Failed { .. }) => {
+                    transition_attempt_if_needed(
+                        &store,
+                        &candidate.attempt_id,
+                        AttemptLifecycleState::Failed,
+                    )?;
+                    transition_task_if_needed(
+                        &store,
+                        &candidate.task_id,
+                        &candidate.attempt_id,
+                        TaskLifecycleState::Failed,
+                    )?;
+                }
+                Ok(SubmitResult::Aborted { .. }) | Err(_) => {
+                    transition_attempt_if_needed(
+                        &store,
+                        &candidate.attempt_id,
+                        AttemptLifecycleState::Interrupted,
+                    )?;
+                    transition_task_if_needed(
+                        &store,
+                        &candidate.task_id,
+                        &candidate.attempt_id,
+                        TaskLifecycleState::Interrupted,
+                    )?;
+                }
+            }
+        }
+
+        Ok(completed_nodes)
+    }
+
+    pub fn cancel_task_graph(
+        &self,
+        shared_store: &SharedStore,
+        task_id: &str,
+    ) -> Result<Vec<String>> {
+        let store = lock_shared_store(shared_store)?;
+        let task_ids = collect_descendant_task_ids(&store, task_id)?;
+
+        for current_task_id in &task_ids {
+            cancel_single_task(&store, current_task_id)?;
+        }
+
+        Ok(task_ids)
+    }
+
+    pub fn retry_task(&self, shared_store: &SharedStore, task_id: &str) -> Result<String> {
+        let store = lock_shared_store(shared_store)?;
+        create_fresh_attempt_for_control(
+            &store,
+            task_id,
+            &[TaskLifecycleState::Failed, TaskLifecycleState::Retryable],
+            TaskLifecycleState::Failed,
+            "retry",
+            false,
+        )
+    }
+
+    pub fn resume_task(&self, shared_store: &SharedStore, task_id: &str) -> Result<String> {
+        let store = lock_shared_store(shared_store)?;
+        create_fresh_attempt_for_control(
+            &store,
+            task_id,
+            &[
+                TaskLifecycleState::Interrupted,
+                TaskLifecycleState::Retryable,
+            ],
+            TaskLifecycleState::Interrupted,
+            "resume",
+            true,
+        )
+    }
+
+    pub fn reprioritize_task(
+        &self,
+        shared_store: &SharedStore,
+        task_id: &str,
+        priority: i64,
+    ) -> Result<()> {
+        let store = lock_shared_store(shared_store)?;
+        let _ = TaskRecord::get(&store, task_id)?;
+        let state = TaskRecord::current_state(&store, task_id)?;
+        if !matches!(
+            state,
+            TaskLifecycleState::Queued | TaskLifecycleState::Ready
+        ) {
+            anyhow::bail!(
+                "reprioritize is only allowed for queued/ready tasks: {task_id} is {state}",
+            );
+        }
+
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "UPDATE tasks SET priority = ?1, updated_at = ?2 WHERE task_id = ?3",
+                (priority, &now, task_id),
+            )
+            .context("failed to update task priority")?;
+
+        Ok(())
     }
 
     pub fn submit_prompt(
@@ -686,6 +939,542 @@ impl RuntimeManager {
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct SchedulerCandidate {
+    task_id: String,
+    attempt_id: String,
+    handoff_summary: String,
+    handoff_artifact_ids: Vec<String>,
+    recovery_child_session_id: Option<String>,
+    recovery_inherited_settings: Option<InheritedSettingsSnapshot>,
+    execution_prompt: String,
+}
+
+impl RuntimeManager {
+    pub async fn recover_nonterminal_attempts_on_startup(
+        &self,
+        shared_store: SharedStore,
+        parent_session_id: &str,
+        owner_id: &str,
+        lease_ttl_seconds: i64,
+    ) -> Result<usize> {
+        self.reconcile_nonterminal_attempts(&shared_store)?;
+        self.execute_scheduler_ready_graph_nodes(
+            shared_store,
+            parent_session_id,
+            owner_id,
+            lease_ttl_seconds,
+        )
+        .await
+    }
+
+    fn reconcile_nonterminal_attempts(&self, shared_store: &SharedStore) -> Result<()> {
+        let now = Utc::now();
+        let store = lock_shared_store(shared_store)?;
+        let tasks = TaskRecord::list(&store)?;
+
+        for task in tasks {
+            let mut task_state = TaskRecord::current_state(&store, &task.task_id)?;
+            if is_task_terminal(task_state) {
+                continue;
+            }
+
+            if task.parent_close_policy == "request_cancel_descendants"
+                && task_state == TaskLifecycleState::CancelRequested
+            {
+                request_descendant_cancellation_before_recovery(&store, &task.task_id)?;
+            }
+
+            let latest_attempt = latest_or_new_attempt(&store, &task.task_id)?;
+            let mut attempt_state = latest_attempt.state()?;
+
+            if attempt_state == AttemptLifecycleState::Running {
+                let expired = TaskAttemptRecord::mark_expired_lease_interrupted_recoverable(
+                    &store,
+                    &latest_attempt.attempt_id,
+                    now,
+                )?;
+                if expired {
+                    attempt_state = AttemptLifecycleState::Interrupted;
+                    task_state = TaskRecord::current_state(&store, &task.task_id)?;
+                    if task_state == TaskLifecycleState::Running {
+                        TaskRecord::transition_state(
+                            &store,
+                            &task.task_id,
+                            &latest_attempt.attempt_id,
+                            TaskLifecycleState::Interrupted,
+                        )?;
+                        task_state = TaskLifecycleState::Interrupted;
+                    }
+                }
+            }
+
+            if task_state == TaskLifecycleState::CancelRequested
+                || attempt_state == AttemptLifecycleState::CancelRequested
+            {
+                continue;
+            }
+
+            if attempt_state == AttemptLifecycleState::Interrupted {
+                if matches!(
+                    task_state,
+                    TaskLifecycleState::Queued
+                        | TaskLifecycleState::Ready
+                        | TaskLifecycleState::Running
+                        | TaskLifecycleState::Blocked
+                ) {
+                    TaskRecord::transition_state(
+                        &store,
+                        &task.task_id,
+                        &latest_attempt.attempt_id,
+                        TaskLifecycleState::Interrupted,
+                    )?;
+                    task_state = TaskLifecycleState::Interrupted;
+                }
+
+                if matches!(
+                    task_state,
+                    TaskLifecycleState::Interrupted | TaskLifecycleState::Retryable
+                ) {
+                    let _ = create_fresh_attempt_for_control(
+                        &store,
+                        &task.task_id,
+                        &[
+                            TaskLifecycleState::Interrupted,
+                            TaskLifecycleState::Retryable,
+                        ],
+                        TaskLifecycleState::Interrupted,
+                        "recover",
+                        true,
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn select_next_runnable_candidate(
+        &self,
+        shared_store: &SharedStore,
+    ) -> Result<Option<SchedulerCandidate>> {
+        let store = lock_shared_store(shared_store)?;
+        let mut tasks = TaskRecord::list(&store)?;
+        tasks.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
+
+        for task in tasks {
+            let task_state = TaskRecord::current_state(&store, &task.task_id)?;
+            if is_task_terminal(task_state) {
+                continue;
+            }
+            if task_state == TaskLifecycleState::CancelRequested {
+                continue;
+            }
+
+            let dependencies = TaskEdgeRecord::list_for_task(&store, &task.task_id)?;
+            let mut dependencies_satisfied = true;
+            for edge in &dependencies {
+                let dep_state = TaskRecord::current_state(&store, &edge.depends_on_task_id)?;
+                if dep_state != TaskLifecycleState::Completed {
+                    dependencies_satisfied = false;
+                    break;
+                }
+            }
+
+            let attempt = latest_or_new_attempt(&store, &task.task_id)?;
+            let attempt_state = attempt.state()?;
+
+            if !dependencies_satisfied {
+                if matches!(
+                    task_state,
+                    TaskLifecycleState::Ready | TaskLifecycleState::Running
+                ) {
+                    TaskRecord::transition_state(
+                        &store,
+                        &task.task_id,
+                        &attempt.attempt_id,
+                        TaskLifecycleState::Blocked,
+                    )?;
+                }
+                if matches!(
+                    attempt_state,
+                    AttemptLifecycleState::Ready | AttemptLifecycleState::Running
+                ) {
+                    TaskAttemptRecord::transition_state(
+                        &store,
+                        &attempt.attempt_id,
+                        AttemptLifecycleState::Blocked,
+                    )?;
+                }
+                continue;
+            }
+
+            let task_state = TaskRecord::current_state(&store, &task.task_id)?;
+            if matches!(
+                task_state,
+                TaskLifecycleState::Queued
+                    | TaskLifecycleState::Blocked
+                    | TaskLifecycleState::Retryable
+            ) {
+                TaskRecord::transition_state(
+                    &store,
+                    &task.task_id,
+                    &attempt.attempt_id,
+                    TaskLifecycleState::Ready,
+                )?;
+            }
+
+            let refreshed_attempt = TaskAttemptRecord::get(&store, &attempt.attempt_id)?;
+            let refreshed_attempt_state = refreshed_attempt.state()?;
+            if matches!(
+                refreshed_attempt_state,
+                AttemptLifecycleState::Queued
+                    | AttemptLifecycleState::Blocked
+                    | AttemptLifecycleState::Retryable
+            ) {
+                TaskAttemptRecord::transition_state(
+                    &store,
+                    &refreshed_attempt.attempt_id,
+                    AttemptLifecycleState::Ready,
+                )?;
+            }
+
+            let runnable_attempt = TaskAttemptRecord::get(&store, &attempt.attempt_id)?;
+            if runnable_attempt.state()? != AttemptLifecycleState::Ready {
+                continue;
+            }
+
+            let recovery_bootstrap =
+                recovery_bootstrap_from_checkpoint(runnable_attempt.recovery_checkpoint.as_deref());
+
+            let prompt = task
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| format!("Execute task {}", task.task_id));
+            let summary = recovery_bootstrap
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.handoff_summary.clone())
+                .filter(|summary| !summary.trim().is_empty())
+                .unwrap_or_else(|| format!("Delegated DAG node {}", task.task_id));
+
+            return Ok(Some(SchedulerCandidate {
+                task_id: task.task_id,
+                attempt_id: runnable_attempt.attempt_id,
+                handoff_summary: summary,
+                handoff_artifact_ids: recovery_bootstrap
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.handoff_artifact_ids.clone())
+                    .unwrap_or_default(),
+                recovery_child_session_id: recovery_bootstrap
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.child_session_id.clone()),
+                recovery_inherited_settings: recovery_bootstrap
+                    .and_then(|checkpoint| checkpoint.inherited_settings),
+                execution_prompt: prompt,
+            }));
+        }
+
+        Ok(None)
+    }
+}
+
+fn latest_or_new_attempt(store: &Store, task_id: &str) -> Result<TaskAttemptRecord> {
+    let attempts = TaskAttemptRecord::list_for_task(store, task_id)?;
+    if let Some(latest) = attempts.last() {
+        return Ok(latest.clone());
+    }
+
+    TaskAttemptRecord::create(
+        store,
+        NewTaskAttemptRecord {
+            attempt_id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            session_id: None,
+            status: AttemptLifecycleState::Queued.to_string(),
+            recovery_checkpoint: None,
+        },
+    )
+}
+
+fn lock_shared_store(shared_store: &SharedStore) -> Result<MutexGuard<'_, Store>> {
+    shared_store
+        .lock()
+        .map_err(|err| anyhow::anyhow!("store mutex poisoned: {err}"))
+}
+
+fn is_task_terminal(state: TaskLifecycleState) -> bool {
+    matches!(
+        state,
+        TaskLifecycleState::Completed | TaskLifecycleState::Failed | TaskLifecycleState::Cancelled
+    )
+}
+
+fn is_attempt_terminal(state: AttemptLifecycleState) -> bool {
+    matches!(
+        state,
+        AttemptLifecycleState::Completed
+            | AttemptLifecycleState::Failed
+            | AttemptLifecycleState::Cancelled
+    )
+}
+
+fn collect_descendant_task_ids(store: &Store, root_task_id: &str) -> Result<Vec<String>> {
+    let _ = TaskRecord::get(store, root_task_id)?;
+    let edges = TaskEdgeRecord::list(store)?;
+
+    let mut visited = HashSet::new();
+    visited.insert(root_task_id.to_string());
+
+    let mut queue = vec![root_task_id.to_string()];
+    let mut index = 0usize;
+    while index < queue.len() {
+        let current = queue[index].clone();
+        index = index.saturating_add(1);
+
+        let mut direct_children = edges
+            .iter()
+            .filter(|edge| edge.depends_on_task_id == current)
+            .map(|edge| edge.task_id.clone())
+            .collect::<Vec<_>>();
+        direct_children.sort();
+
+        for child in direct_children {
+            if visited.insert(child.clone()) {
+                queue.push(child);
+            }
+        }
+    }
+
+    let mut descendants = queue;
+    descendants.sort();
+    Ok(descendants)
+}
+
+fn request_descendant_cancellation_before_recovery(
+    store: &Store,
+    root_task_id: &str,
+) -> Result<()> {
+    let task_ids = collect_descendant_task_ids(store, root_task_id)?;
+    for descendant_task_id in task_ids {
+        if descendant_task_id == root_task_id {
+            continue;
+        }
+        cancel_single_task(store, &descendant_task_id)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryBootstrapCheckpoint {
+    handoff_summary: Option<String>,
+    handoff_artifact_ids: Vec<String>,
+    child_session_id: Option<String>,
+    inherited_settings: Option<InheritedSettingsSnapshot>,
+}
+
+fn recovery_bootstrap_from_checkpoint(
+    recovery_checkpoint: Option<&str>,
+) -> Option<RecoveryBootstrapCheckpoint> {
+    let raw = recovery_checkpoint?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let child_bootstrap = parsed.get("child_bootstrap")?;
+
+    let handoff = child_bootstrap.get("handoff");
+    let handoff_summary = handoff
+        .and_then(|value| value.get("summary"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let handoff_artifact_ids = handoff
+        .and_then(|value| value.get("artifact_ids"))
+        .and_then(serde_json::Value::as_array)
+        .map(|artifact_ids| {
+            artifact_ids
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let child_session_id = child_bootstrap
+        .get("child_session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty());
+    let inherited_settings = handoff
+        .and_then(|value| value.get("inherited_settings"))
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value::<InheritedSettingsSnapshot>(value.clone()).ok());
+
+    Some(RecoveryBootstrapCheckpoint {
+        handoff_summary,
+        handoff_artifact_ids,
+        child_session_id,
+        inherited_settings,
+    })
+}
+
+fn cancel_single_task(store: &Store, task_id: &str) -> Result<()> {
+    let latest_attempt = latest_or_new_attempt(store, task_id)?;
+    let attempt_state = latest_attempt.state()?;
+    let task_state = TaskRecord::current_state(store, task_id)?;
+
+    if is_task_terminal(task_state) || is_attempt_terminal(attempt_state) {
+        return Ok(());
+    }
+
+    if task_state == TaskLifecycleState::CancelRequested
+        || attempt_state == AttemptLifecycleState::CancelRequested
+    {
+        if task_state != TaskLifecycleState::CancelRequested {
+            TaskRecord::transition_state(
+                store,
+                task_id,
+                &latest_attempt.attempt_id,
+                TaskLifecycleState::CancelRequested,
+            )?;
+        }
+        if attempt_state != AttemptLifecycleState::CancelRequested {
+            TaskAttemptRecord::transition_state(
+                store,
+                &latest_attempt.attempt_id,
+                AttemptLifecycleState::CancelRequested,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if task_state == TaskLifecycleState::Running || attempt_state == AttemptLifecycleState::Running
+    {
+        if task_state != TaskLifecycleState::CancelRequested {
+            TaskRecord::transition_state(
+                store,
+                task_id,
+                &latest_attempt.attempt_id,
+                TaskLifecycleState::CancelRequested,
+            )?;
+        }
+        if attempt_state != AttemptLifecycleState::CancelRequested {
+            TaskAttemptRecord::transition_state(
+                store,
+                &latest_attempt.attempt_id,
+                AttemptLifecycleState::CancelRequested,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if task_state != TaskLifecycleState::Cancelled {
+        TaskRecord::transition_state(
+            store,
+            task_id,
+            &latest_attempt.attempt_id,
+            TaskLifecycleState::Cancelled,
+        )?;
+    }
+    if attempt_state != AttemptLifecycleState::Cancelled {
+        TaskAttemptRecord::transition_state(
+            store,
+            &latest_attempt.attempt_id,
+            AttemptLifecycleState::Cancelled,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn create_fresh_attempt_for_control(
+    store: &Store,
+    task_id: &str,
+    allowed_states: &[TaskLifecycleState],
+    transition_source_state: TaskLifecycleState,
+    action: &str,
+    carry_checkpoint: bool,
+) -> Result<String> {
+    let task_state = TaskRecord::current_state(store, task_id)?;
+    if !allowed_states.contains(&task_state) {
+        anyhow::bail!(
+            "{action} is only allowed from {:?}: task {task_id} is {task_state}",
+            allowed_states
+        );
+    }
+
+    let latest_attempt = latest_or_new_attempt(store, task_id)?;
+    let latest_attempt_state = latest_attempt.state()?;
+
+    if task_state == transition_source_state {
+        TaskRecord::transition_state(
+            store,
+            task_id,
+            &latest_attempt.attempt_id,
+            TaskLifecycleState::Retryable,
+        )?;
+    }
+
+    if matches!(
+        latest_attempt_state,
+        AttemptLifecycleState::Failed | AttemptLifecycleState::Interrupted
+    ) {
+        TaskAttemptRecord::transition_state(
+            store,
+            &latest_attempt.attempt_id,
+            AttemptLifecycleState::Retryable,
+        )?;
+    }
+
+    let new_attempt = TaskAttemptRecord::create(
+        store,
+        NewTaskAttemptRecord {
+            attempt_id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            session_id: None,
+            status: AttemptLifecycleState::Queued.to_string(),
+            recovery_checkpoint: if carry_checkpoint {
+                latest_attempt.recovery_checkpoint.clone()
+            } else {
+                None
+            },
+        },
+    )?;
+
+    TaskRecord::transition_state(
+        store,
+        task_id,
+        &new_attempt.attempt_id,
+        TaskLifecycleState::Queued,
+    )?;
+
+    Ok(new_attempt.attempt_id)
+}
+
+fn transition_attempt_if_needed(
+    store: &Store,
+    attempt_id: &str,
+    next: AttemptLifecycleState,
+) -> Result<()> {
+    if TaskAttemptRecord::get(store, attempt_id)?.state()? != next {
+        TaskAttemptRecord::transition_state(store, attempt_id, next)?;
+    }
+    Ok(())
+}
+
+fn transition_task_if_needed(
+    store: &Store,
+    task_id: &str,
+    attempt_id: &str,
+    next: TaskLifecycleState,
+) -> Result<()> {
+    if TaskRecord::current_state(store, task_id)? != next {
+        TaskRecord::transition_state(store, task_id, attempt_id, next)?;
+    }
+    Ok(())
 }
 
 fn assistant_message_context_chars(content: &str) -> usize {

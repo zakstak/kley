@@ -56,9 +56,9 @@ pub fn estimate_effective_history_chars(
     let summary_placeholder = serde_json::json!({
         "type": "message",
         "role": "user",
-        "content": format!(
-            "{SUMMARY_PREFIX}\n\n[Recovered compacted history estimate for {split_at} earlier items ({old_chars} serialized chars).]"
-        ),
+        "content": format_handoff_summary(&format!(
+            "[Recovered compacted history estimate for {split_at} earlier items ({old_chars} serialized chars).]"
+        )),
     });
 
     recent_chars + estimate_history_chars(&[summary_placeholder])
@@ -131,9 +131,7 @@ pub async fn maybe_compact(
         serde_json::json!({
             "type": "message",
             "role": "user",
-            "content": format!(
-                "{SUMMARY_PREFIX}\n\n{summary}"
-            ),
+            "content": format_handoff_summary(&summary),
         }),
     );
 
@@ -152,10 +150,14 @@ pub async fn maybe_compact(
 /// Prefix injected before the compaction summary in the replacement history.
 /// Frames the summary as another LLM's work (codex-rs pattern) so the model
 /// builds on it rather than treating it as user instructions.
-const SUMMARY_PREFIX: &str = "\
+pub const HANDOFF_SUMMARY_PREFIX: &str = "\
 Another language model started working on this task and produced the summary \
 below. You also have access to the current state of the tools and repository. \
 Use this summary to build on the work already done — avoid duplicating effort.";
+
+pub fn format_handoff_summary(summary: &str) -> String {
+    format!("{HANDOFF_SUMMARY_PREFIX}\n\n{summary}")
+}
 
 /// The compaction instruction sent to the model. Combines:
 /// - codex-rs: "handoff summary for another LLM" framing
