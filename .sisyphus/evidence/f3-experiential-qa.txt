@@ -1,0 +1,30 @@
+VERDICT: APPROVE
+
+Final-wave task: F3 experiential QA for subagent delegation workflow engine.
+Date: 2026-03-31
+
+Commands run:
+- PASS — `./preflight.sh`
+  - Environment/tooling preflight passed: 28 passed, 0 failed, 6 optional warnings.
+- PASS — `cargo test --test runtime -- --exact restart_recovery_resumes_nonterminal_tasks_automatically`
+- PASS — `cargo test --test web -- --exact task_watch_reconnect_from_cursor_recovers_missed_events`
+- PASS — `cargo test --test cli -- --exact cli_lists_and_inspects_task_graph_state`
+- PASS — `cargo test --test cli -- --exact cli_control_commands_require_valid_task_state`
+- PASS — `cargo test --test store_concurrency -- --exact cancel_retry_resume_and_reprioritize_are_serialized`
+- PASS — `cargo test --test store_concurrency -- --exact task_claim_is_single_winner_under_race`
+- PASS — `npm run playwright:install`
+  - Chromium install completed; Playwright warned it used the ubuntu24.04-x64 fallback build on this host.
+- PASS — `npx playwright test playwright/core-workspace.spec.ts --grep "task delegation lifecycle|task watch survives reconnect"`
+  - `task delegation lifecycle` passed
+  - `task watch survives reconnect` passed
+
+Observed lifecycle / reconnect behavior:
+- Runtime recovery: restart recovery resumed nonterminal work automatically. The stale running attempt was interrupted, marked recoverable/retryable, and a fresh replacement attempt completed. Recovery reused the existing child session and durable handoff summary/artifact metadata instead of spawning a duplicate child session. A second recovery pass completed 0 tasks, confirming idempotent restart behavior.
+- Web task-watch reconnect: reconnect with `after_sequence` replayed only the missed events for the watched task. The server returned updated cursor metadata, replayed later task events in order, and did not duplicate already-seen events or leak unrelated task events into the watched stream.
+- CLI visibility/control: `task list` / `task inspect` coverage showed stable task identity, latest attempt identity, child session id, graph edges, event history, and lease ownership in CLI output. Control validation confirmed invalid retry/cancel operations are rejected with explicit errors, while reprioritize succeeds for a ready task.
+- Store concurrency: lifecycle control mutations remained serialized under concurrency, and claim racing produced exactly one winner with a single durable `attempt.lease.claimed` event.
+- Browser delegation lifecycle: the live Playwright run opened the real web workspace, delegated a child task through the prompt/tool flow, then observed a successful `task.watch` handshake followed by `task.list.snapshot`, `task.detail.snapshot`, and task event delivery for the delegated child task. This confirmed cross-surface lifecycle visibility through the production websocket path.
+- Browser reconnect: after the websocket was forcibly closed, the browser recovered to a connected/reconnecting state, received a fresh `state.snapshot` with the active session, reattached `task.watch` using the new session id plus the prior cursor, and replayed only post-cursor task events. Both browser tests also enforce no console errors.
+
+Conclusion:
+- APPROVE. The experiential QA run matched the plan: runtime recovery, web reconnect, CLI task visibility/control, durable store concurrency behavior, and browser delegation/reconnect all passed with the expected lifecycle semantics.
