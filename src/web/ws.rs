@@ -6,12 +6,13 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use crate::compact::CompactConfig;
 use crate::runtime::{RuntimeEventEnvelope, SubmitPromptOutcome};
 use crate::runtime::{SessionSettingsOverrides, canonical_settings_json};
-use crate::store::{self, Session};
+use crate::store::{self, Session, TaskLifecycleState, TaskRecord};
 
 mod context_usage;
 mod errors;
@@ -20,25 +21,37 @@ mod io;
 mod session;
 mod snapshot;
 
-use super::protocol::{ResponseError, UiEvent, WebCommand, WebResponse};
+use super::protocol::{ResponseError, TaskControlResponseData, UiEvent, WebCommand, WebResponse};
 use super::state::WebAppState;
 use errors::{
     abort_turn_error, internal_error, invalid_command_error, prompt_submit_error,
     session_busy_error,
 };
-use event_map::{runtime_event_to_ui_event, ts_now};
+pub use event_map::runtime_event_to_ui_event;
+use event_map::ts_now;
 use io::{send_event, send_response};
 use session::{
     LoadSessionError, SelectSessionError, attach_or_select_session, load_session_for_controller,
 };
-use snapshot::{list_sessions, snapshot_data};
+use snapshot::{
+    bootstrap_snapshot_data, snapshot_data, task_event_records, task_watch_bootstrap_data,
+};
 
 const DEFAULT_WEB_MODEL: &str = "test-model";
 const DEFAULT_WEB_PROVIDER: &str = "test";
+const OPENAI_COMPLETION_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Default, Deserialize)]
 pub struct WsConnectQuery {
     session_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TaskWatchState {
+    request_id: String,
+    session_id: String,
+    task_id: String,
+    last_sequence: i64,
 }
 
 pub async fn ws_handler(
@@ -76,8 +89,9 @@ async fn handle_socket(
         };
 
     let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
+    let mut task_watch: Option<TaskWatchState> = None;
 
-    if send_bootstrap_event(&mut socket, &state, &active_session.id, &controller_id)
+    if send_connect_snapshot_event(&mut socket, &state, &active_session.id, &controller_id)
         .await
         .is_err()
     {
@@ -180,33 +194,23 @@ async fn handle_socket(
                         }
                     }
                     WebCommand::SessionsList { request_id } => {
-                        match list_sessions(&state, Some(&active_session.id)).await {
-                            Ok(sessions) => {
-                                let data = json!({
-                                    "sessions": sessions,
-                                    "session_id": active_session.id,
-                                });
-                                if send_response(&mut socket, WebResponse::Ok { request_id, data })
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                if send_response(
-                                    &mut socket,
-                                    WebResponse::Error {
-                                        request_id,
-                                        error: internal_error("failed to list sessions"),
-                                    },
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
-                                }
-                            }
+                        let title = active_session
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| "Untitled session".to_string());
+                        let data = json!({
+                            "sessions": [{
+                                "session_id": active_session.id,
+                                "title": title,
+                                "updated_at": active_session.updated_at.to_rfc3339(),
+                            }],
+                            "session_id": active_session.id,
+                        });
+                        if send_response(&mut socket, WebResponse::Ok { request_id, data })
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                     WebCommand::SessionLoad {
@@ -223,6 +227,7 @@ async fn handle_socket(
                         Ok(session) => {
                             active_session = session;
                             runtime_events = state.runtime_manager.subscribe(&active_session.id);
+                            task_watch = None;
                             if send_response(
                                 &mut socket,
                                 WebResponse::Ok {
@@ -629,6 +634,8 @@ async fn handle_socket(
                     WebCommand::AuthOpenAiComplete {
                         request_id,
                         callback_input,
+                        verifier,
+                        state: expected_state,
                     } => {
                         let callback_input = callback_input.trim().to_string();
                         if callback_input.is_empty() {
@@ -652,7 +659,27 @@ async fn handle_socket(
                             continue;
                         }
 
-                        match state.complete_openai_login(&controller_id, &callback_input).await {
+                        let completion = timeout(OPENAI_COMPLETION_TIMEOUT, async {
+                            if let (Some(verifier), Some(expected_state)) =
+                                (verifier.as_deref(), expected_state.as_deref())
+                            {
+                                state
+                                    .complete_openai_login_with_verifier_state(
+                                        &controller_id,
+                                        &callback_input,
+                                        verifier,
+                                        expected_state,
+                                    )
+                                    .await
+                            } else {
+                                state.complete_openai_login(&controller_id, &callback_input).await
+                            }
+                        })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("openai login completion timed out"))
+                        .and_then(|result| result);
+
+                        match completion {
                             Ok(()) => {
                                 if send_response(
                                     &mut socket,
@@ -880,10 +907,358 @@ async fn handle_socket(
                                 }
                             }
                         }
-                    },
+                    }
+                    WebCommand::TaskCancel {
+                        request_id,
+                        session_id,
+                        task_id,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: invalid_task_control_session_error(),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match cancel_task_via_api(&state, &active_session.id, &task_id).await {
+                            Ok(data) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: serde_json::to_value(data)
+                                            .unwrap_or_else(|_| json!({})),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: task_control_error("cancel", &task_id, error),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::TaskRetry {
+                        request_id,
+                        session_id,
+                        task_id,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: invalid_task_control_session_error(),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match retry_task_via_api(&state, &active_session.id, &task_id).await {
+                            Ok(data) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: serde_json::to_value(data)
+                                            .unwrap_or_else(|_| json!({})),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: task_control_error("retry", &task_id, error),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::TaskResume {
+                        request_id,
+                        session_id,
+                        task_id,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: invalid_task_control_session_error(),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match resume_task_via_api(&state, &active_session.id, &task_id).await {
+                            Ok(data) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: serde_json::to_value(data)
+                                            .unwrap_or_else(|_| json!({})),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: task_control_error("resume", &task_id, error),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::TaskReprioritize {
+                        request_id,
+                        session_id,
+                        task_id,
+                        priority,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: invalid_task_control_session_error(),
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match reprioritize_task_via_api(
+                            &state,
+                            &active_session.id,
+                            &task_id,
+                            priority,
+                        )
+                        .await
+                        {
+                            Ok(data) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id,
+                                        data: serde_json::to_value(data)
+                                            .unwrap_or_else(|_| json!({})),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: task_control_error(
+                                            "reprioritize",
+                                            &task_id,
+                                            error,
+                                        ),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    WebCommand::TaskWatch {
+                        request_id,
+                        session_id,
+                        task_id,
+                        after_sequence,
+                    } => {
+                        if session_id != active_session.id {
+                            if send_response(
+                                &mut socket,
+                                WebResponse::Error {
+                                    request_id,
+                                    error: ResponseError {
+                                        code: "invalid_session".to_string(),
+                                        message: "task watch session is not currently attached"
+                                            .to_string(),
+                                        details: None,
+                                    },
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        let after_sequence = after_sequence.unwrap_or(0);
+                        match task_watch_bootstrap_data(
+                            &state,
+                            &active_session.id,
+                            &request_id,
+                            &task_id,
+                            after_sequence,
+                        )
+                        .await
+                        {
+                            Ok(bootstrap) => {
+                                let latest_sequence = bootstrap.detail_snapshot.cursor.latest_sequence;
+                                let cursor = bootstrap.detail_snapshot.cursor.clone();
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Ok {
+                                        request_id: request_id.clone(),
+                                        data: json!({
+                                            "watching": true,
+                                            "session_id": active_session.id.clone(),
+                                            "task_id": task_id.clone(),
+                                            "cursor": cursor,
+                                        }),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                if send_event(
+                                    &mut socket,
+                                    UiEvent::TaskListSnapshot {
+                                        event_id: format!("evt-{}", Uuid::new_v4()),
+                                        ts: ts_now(),
+                                        data: bootstrap.list_snapshot,
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                if send_event(
+                                    &mut socket,
+                                    UiEvent::TaskDetailSnapshot {
+                                        event_id: format!("evt-{}", Uuid::new_v4()),
+                                        ts: ts_now(),
+                                        data: bootstrap.detail_snapshot,
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                if send_task_event_records(
+                                    &mut socket,
+                                    &request_id,
+                                    &active_session.id,
+                                    &bootstrap.replay_events,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+
+                                task_watch = Some(TaskWatchState {
+                                    request_id,
+                                    session_id: active_session.id.clone(),
+                                    task_id,
+                                    last_sequence: latest_sequence,
+                                });
+                            }
+                            Err(error) => {
+                                if send_response(
+                                    &mut socket,
+                                    WebResponse::Error {
+                                        request_id,
+                                        error: task_watch_error(error),
+                                    },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             runtime_event = next_runtime_event(&mut runtime_events) => {
+                if task_watch.is_some() {
+                    continue;
+                }
                 if let Some(envelope) = runtime_event {
                     let Some(ui_event) = runtime_event_to_ui_event(
                         &envelope.event,
@@ -895,6 +1270,33 @@ async fn handle_socket(
 
                     if send_event(&mut socket, ui_event).await.is_err() {
                         break;
+                    }
+                }
+            }
+            _ = next_task_watch_tick(task_watch.as_ref()) => {
+                let Some(watch) = task_watch.as_mut() else {
+                    continue;
+                };
+
+                match task_event_records(&state, &watch.task_id, watch.last_sequence).await {
+                    Ok(records) => {
+                        if let Some(last_record) = records.last() {
+                            watch.last_sequence = last_record.sequence;
+                        }
+                        if send_task_event_records(
+                            &mut socket,
+                            &watch.request_id,
+                            &watch.session_id,
+                            &records,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        task_watch = None;
                     }
                 }
             }
@@ -922,6 +1324,211 @@ async fn next_runtime_event(
     }
 }
 
+async fn next_task_watch_tick(task_watch: Option<&TaskWatchState>) {
+    match task_watch {
+        Some(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+        None => pending().await,
+    }
+}
+
+fn task_watch_error(error: anyhow::Error) -> ResponseError {
+    let message = error.to_string();
+    if message.contains("task event cursor") {
+        return ResponseError {
+            code: "invalid_task_cursor".to_string(),
+            message,
+            details: None,
+        };
+    }
+    if message.contains("task event stream not found") || message.contains("task not found") {
+        return ResponseError {
+            code: "task_not_found".to_string(),
+            message,
+            details: None,
+        };
+    }
+
+    ResponseError {
+        code: "task_watch_failed".to_string(),
+        message,
+        details: None,
+    }
+}
+
+fn invalid_task_control_session_error() -> ResponseError {
+    ResponseError {
+        code: "invalid_session".to_string(),
+        message: "task control session is not currently attached".to_string(),
+        details: None,
+    }
+}
+
+fn task_control_error(action: &str, task_id: &str, error: anyhow::Error) -> ResponseError {
+    let message = error.to_string();
+    let code = if message.contains("task not found") {
+        "task_not_found"
+    } else if message.contains("only allowed")
+        || message.contains("already requested")
+        || message.contains("invalid task transition")
+        || message.contains("invalid attempt transition")
+    {
+        "invalid_task_state"
+    } else {
+        "task_control_failed"
+    };
+
+    ResponseError {
+        code: code.to_string(),
+        message,
+        details: Some(json!({
+            "action": action,
+            "task_id": task_id,
+        })),
+    }
+}
+
+async fn cancel_task_via_api(
+    state: &WebAppState,
+    session_id: &str,
+    task_id: &str,
+) -> anyhow::Result<TaskControlResponseData> {
+    validate_cancelable_task_for_api(state, task_id).await?;
+    let affected_task_ids = state
+        .runtime_manager
+        .cancel_task_graph(&state.store, task_id)?;
+    let (_, task_state) = task_snapshot_for_control(state, task_id).await?;
+    Ok(TaskControlResponseData {
+        action: "cancel".to_string(),
+        session_id: session_id.to_string(),
+        task_id: task_id.to_string(),
+        task_state: task_state.to_string(),
+        affected_task_ids: Some(affected_task_ids),
+        new_attempt_id: None,
+        priority: None,
+    })
+}
+
+async fn retry_task_via_api(
+    state: &WebAppState,
+    session_id: &str,
+    task_id: &str,
+) -> anyhow::Result<TaskControlResponseData> {
+    let new_attempt_id = state.runtime_manager.retry_task(&state.store, task_id)?;
+    let (_, task_state) = task_snapshot_for_control(state, task_id).await?;
+    Ok(TaskControlResponseData {
+        action: "retry".to_string(),
+        session_id: session_id.to_string(),
+        task_id: task_id.to_string(),
+        task_state: task_state.to_string(),
+        affected_task_ids: None,
+        new_attempt_id: Some(new_attempt_id),
+        priority: None,
+    })
+}
+
+async fn resume_task_via_api(
+    state: &WebAppState,
+    session_id: &str,
+    task_id: &str,
+) -> anyhow::Result<TaskControlResponseData> {
+    let new_attempt_id = state.runtime_manager.resume_task(&state.store, task_id)?;
+    let (_, task_state) = task_snapshot_for_control(state, task_id).await?;
+    Ok(TaskControlResponseData {
+        action: "resume".to_string(),
+        session_id: session_id.to_string(),
+        task_id: task_id.to_string(),
+        task_state: task_state.to_string(),
+        affected_task_ids: None,
+        new_attempt_id: Some(new_attempt_id),
+        priority: None,
+    })
+}
+
+async fn reprioritize_task_via_api(
+    state: &WebAppState,
+    session_id: &str,
+    task_id: &str,
+    priority: i64,
+) -> anyhow::Result<TaskControlResponseData> {
+    state
+        .runtime_manager
+        .reprioritize_task(&state.store, task_id, priority)?;
+    let (task, task_state) = task_snapshot_for_control(state, task_id).await?;
+    Ok(TaskControlResponseData {
+        action: "reprioritize".to_string(),
+        session_id: session_id.to_string(),
+        task_id: task_id.to_string(),
+        task_state: task_state.to_string(),
+        affected_task_ids: None,
+        new_attempt_id: None,
+        priority: Some(task.priority),
+    })
+}
+
+async fn task_snapshot_for_control(
+    state: &WebAppState,
+    task_id: &str,
+) -> anyhow::Result<(TaskRecord, TaskLifecycleState)> {
+    let store_ref = state.store.clone();
+    let task_id_owned = task_id.to_string();
+    store::store_run(&store_ref, move |store| {
+        let task = TaskRecord::get(store, &task_id_owned)?;
+        let task_state = TaskRecord::current_state(store, &task_id_owned)?;
+        Ok((task, task_state))
+    })
+    .await
+}
+
+async fn validate_cancelable_task_for_api(
+    state: &WebAppState,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    let store_ref = state.store.clone();
+    let task_id_owned = task_id.to_string();
+    store::store_run(&store_ref, move |store| {
+        let task_state = TaskRecord::current_state(store, &task_id_owned)?;
+        if matches!(
+            task_state,
+            TaskLifecycleState::Completed | TaskLifecycleState::Cancelled
+        ) {
+            anyhow::bail!(
+                "cancel is only allowed for nonterminal tasks: task {task_id_owned} is {task_state}"
+            );
+        }
+        if task_state == TaskLifecycleState::CancelRequested {
+            anyhow::bail!("cancel is already requested for task {task_id_owned}");
+        }
+        if task_state == TaskLifecycleState::Failed {
+            anyhow::bail!(
+                "cancel is only allowed before terminal failure: task {task_id_owned} is {task_state}"
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+async fn send_task_event_records(
+    socket: &mut WebSocket,
+    request_id: &str,
+    session_id: &str,
+    records: &[crate::store::TaskEventRecord],
+) -> std::result::Result<(), ()> {
+    for record in records {
+        let Some(ui_event) = runtime_event_to_ui_event(
+            &crate::events::AgentEvent::from_task_event_record(record),
+            request_id,
+            session_id,
+        ) else {
+            continue;
+        };
+
+        send_event(socket, ui_event).await?;
+    }
+
+    Ok(())
+}
+
 async fn send_bootstrap_event(
     socket: &mut WebSocket,
     state: &WebAppState,
@@ -929,6 +1536,27 @@ async fn send_bootstrap_event(
     controller_id: &str,
 ) -> std::result::Result<(), ()> {
     let data = snapshot_data(state, session_id, controller_id)
+        .await
+        .map_err(|_| ())?;
+
+    send_event(
+        socket,
+        UiEvent::StateSnapshot {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            data,
+        },
+    )
+    .await
+}
+
+async fn send_connect_snapshot_event(
+    socket: &mut WebSocket,
+    state: &WebAppState,
+    session_id: &str,
+    controller_id: &str,
+) -> std::result::Result<(), ()> {
+    let data = bootstrap_snapshot_data(state, session_id, controller_id)
         .await
         .map_err(|_| ())?;
 

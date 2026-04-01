@@ -1,12 +1,12 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::tools::editing::EditObservation;
 
 use super::protocol::{
-    AuthStateSnapshot, ContextUsage, ResponseError, SelectedSession, SessionSummary,
-    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse, PROTOCOL_VERSION,
+    AuthStateSnapshot, ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession,
+    SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -132,7 +132,7 @@ async fn handle_socket(mut socket: WebSocket) {
                 let data = json!({
                     "started": true,
                     "provider": "openai",
-                    "authorize_url": "about:blank#kley-openai-auth",
+                    "authorize_url": "data:text/html,%3Ctitle%3EKley%20OpenAI%20Auth%3C/title%3E%3Cp%3EMock%20OpenAI%20auth%20started.%3C/p%3E",
                 });
                 if send_response(&mut socket, WebResponse::Ok { request_id, data })
                     .await
@@ -150,6 +150,7 @@ async fn handle_socket(mut socket: WebSocket) {
             WebCommand::AuthOpenAiComplete {
                 request_id,
                 callback_input,
+                ..
             } => {
                 if callback_input.trim().is_empty() {
                     if send_response(
@@ -314,6 +315,29 @@ async fn handle_socket(mut socket: WebSocket) {
                 if send_event(&mut socket, bootstrap_event(&auth))
                     .await
                     .is_err()
+                {
+                    return;
+                }
+            }
+            WebCommand::TaskWatch { request_id, .. }
+            | WebCommand::TaskCancel { request_id, .. }
+            | WebCommand::TaskRetry { request_id, .. }
+            | WebCommand::TaskResume { request_id, .. }
+            | WebCommand::TaskReprioritize { request_id, .. } => {
+                if send_response(
+                    &mut socket,
+                    WebResponse::Error {
+                        request_id,
+                        error: ResponseError {
+                            code: "unsupported_command".to_string(),
+                            message: "task watch is not available on the mock websocket"
+                                .to_string(),
+                            details: None,
+                        },
+                    },
+                )
+                .await
+                .is_err()
                 {
                     return;
                 }

@@ -7,15 +7,18 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::auth::{
-    self, CredentialStore, Credentials, OpenAiCredentials, ZaiCredentials,
-    save_openai_oauth_credentials,
+    self, CredentialStore, Credentials, ZaiCredentials, save_openai_oauth_credentials,
 };
 use crate::runtime::RuntimeManager;
 use crate::store::{SharedStore, Store};
 
+#[cfg(feature = "testing")]
+use crate::auth::OpenAiCredentials;
+
 use super::protocol::AuthStateSnapshot;
 
 const PENDING_OPENAI_LOGIN_TTL: Duration = Duration::from_secs(600);
+#[cfg(feature = "testing")]
 const OPENAI_AUTH_MODE_ENV: &str = "KLEY_WEB_OPENAI_AUTH_MODE";
 const WEB_AUTH_AUTO_RESET_ENV: &str = "KLEY_WEB_AUTH_AUTO_RESET";
 
@@ -120,7 +123,6 @@ impl WebAuthService for LiveWebAuthService {
     }
 
     fn start_openai_login(&self) -> Result<PendingOpenAiLogin> {
-        let _ = self.credential_store()?;
         let flow = auth::openai::start_login_flow()?;
         Ok(PendingOpenAiLogin::new(
             flow.authorize_url,
@@ -313,6 +315,10 @@ impl WebAppState {
         self.auth_service.summary(pending_openai_login)
     }
 
+    pub(crate) fn pending_openai_login(&self, controller_id: &str) -> bool {
+        self.has_pending_openai_login(controller_id)
+    }
+
     pub fn start_openai_login(&self, controller_id: &str) -> Result<String> {
         let pending = self.auth_service.start_openai_login()?;
         let authorize_url = pending.authorize_url.clone();
@@ -341,6 +347,21 @@ impl WebAppState {
             .complete_openai_login(&pending, callback_input)
             .await?;
 
+        self.clear_openai_login(controller_id);
+        Ok(())
+    }
+
+    pub async fn complete_openai_login_with_verifier_state(
+        &self,
+        controller_id: &str,
+        callback_input: &str,
+        verifier: &str,
+        expected_state: &str,
+    ) -> Result<()> {
+        let credentials =
+            auth::openai::finish_login_flow(callback_input, verifier, expected_state).await?;
+        let store = CredentialStore::open_noninteractive()?;
+        save_openai_oauth_credentials(&store, credentials)?;
         self.clear_openai_login(controller_id);
         Ok(())
     }

@@ -1,12 +1,19 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    body::{to_bytes, Body},
-    http::{header, Request, StatusCode},
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
 };
+use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
-use kley::store::{self, NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
+use kley::events::AgentEvent;
+use kley::store::{
+    self, AttemptLifecycleState, NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord,
+    NewTaskEventRecord, NewTaskRecord, NewTurn, Session, SessionStatus, SharedStore, Store,
+    TaskAttemptRecord, TaskEdgeRecord, TaskEventRecord, TaskLifecycleState, TaskRecord, Turn,
+};
 use kley::web::state::{MockWebAuthService, WebAppState, WebAuthService};
+use kley::web::ws::runtime_event_to_ui_event;
 use serde_json::Value;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::util::ServiceExt;
@@ -276,7 +283,11 @@ mod web {
         .unwrap();
 
         let server = spawn_server_with_state(state).await.unwrap();
-        let mut socket = connect_ws(server.addr).await;
+        let mut socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", seeded_session.id),
+        )
+        .await;
 
         let frame = recv_json(&mut socket).await;
         assert_eq!(frame["type"], "state.snapshot");
@@ -293,18 +304,15 @@ mod web {
         assert!(frame["selected_session"]["updated_at"].as_str().is_some());
         assert_eq!(frame["selected_session"]["provider"], "test");
         assert_eq!(frame["selected_session"]["model"], "test-model");
-        assert!(frame["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|entry| entry["updated_at"].as_str().is_some()));
+        assert!(
+            frame["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["updated_at"].as_str().is_some())
+        );
         let transcript = frame["transcript"].as_array().unwrap();
-        assert!(transcript
-            .iter()
-            .any(|entry| entry["content"] == "Persisted bootstrap prompt"));
-        assert!(transcript
-            .iter()
-            .any(|entry| entry["content"] == "Persisted bootstrap reply"));
+        assert!(transcript.is_empty());
     }
 
     #[tokio::test]
@@ -366,7 +374,11 @@ mod web {
         .unwrap();
 
         let server = spawn_server_with_state(state).await.unwrap();
-        let mut socket = connect_ws(server.addr).await;
+        let mut socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", seeded_session.id),
+        )
+        .await;
         let bootstrap = recv_json(&mut socket).await;
         assert_eq!(bootstrap["type"], "state.snapshot");
         assert_eq!(bootstrap["session_id"], seeded_session.id);
@@ -460,7 +472,7 @@ mod web {
         let server = spawn_server_with_state(test_state_with_mock_openai())
             .await
             .unwrap();
-        let mut socket = connect_ws(server.addr).await;
+        let mut socket = connect_mock_ws(server.addr).await;
         let _bootstrap = recv_json(&mut socket).await;
 
         socket
@@ -775,11 +787,13 @@ mod web {
             frame["selected_session"]["title"],
             "Requested Older Session"
         );
-        assert!(frame["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["session_id"] == requested_session.id));
+        assert!(
+            frame["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["session_id"] == requested_session.id)
+        );
     }
 
     #[tokio::test]
@@ -838,7 +852,11 @@ mod web {
         .unwrap();
 
         let server = spawn_server_with_state(state).await.unwrap();
-        let mut socket = connect_ws(server.addr).await;
+        let mut socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", second_session.id),
+        )
+        .await;
 
         let bootstrap = recv_json(&mut socket).await;
         assert_eq!(bootstrap["session_id"], second_session.id);
@@ -863,12 +881,16 @@ mod web {
         assert_eq!(snapshot["selected_session"]["title"], "First Session");
 
         let transcript = snapshot["transcript"].as_array().unwrap();
-        assert!(transcript
-            .iter()
-            .any(|entry| entry["content"] == "First session transcript"));
-        assert!(!transcript
-            .iter()
-            .any(|entry| entry["content"] == "Second session transcript"));
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["content"] == "First session transcript")
+        );
+        assert!(
+            !transcript
+                .iter()
+                .any(|entry| entry["content"] == "Second session transcript")
+        );
     }
 
     #[tokio::test]
@@ -1165,18 +1187,22 @@ mod web {
 
             if event_type == "tool.started" {
                 started_id = frame["tool_call_id"].as_str().map(|s| s.to_string());
-                assert!(frame["tool_name"]
-                    .as_str()
-                    .unwrap()
-                    .contains("unknown_tool"));
+                assert!(
+                    frame["tool_name"]
+                        .as_str()
+                        .unwrap()
+                        .contains("unknown_tool")
+                );
             }
 
             if event_type == "tool.completed" {
                 completed_id = frame["tool_call_id"].as_str().map(|s| s.to_string());
-                assert!(frame["tool_name"]
-                    .as_str()
-                    .unwrap()
-                    .contains("unknown_tool"));
+                assert!(
+                    frame["tool_name"]
+                        .as_str()
+                        .unwrap()
+                        .contains("unknown_tool")
+                );
             }
 
             if event_type == "turn.completed" {
@@ -1255,9 +1281,11 @@ mod web {
         assert_eq!(state_frame["request_id"], "req-ui-state-1");
 
         let transcript = state_frame["data"]["transcript"].as_array().unwrap();
-        assert!(transcript
-            .iter()
-            .any(|entry| entry["role"] == "user" && entry["content"] == "please use a tool"));
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["role"] == "user" && entry["content"] == "please use a tool")
+        );
         assert!(transcript.iter().any(|entry| {
             entry["role"] == "assistant"
                 && entry["content"]
@@ -1323,7 +1351,11 @@ mod web {
         .unwrap();
 
         let server = spawn_server_with_state(state).await.unwrap();
-        let mut socket = connect_ws(server.addr).await;
+        let mut socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", second_session.id),
+        )
+        .await;
 
         let bootstrap = recv_json(&mut socket).await;
         assert_eq!(bootstrap["type"], "state.snapshot");
@@ -1347,20 +1379,20 @@ mod web {
         assert_eq!(snapshot["selected_session"]["title"], "First Session");
 
         let transcript = snapshot["transcript"].as_array().unwrap();
-        assert!(transcript
-            .iter()
-            .any(|entry| entry["content"] == "First session transcript"));
-        assert!(!transcript
-            .iter()
-            .any(|entry| entry["content"] == "Second session transcript"));
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["content"] == "First session transcript")
+        );
+        assert!(
+            !transcript
+                .iter()
+                .any(|entry| entry["content"] == "Second session transcript")
+        );
 
         let sessions = snapshot["sessions"].as_array().unwrap();
-        assert!(sessions
-            .iter()
-            .any(|entry| entry["session_id"] == first_session.id));
-        assert!(sessions
-            .iter()
-            .any(|entry| entry["session_id"] == second_session.id));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["session_id"], first_session.id);
     }
 
     #[tokio::test]
@@ -1439,9 +1471,11 @@ mod web {
         assert!(state_after["data"]["active_turn"].is_null());
 
         let transcript = state_after["data"]["transcript"].as_array().unwrap();
-        assert!(transcript
-            .iter()
-            .any(|entry| entry["role"] == "user" && entry["content"] == "hello after abort"));
+        assert!(
+            transcript
+                .iter()
+                .any(|entry| entry["role"] == "user" && entry["content"] == "hello after abort")
+        );
     }
 
     #[tokio::test]
@@ -1472,7 +1506,7 @@ mod web {
     }
 
     #[tokio::test]
-    async fn reconnect_replays_active_turn() {
+    async fn reconnect_bootstrap_skips_persisted_history_replay() {
         let state = test_state();
         let store = state.store.clone();
 
@@ -1507,7 +1541,11 @@ mod web {
         .unwrap();
 
         let server = spawn_server_with_state(state.clone()).await.unwrap();
-        let mut socket1 = connect_ws(server.addr).await;
+        let mut socket1 = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", seeded_session.id),
+        )
+        .await;
         let bootstrap1 = recv_json(&mut socket1).await;
         assert_eq!(bootstrap1["session_id"], seeded_session.id);
 
@@ -1524,7 +1562,7 @@ mod web {
 
         let ack = recv_json(&mut socket1).await;
         assert_eq!(ack["type"], "response.ok");
-        let turn_id = ack["data"]["turn_id"].as_str().unwrap().to_string();
+        assert!(ack["data"]["turn_id"].is_string());
 
         let started = recv_json(&mut socket1).await;
         let msg_started = recv_json(&mut socket1).await;
@@ -1535,53 +1573,20 @@ mod web {
 
         drop(socket1);
 
-        let mut socket2 = connect_ws(server.addr).await;
+        let mut socket2 = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={}", seeded_session.id),
+        )
+        .await;
         let bootstrap2 = recv_json(&mut socket2).await;
         assert_eq!(bootstrap2["type"], "state.snapshot");
         assert_eq!(bootstrap2["session_id"], seeded_session.id);
 
         let transcript = bootstrap2["transcript"].as_array().unwrap();
-        assert!(transcript
-            .iter()
-            .any(|turn| turn["content"] == "Persisted history message"));
-        assert!(transcript
-            .iter()
-            .any(|turn| turn["role"] == "user"
-                && turn["content"] == "abortable response please stop"));
-
-        assert_eq!(bootstrap2["active_turn"]["request_id"], "req-reconnect-1");
-        let replayed_content = bootstrap2["active_turn"]["content"].as_str().unwrap();
-        assert!(!replayed_content.is_empty());
+        assert!(transcript.is_empty());
 
         let completed = recv_until_type(&mut socket2, "turn.completed").await;
         assert_eq!(completed["request_id"], "req-reconnect-1");
-
-        socket2
-            .send(Message::Text(
-                r#"{"type":"state.get","request_id":"req-reconnect-state"}"#.to_string(),
-            ))
-            .await
-            .unwrap();
-
-        let state_after = recv_json(&mut socket2).await;
-        assert_eq!(state_after["type"], "response.ok");
-        assert!(state_after["data"]["active_turn"].is_null());
-
-        socket2
-            .send(Message::Text(
-                format!(
-                    r#"{{"type":"turn.abort","request_id":"req-reconnect-abort","session_id":"{}","turn_id":"{}"}}"#,
-                    seeded_session.id, turn_id
-                )
-                ,
-            ))
-            .await
-            .unwrap();
-
-        let abort_after_completion = recv_json(&mut socket2).await;
-        assert_eq!(abort_after_completion["type"], "response.error");
-        assert_eq!(abort_after_completion["request_id"], "req-reconnect-abort");
-        assert_eq!(abort_after_completion["error"]["code"], "turn_not_found");
     }
 
     #[tokio::test]
@@ -1691,4 +1696,1730 @@ mod web {
         let completed = recv_until_type(&mut socket, "turn.completed").await;
         assert_eq!(completed["request_id"], "req-after-abort");
     }
+
+    pub(super) async fn task_event_cursor_replays_from_last_seen_sequence() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let (last_seen_sequence, replayed_sequence) = store::store_run(&store, |s| {
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-replay".to_string(),
+                    parent_task_id: None,
+                    title: Some("Replay task".to_string()),
+                    priority: 5,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel_descendants".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            let replay_attempt = TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-replay".to_string(),
+                    task_id: "task-replay".to_string(),
+                    session_id: None,
+                    status: "running".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-noise".to_string(),
+                    parent_task_id: None,
+                    title: Some("Noise task".to_string()),
+                    priority: 1,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel_descendants".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            let noise_attempt = TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-noise".to_string(),
+                    task_id: "task-noise".to_string(),
+                    session_id: None,
+                    status: "running".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+
+            let first_seen = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-replay".to_string(),
+                    attempt_id: replay_attempt.attempt_id.clone(),
+                    session_id: None,
+                    event_type: "attempt.started".to_string(),
+                    payload: r#"{"step":1}"#.to_string(),
+                },
+            )?;
+            let noise_event = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-noise".to_string(),
+                    attempt_id: noise_attempt.attempt_id.clone(),
+                    session_id: None,
+                    event_type: "attempt.started".to_string(),
+                    payload: r#"{"step":"noise"}"#.to_string(),
+                },
+            )?;
+            let replayed = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-replay".to_string(),
+                    attempt_id: replay_attempt.attempt_id.clone(),
+                    session_id: None,
+                    event_type: "attempt.completed".to_string(),
+                    payload: r#"{"step":2}"#.to_string(),
+                },
+            )?;
+
+            assert!(first_seen.sequence < noise_event.sequence);
+            assert!(noise_event.sequence < replayed.sequence);
+
+            Ok((first_seen.sequence, replayed.sequence))
+        })
+        .await
+        .unwrap();
+
+        let replay = store::store_run(&store, move |s| {
+            TaskEventRecord::list_for_task(s, "task-replay", last_seen_sequence)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].task_id, "task-replay");
+        assert_eq!(replay[0].sequence, replayed_sequence);
+        assert_eq!(replay[0].event_type, "attempt.completed");
+        assert_eq!(replay[0].payload, r#"{"step":2}"#);
+    }
+
+    pub(super) async fn task_event_cursor_rejects_gaps_for_unknown_task() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let known_sequence = store::store_run(&store, |s| {
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-known".to_string(),
+                    parent_task_id: None,
+                    title: Some("Known task".to_string()),
+                    priority: 3,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel_descendants".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            let attempt = TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-known".to_string(),
+                    task_id: "task-known".to_string(),
+                    session_id: None,
+                    status: "running".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            let event = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-known".to_string(),
+                    attempt_id: attempt.attempt_id,
+                    session_id: None,
+                    event_type: "attempt.started".to_string(),
+                    payload: "{}".to_string(),
+                },
+            )?;
+
+            Ok(event.sequence)
+        })
+        .await
+        .unwrap();
+
+        let err = store::store_run(&store, move |s| {
+            TaskEventRecord::list_for_task(s, "task-missing", known_sequence)
+        })
+        .await
+        .unwrap_err();
+
+        let error_text = format!("{err:#}");
+        assert!(error_text.contains("task event stream not found"));
+        assert!(error_text.contains("task-missing"));
+    }
+    pub(super) async fn task_snapshot_includes_graph_and_attempt_state() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let (parent_session_id, child_session_id) = store::store_run(&store, |s| {
+            let parent_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(
+                s,
+                &parent_session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
+
+            let child_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            let unrelated_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            let child_session_id = child_session.id.clone();
+            let unrelated_session_id = unrelated_session.id.clone();
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-root".to_string(),
+                    parent_task_id: None,
+                    title: Some("Root task".to_string()),
+                    priority: 90,
+                    policy_snapshot: serde_json::json!({
+                        "max_depth": 3,
+                        "max_concurrency": 2,
+                        "budget": 5,
+                    })
+                    .to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: Some(
+                        serde_json::json!({
+                            "scheduler": {"owner_id": "sched-main"}
+                        })
+                        .to_string(),
+                    ),
+                },
+            )?;
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-dependency".to_string(),
+                    parent_task_id: None,
+                    title: Some("Dependency task".to_string()),
+                    priority: 20,
+                    policy_snapshot: serde_json::json!({"budget": 1}).to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-child".to_string(),
+                    parent_task_id: Some("task-root".to_string()),
+                    title: Some("Child task".to_string()),
+                    priority: 50,
+                    policy_snapshot: serde_json::json!({"budget": 2}).to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-unrelated".to_string(),
+                    parent_task_id: None,
+                    title: Some("Unrelated task".to_string()),
+                    priority: 5,
+                    policy_snapshot: serde_json::json!({"budget": 99}).to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+
+            TaskEdgeRecord::create(
+                s,
+                NewTaskEdgeRecord {
+                    task_id: "task-root".to_string(),
+                    depends_on_task_id: "task-dependency".to_string(),
+                },
+            )?;
+            TaskEdgeRecord::create(
+                s,
+                NewTaskEdgeRecord {
+                    task_id: "task-child".to_string(),
+                    depends_on_task_id: "task-root".to_string(),
+                },
+            )?;
+
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-root-1".to_string(),
+                    task_id: "task-root".to_string(),
+                    session_id: Some(child_session_id.clone()),
+                    status: "running".to_string(),
+                    recovery_checkpoint: Some(
+                        serde_json::json!({
+                            "child_bootstrap": {
+                                "status": "linked",
+                                "child_session_id": child_session_id,
+                                "retryable": false,
+                            }
+                        })
+                        .to_string(),
+                    ),
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-dependency-1".to_string(),
+                    task_id: "task-dependency".to_string(),
+                    session_id: None,
+                    status: "completed".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-child-1".to_string(),
+                    task_id: "task-child".to_string(),
+                    session_id: None,
+                    status: "queued".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-unrelated-1".to_string(),
+                    task_id: "task-unrelated".to_string(),
+                    session_id: Some(unrelated_session_id.clone()),
+                    status: "running".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+
+            TaskRecord::transition_state(
+                s,
+                "task-root",
+                "attempt-root-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-root".to_string(),
+                    attempt_id: "attempt-root-1".to_string(),
+                    session_id: Some(child_session_id.clone()),
+                    event_type: "attempt.child_session.linked".to_string(),
+                    payload: serde_json::json!({
+                        "session_id": child_session_id,
+                    })
+                    .to_string(),
+                },
+            )?;
+
+            TaskRecord::transition_state(
+                s,
+                "task-dependency",
+                "attempt-dependency-1",
+                TaskLifecycleState::Ready,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "task-dependency",
+                "attempt-dependency-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "task-dependency",
+                "attempt-dependency-1",
+                TaskLifecycleState::Completed,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "task-unrelated",
+                "attempt-unrelated-1",
+                TaskLifecycleState::Running,
+            )?;
+
+            Ok((parent_session.id, child_session_id))
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={parent_session_id}")).await;
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert_eq!(bootstrap["session_id"], parent_session_id);
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.watch","request_id":"req-task-snapshot","session_id":"{}","task_id":"task-root"}}"#,
+                    parent_session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_until_type(&mut socket, "response.ok").await;
+        assert_eq!(ack["request_id"], "req-task-snapshot");
+        assert_eq!(ack["data"]["watching"], true);
+        assert_eq!(ack["data"]["task_id"], "task-root");
+        assert_eq!(ack["data"]["cursor"]["after_sequence"], 0);
+
+        let list_snapshot = recv_until_type(&mut socket, "task.list.snapshot").await;
+        let detail_snapshot = recv_until_type(&mut socket, "task.detail.snapshot").await;
+
+        assert_eq!(list_snapshot["request_id"], "req-task-snapshot");
+        assert_eq!(list_snapshot["session_id"], parent_session_id);
+        assert_eq!(list_snapshot["task_id"], "task-root");
+        assert_eq!(
+            list_snapshot["cursor"]["latest_sequence"],
+            ack["data"]["cursor"]["latest_sequence"]
+        );
+
+        let nodes = list_snapshot["graph"]["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.iter().all(|node| node["task_id"] != "task-unrelated"));
+
+        let root_node = nodes
+            .iter()
+            .find(|node| node["task_id"] == "task-root")
+            .unwrap();
+        assert_eq!(root_node["state"], "running");
+        assert_eq!(root_node["latest_attempt_id"], "attempt-root-1");
+        assert_eq!(root_node["latest_attempt_state"], "running");
+        assert_eq!(root_node["child_session_id"], child_session_id);
+
+        let dependency_node = nodes
+            .iter()
+            .find(|node| node["task_id"] == "task-dependency")
+            .unwrap();
+        assert_eq!(dependency_node["state"], "completed");
+
+        let child_node = nodes
+            .iter()
+            .find(|node| node["task_id"] == "task-child")
+            .unwrap();
+        assert_eq!(child_node["parent_task_id"], "task-root");
+        assert_eq!(child_node["latest_attempt_state"], "queued");
+
+        let edges = list_snapshot["graph"]["edges"].as_array().unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge["task_id"] == "task-root" && edge["depends_on_task_id"] == "task-dependency"
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["task_id"] == "task-child" && edge["depends_on_task_id"] == "task-root"
+        }));
+
+        assert_eq!(detail_snapshot["request_id"], "req-task-snapshot");
+        assert_eq!(detail_snapshot["task"]["task_id"], "task-root");
+        assert_eq!(detail_snapshot["task"]["priority"], 90);
+        assert_eq!(detail_snapshot["task"]["state"], "running");
+        assert_eq!(
+            detail_snapshot["task"]["parent_close_policy"],
+            "request_cancel"
+        );
+        assert_eq!(
+            detail_snapshot["task"]["child_session_id"],
+            child_session_id
+        );
+        assert_eq!(detail_snapshot["task"]["policy_snapshot"]["max_depth"], 3);
+        assert_eq!(
+            detail_snapshot["task"]["recovery_checkpoint"]["scheduler"]["owner_id"],
+            "sched-main"
+        );
+
+        let attempts = detail_snapshot["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["attempt_id"], "attempt-root-1");
+        assert_eq!(attempts[0]["state"], "running");
+        assert_eq!(attempts[0]["child_session_id"], child_session_id);
+        assert_eq!(
+            attempts[0]["recovery_checkpoint"]["child_bootstrap"]["status"],
+            "linked"
+        );
+    }
+
+    pub(super) async fn task_watch_reconnect_from_cursor_recovers_missed_events() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let (parent_session_id, first_cursor, child_session_id) = store::store_run(&store, |s| {
+            let parent_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(
+                s,
+                &parent_session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
+
+            let child_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            let unrelated_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            let child_session_id = child_session.id.clone();
+            let unrelated_session_id = unrelated_session.id.clone();
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-watch".to_string(),
+                    parent_task_id: None,
+                    title: Some("Watch target".to_string()),
+                    priority: 40,
+                    policy_snapshot: serde_json::json!({"budget": 4}).to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-watch-unrelated".to_string(),
+                    parent_task_id: None,
+                    title: Some("Unrelated watch task".to_string()),
+                    priority: 1,
+                    policy_snapshot: serde_json::json!({"budget": 1}).to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-watch-1".to_string(),
+                    task_id: "task-watch".to_string(),
+                    session_id: Some(child_session_id.clone()),
+                    status: "running".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-watch-unrelated-1".to_string(),
+                    task_id: "task-watch-unrelated".to_string(),
+                    session_id: Some(unrelated_session_id.clone()),
+                    status: "running".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+
+            let first = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch".to_string(),
+                    attempt_id: "attempt-watch-1".to_string(),
+                    session_id: None,
+                    event_type: "task.state.transition".to_string(),
+                    payload: serde_json::json!({
+                        "from": "queued",
+                        "to": "running",
+                    })
+                    .to_string(),
+                },
+            )?;
+            let second = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch".to_string(),
+                    attempt_id: "attempt-watch-1".to_string(),
+                    session_id: Some(child_session_id.clone()),
+                    event_type: "attempt.child_session.linked".to_string(),
+                    payload: serde_json::json!({
+                        "session_id": child_session_id,
+                    })
+                    .to_string(),
+                },
+            )?;
+            TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch-unrelated".to_string(),
+                    attempt_id: "attempt-watch-unrelated-1".to_string(),
+                    session_id: Some(unrelated_session_id),
+                    event_type: "attempt.child_session.linked".to_string(),
+                    payload: serde_json::json!({
+                        "session_id": "sess-unrelated",
+                    })
+                    .to_string(),
+                },
+            )?;
+
+            Ok((
+                parent_session.id,
+                (first.sequence, second.sequence),
+                child_session_id,
+            ))
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state.clone()).await.unwrap();
+        let mut socket1 =
+            connect_ws_path(server.addr, &format!("/ws?session_id={parent_session_id}")).await;
+        let bootstrap1 = recv_json(&mut socket1).await;
+        assert_eq!(bootstrap1["session_id"], parent_session_id);
+
+        socket1
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.watch","request_id":"req-task-watch-1","session_id":"{}","task_id":"task-watch"}}"#,
+                    parent_session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let ack1 = recv_until_type(&mut socket1, "response.ok").await;
+        assert_eq!(ack1["data"]["cursor"]["latest_sequence"], first_cursor.1);
+        let _ = recv_until_type(&mut socket1, "task.list.snapshot").await;
+        let _ = recv_until_type(&mut socket1, "task.detail.snapshot").await;
+
+        let replayed_first = recv_until_type(&mut socket1, "task.event").await;
+        let replayed_second = recv_until_type(&mut socket1, "task.event").await;
+        assert_eq!(replayed_first["task_id"], "task-watch");
+        assert_eq!(replayed_second["task_id"], "task-watch");
+        assert_eq!(replayed_first["sequence"], first_cursor.0);
+        assert_eq!(replayed_second["sequence"], first_cursor.1);
+
+        drop(socket1);
+
+        let later_sequences = store::store_run(&store, move |s| {
+            let third = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch".to_string(),
+                    attempt_id: "attempt-watch-1".to_string(),
+                    session_id: None,
+                    event_type: "attempt.state.transition".to_string(),
+                    payload: serde_json::json!({
+                        "from": "running",
+                        "to": "completed",
+                    })
+                    .to_string(),
+                },
+            )?;
+            TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch-unrelated".to_string(),
+                    attempt_id: "attempt-watch-unrelated-1".to_string(),
+                    session_id: None,
+                    event_type: "task.state.transition".to_string(),
+                    payload: serde_json::json!({
+                        "from": "running",
+                        "to": "failed",
+                    })
+                    .to_string(),
+                },
+            )?;
+            let fourth = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch".to_string(),
+                    attempt_id: "attempt-watch-1".to_string(),
+                    session_id: Some(child_session_id.clone()),
+                    event_type: "attempt.child_session.linked".to_string(),
+                    payload: serde_json::json!({
+                        "session_id": child_session_id,
+                    })
+                    .to_string(),
+                },
+            )?;
+
+            Ok((third.sequence, fourth.sequence))
+        })
+        .await
+        .unwrap();
+
+        let mut socket2 =
+            connect_ws_path(server.addr, &format!("/ws?session_id={parent_session_id}")).await;
+        let bootstrap2 = recv_json(&mut socket2).await;
+        assert_eq!(bootstrap2["session_id"], parent_session_id);
+
+        socket2
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.watch","request_id":"req-task-watch-2","session_id":"{}","task_id":"task-watch","after_sequence":{}}}"#,
+                    parent_session_id,
+                    first_cursor.1
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let ack2 = recv_until_type(&mut socket2, "response.ok").await;
+        assert_eq!(ack2["data"]["cursor"]["after_sequence"], first_cursor.1);
+        assert_eq!(ack2["data"]["cursor"]["latest_sequence"], later_sequences.1);
+        let _ = recv_until_type(&mut socket2, "task.list.snapshot").await;
+        let _ = recv_until_type(&mut socket2, "task.detail.snapshot").await;
+
+        let recovered_first = recv_until_type(&mut socket2, "task.event").await;
+        let recovered_second = recv_until_type(&mut socket2, "task.event").await;
+        assert_eq!(recovered_first["task_id"], "task-watch");
+        assert_eq!(recovered_second["task_id"], "task-watch");
+        assert_eq!(recovered_first["sequence"], later_sequences.0);
+        assert_eq!(recovered_second["sequence"], later_sequences.1);
+        assert_ne!(recovered_first["sequence"], first_cursor.0);
+        assert_ne!(recovered_second["sequence"], first_cursor.1);
+
+        let no_duplicate = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            recv_until_type(&mut socket2, "task.event"),
+        )
+        .await;
+        assert!(no_duplicate.is_err());
+
+        drop(socket2);
+
+        let latest_sequence = later_sequences.1;
+        let final_sequence = store::store_run(&store, move |s| {
+            let final_event = TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch".to_string(),
+                    attempt_id: "attempt-watch-1".to_string(),
+                    session_id: None,
+                    event_type: "task.state.transition".to_string(),
+                    payload: serde_json::json!({
+                        "from": "running",
+                        "to": "completed",
+                    })
+                    .to_string(),
+                },
+            )?;
+            TaskEventRecord::append(
+                s,
+                NewTaskEventRecord {
+                    task_id: "task-watch-unrelated".to_string(),
+                    attempt_id: "attempt-watch-unrelated-1".to_string(),
+                    session_id: None,
+                    event_type: "task.state.transition".to_string(),
+                    payload: serde_json::json!({
+                        "from": "failed",
+                        "to": "completed",
+                    })
+                    .to_string(),
+                },
+            )?;
+            Ok(final_event.sequence)
+        })
+        .await
+        .unwrap();
+
+        let mut socket3 =
+            connect_ws_path(server.addr, &format!("/ws?session_id={parent_session_id}")).await;
+        let bootstrap3 = recv_json(&mut socket3).await;
+        assert_eq!(bootstrap3["session_id"], parent_session_id);
+
+        socket3
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.watch","request_id":"req-task-watch-3","session_id":"{}","task_id":"task-watch","after_sequence":{}}}"#,
+                    parent_session_id,
+                    latest_sequence
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let ack3 = recv_until_type(&mut socket3, "response.ok").await;
+        assert_eq!(ack3["data"]["cursor"]["after_sequence"], latest_sequence);
+        assert_eq!(ack3["data"]["cursor"]["latest_sequence"], final_sequence);
+        let _ = recv_until_type(&mut socket3, "task.list.snapshot").await;
+        let _ = recv_until_type(&mut socket3, "task.detail.snapshot").await;
+
+        let recovered_third = recv_until_type(&mut socket3, "task.event").await;
+        assert_eq!(recovered_third["task_id"], "task-watch");
+        assert_eq!(recovered_third["sequence"], final_sequence);
+
+        let no_unrelated_replay = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            recv_until_type(&mut socket3, "task.event"),
+        )
+        .await;
+        assert!(
+            no_unrelated_replay.is_err(),
+            "watch replay should remain scoped to the selected task"
+        );
+    }
+
+    pub(super) async fn task_control_commands_apply_runtime_lifecycle_helpers() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let session_id = store::store_run(&store, |s| {
+            let session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(
+                s,
+                &session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "cancel-root".to_string(),
+                    parent_task_id: None,
+                    title: Some("cancel-root".to_string()),
+                    priority: 50,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel_descendants".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "cancel-child".to_string(),
+                    parent_task_id: None,
+                    title: Some("cancel-child".to_string()),
+                    priority: 40,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel_descendants".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskEdgeRecord::create(
+                s,
+                NewTaskEdgeRecord {
+                    task_id: "cancel-child".to_string(),
+                    depends_on_task_id: "cancel-root".to_string(),
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-cancel-root-1".to_string(),
+                    task_id: "cancel-root".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-cancel-root-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "cancel-root",
+                "attempt-cancel-root-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-cancel-child-1".to_string(),
+                    task_id: "cancel-child".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "retry-task".to_string(),
+                    parent_task_id: None,
+                    title: Some("retry-task".to_string()),
+                    priority: 10,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-retry-1".to_string(),
+                    task_id: "retry-task".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-retry-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "retry-task",
+                "attempt-retry-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-retry-1",
+                AttemptLifecycleState::Failed,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "retry-task",
+                "attempt-retry-1",
+                TaskLifecycleState::Failed,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "resume-task".to_string(),
+                    parent_task_id: None,
+                    title: Some("resume-task".to_string()),
+                    priority: 20,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-resume-1".to_string(),
+                    task_id: "resume-task".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: Some(r#"{"resume":"checkpoint"}"#.to_string()),
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-resume-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "resume-task",
+                "attempt-resume-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-resume-1",
+                AttemptLifecycleState::Interrupted,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "resume-task",
+                "attempt-resume-1",
+                TaskLifecycleState::Interrupted,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "reprio-task".to_string(),
+                    parent_task_id: None,
+                    title: Some("reprio-task".to_string()),
+                    priority: 5,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-reprio-1".to_string(),
+                    task_id: "reprio-task".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-reprio-1",
+                AttemptLifecycleState::Ready,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "reprio-task",
+                "attempt-reprio-1",
+                TaskLifecycleState::Ready,
+            )?;
+
+            Ok(session.id)
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={session_id}")).await;
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert_eq!(bootstrap["session_id"], session_id);
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.cancel","request_id":"req-task-cancel","session_id":"{}","task_id":"cancel-root"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let cancel_ack = recv_until_type(&mut socket, "response.ok").await;
+        assert_eq!(cancel_ack["request_id"], "req-task-cancel");
+        assert_eq!(cancel_ack["data"]["action"], "cancel");
+        assert_eq!(cancel_ack["data"]["session_id"], session_id);
+        assert_eq!(cancel_ack["data"]["task_id"], "cancel-root");
+        assert_eq!(cancel_ack["data"]["task_state"], "cancel_requested");
+        let affected_task_ids = cancel_ack["data"]["affected_task_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(affected_task_ids.len(), 2);
+        assert!(affected_task_ids.contains(&"cancel-root"));
+        assert!(affected_task_ids.contains(&"cancel-child"));
+
+        let (cancel_root_state, cancel_child_state) = store::store_run(&store, |s| {
+            Ok((
+                TaskRecord::current_state(s, "cancel-root")?,
+                TaskRecord::current_state(s, "cancel-child")?,
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(cancel_root_state, TaskLifecycleState::CancelRequested);
+        assert_eq!(cancel_child_state, TaskLifecycleState::Cancelled);
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.retry","request_id":"req-task-retry","session_id":"{}","task_id":"retry-task"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let retry_ack = recv_until_type(&mut socket, "response.ok").await;
+        assert_eq!(retry_ack["request_id"], "req-task-retry");
+        assert_eq!(retry_ack["data"]["action"], "retry");
+        assert_eq!(retry_ack["data"]["task_id"], "retry-task");
+        assert_eq!(retry_ack["data"]["task_state"], "queued");
+        let retry_attempt_id = retry_ack["data"]["new_attempt_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (retry_state, retry_attempts) = store::store_run(&store, move |s| {
+            Ok((
+                TaskRecord::current_state(s, "retry-task")?,
+                TaskAttemptRecord::list_for_task(s, "retry-task")?,
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(retry_state, TaskLifecycleState::Queued);
+        assert_eq!(retry_attempts.len(), 2);
+        let retry_attempt = retry_attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == retry_attempt_id)
+            .unwrap();
+        assert_eq!(
+            retry_attempt.status,
+            AttemptLifecycleState::Queued.to_string()
+        );
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.resume","request_id":"req-task-resume","session_id":"{}","task_id":"resume-task"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let resume_ack = recv_until_type(&mut socket, "response.ok").await;
+        assert_eq!(resume_ack["request_id"], "req-task-resume");
+        assert_eq!(resume_ack["data"]["action"], "resume");
+        assert_eq!(resume_ack["data"]["task_id"], "resume-task");
+        assert_eq!(resume_ack["data"]["task_state"], "queued");
+        let resume_attempt_id = resume_ack["data"]["new_attempt_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (resume_state, resume_attempts) = store::store_run(&store, move |s| {
+            Ok((
+                TaskRecord::current_state(s, "resume-task")?,
+                TaskAttemptRecord::list_for_task(s, "resume-task")?,
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(resume_state, TaskLifecycleState::Queued);
+        assert_eq!(resume_attempts.len(), 2);
+        let resume_attempt = resume_attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == resume_attempt_id)
+            .unwrap();
+        assert_eq!(
+            resume_attempt.status,
+            AttemptLifecycleState::Queued.to_string()
+        );
+        assert_eq!(
+            resume_attempt.recovery_checkpoint,
+            Some(r#"{"resume":"checkpoint"}"#.to_string())
+        );
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.reprioritize","request_id":"req-task-reprioritize","session_id":"{}","task_id":"reprio-task","priority":33}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let reprio_ack = recv_until_type(&mut socket, "response.ok").await;
+        assert_eq!(reprio_ack["request_id"], "req-task-reprioritize");
+        assert_eq!(reprio_ack["data"]["action"], "reprioritize");
+        assert_eq!(reprio_ack["data"]["task_id"], "reprio-task");
+        assert_eq!(reprio_ack["data"]["task_state"], "ready");
+        assert_eq!(reprio_ack["data"]["priority"], 33);
+
+        let reprio_task = store::store_run(&store, |s| TaskRecord::get(s, "reprio-task"))
+            .await
+            .unwrap();
+        assert_eq!(reprio_task.priority, 33);
+    }
+
+    pub(super) async fn task_control_commands_reject_invalid_lifecycle_state() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let session_id = store::store_run(&store, |s| {
+            let session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(
+                s,
+                &session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "cancel-completed".to_string(),
+                    parent_task_id: None,
+                    title: Some("cancel-completed".to_string()),
+                    priority: 1,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-cancel-completed-1".to_string(),
+                    task_id: "cancel-completed".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-cancel-completed-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "cancel-completed",
+                "attempt-cancel-completed-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-cancel-completed-1",
+                AttemptLifecycleState::Completed,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "cancel-completed",
+                "attempt-cancel-completed-1",
+                TaskLifecycleState::Completed,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "retry-ready".to_string(),
+                    parent_task_id: None,
+                    title: Some("retry-ready".to_string()),
+                    priority: 2,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-retry-ready-1".to_string(),
+                    task_id: "retry-ready".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-retry-ready-1",
+                AttemptLifecycleState::Ready,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "retry-ready",
+                "attempt-retry-ready-1",
+                TaskLifecycleState::Ready,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "resume-completed".to_string(),
+                    parent_task_id: None,
+                    title: Some("resume-completed".to_string()),
+                    priority: 3,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-resume-completed-1".to_string(),
+                    task_id: "resume-completed".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: Some(r#"{"resume":"checkpoint"}"#.to_string()),
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-resume-completed-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "resume-completed",
+                "attempt-resume-completed-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-resume-completed-1",
+                AttemptLifecycleState::Completed,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "resume-completed",
+                "attempt-resume-completed-1",
+                TaskLifecycleState::Completed,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "reprio-running".to_string(),
+                    parent_task_id: None,
+                    title: Some("reprio-running".to_string()),
+                    priority: 9,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-reprio-running-1".to_string(),
+                    task_id: "reprio-running".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-reprio-running-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "reprio-running",
+                "attempt-reprio-running-1",
+                TaskLifecycleState::Running,
+            )?;
+
+            Ok(session.id)
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={session_id}")).await;
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.cancel","request_id":"req-invalid-cancel","session_id":"{}","task_id":"cancel-completed"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+        let cancel_error = recv_until_type(&mut socket, "response.error").await;
+        assert_eq!(cancel_error["request_id"], "req-invalid-cancel");
+        assert_eq!(cancel_error["error"]["code"], "invalid_task_state");
+        assert_eq!(cancel_error["error"]["details"]["action"], "cancel");
+        assert_eq!(
+            cancel_error["error"]["details"]["task_id"],
+            "cancel-completed"
+        );
+        assert!(
+            cancel_error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("nonterminal tasks")
+        );
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.retry","request_id":"req-invalid-retry","session_id":"{}","task_id":"retry-ready"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+        let retry_error = recv_until_type(&mut socket, "response.error").await;
+        assert_eq!(retry_error["request_id"], "req-invalid-retry");
+        assert_eq!(retry_error["error"]["code"], "invalid_task_state");
+        assert_eq!(retry_error["error"]["details"]["action"], "retry");
+        assert_eq!(retry_error["error"]["details"]["task_id"], "retry-ready");
+        assert!(
+            retry_error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("retry is only allowed")
+        );
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.resume","request_id":"req-invalid-resume","session_id":"{}","task_id":"resume-completed"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+        let resume_error = recv_until_type(&mut socket, "response.error").await;
+        assert_eq!(resume_error["request_id"], "req-invalid-resume");
+        assert_eq!(resume_error["error"]["code"], "invalid_task_state");
+        assert_eq!(resume_error["error"]["details"]["action"], "resume");
+        assert_eq!(
+            resume_error["error"]["details"]["task_id"],
+            "resume-completed"
+        );
+        assert!(
+            resume_error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("resume is only allowed")
+        );
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.reprioritize","request_id":"req-invalid-reprioritize","session_id":"{}","task_id":"reprio-running","priority":55}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+        let reprio_error = recv_until_type(&mut socket, "response.error").await;
+        assert_eq!(reprio_error["request_id"], "req-invalid-reprioritize");
+        assert_eq!(reprio_error["error"]["code"], "invalid_task_state");
+        assert_eq!(reprio_error["error"]["details"]["action"], "reprioritize");
+        assert_eq!(
+            reprio_error["error"]["details"]["task_id"],
+            "reprio-running"
+        );
+        assert!(
+            reprio_error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("queued/ready")
+        );
+    }
+}
+
+#[tokio::test]
+async fn task_snapshot_includes_graph_and_attempt_state() {
+    web::task_snapshot_includes_graph_and_attempt_state().await;
+}
+
+#[tokio::test]
+async fn task_watch_reconnect_from_cursor_recovers_missed_events() {
+    web::task_watch_reconnect_from_cursor_recovers_missed_events().await;
+}
+
+#[tokio::test]
+async fn task_control_commands_apply_runtime_lifecycle_helpers() {
+    web::task_control_commands_apply_runtime_lifecycle_helpers().await;
+}
+
+#[tokio::test]
+async fn task_control_commands_reject_invalid_lifecycle_state() {
+    web::task_control_commands_reject_invalid_lifecycle_state().await;
+}
+
+#[tokio::test]
+async fn task_event_cursor_replays_from_last_seen_sequence() {
+    web::task_event_cursor_replays_from_last_seen_sequence().await;
+}
+
+#[tokio::test]
+async fn task_event_cursor_rejects_gaps_for_unknown_task() {
+    web::task_event_cursor_rejects_gaps_for_unknown_task().await;
+}
+
+#[test]
+fn task_events_include_attempt_and_child_session_metadata() {
+    let claim_time = Utc::now();
+    let expiry_time = claim_time + Duration::seconds(60);
+    let interrupted_time = claim_time + Duration::seconds(61);
+
+    let records = [
+        TaskEventRecord {
+            sequence: 11,
+            task_id: "task-graph".to_string(),
+            attempt_id: "attempt-graph-1".to_string(),
+            session_id: None,
+            event_type: "task.graph.created".to_string(),
+            payload: serde_json::json!({
+                "nodes": ["task-graph", "task-child"],
+                "edges": [{
+                    "task_id": "task-child",
+                    "depends_on_task_id": "task-graph"
+                }]
+            })
+            .to_string(),
+            recorded_at: claim_time,
+        },
+        TaskEventRecord {
+            sequence: 12,
+            task_id: "task-ready".to_string(),
+            attempt_id: "attempt-ready-1".to_string(),
+            session_id: None,
+            event_type: "task.state.transition".to_string(),
+            payload: serde_json::json!({
+                "from": "queued",
+                "to": "ready"
+            })
+            .to_string(),
+            recorded_at: claim_time,
+        },
+        TaskEventRecord {
+            sequence: 13,
+            task_id: "task-claim".to_string(),
+            attempt_id: "attempt-claim-1".to_string(),
+            session_id: None,
+            event_type: "attempt.lease.claimed".to_string(),
+            payload: serde_json::json!({
+                "owner_id": "sched-1",
+                "leased_at": claim_time.to_rfc3339(),
+                "lease_expires_at": expiry_time.to_rfc3339()
+            })
+            .to_string(),
+            recorded_at: claim_time,
+        },
+        TaskEventRecord {
+            sequence: 14,
+            task_id: "task-child-link".to_string(),
+            attempt_id: "attempt-child-link-1".to_string(),
+            session_id: Some("sess-child-1".to_string()),
+            event_type: "attempt.child_session.linked".to_string(),
+            payload: serde_json::json!({
+                "session_id": "sess-child-1"
+            })
+            .to_string(),
+            recorded_at: claim_time,
+        },
+        TaskEventRecord {
+            sequence: 15,
+            task_id: "task-control".to_string(),
+            attempt_id: "attempt-control-1".to_string(),
+            session_id: None,
+            event_type: "task.state.transition".to_string(),
+            payload: serde_json::json!({
+                "from": "running",
+                "to": "cancel_requested"
+            })
+            .to_string(),
+            recorded_at: claim_time,
+        },
+        TaskEventRecord {
+            sequence: 16,
+            task_id: "task-recovery".to_string(),
+            attempt_id: "attempt-recovery-1".to_string(),
+            session_id: Some("sess-child-2".to_string()),
+            event_type: "attempt.lease.expired".to_string(),
+            payload: serde_json::json!({
+                "owner_id": "sched-2",
+                "lease_expires_at": expiry_time.to_rfc3339(),
+                "interrupted_at": interrupted_time.to_rfc3339(),
+                "recoverable": true
+            })
+            .to_string(),
+            recorded_at: interrupted_time,
+        },
+    ];
+
+    let frames = records
+        .iter()
+        .map(|record| {
+            serde_json::to_value(
+                runtime_event_to_ui_event(
+                    &AgentEvent::from_task_event_record(record),
+                    "req-task-surface",
+                    "sess-parent-1",
+                )
+                .expect("task event should map to UI event"),
+            )
+            .expect("task UI event should serialize")
+        })
+        .collect::<Vec<_>>();
+
+    assert!(frames.iter().all(|frame| frame["type"] == "task.event"));
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["request_id"] == "req-task-surface")
+    );
+
+    assert_eq!(frames[0]["task_id"], "task-graph");
+    assert_eq!(frames[0]["attempt_id"], "attempt-graph-1");
+    assert_eq!(frames[0]["event_type"], "task.graph.created");
+    assert_eq!(
+        frames[0]["payload"]["edges"][0]["depends_on_task_id"],
+        "task-graph"
+    );
+
+    assert_eq!(frames[1]["event_type"], "task.state.transition");
+    assert_eq!(frames[1]["payload"]["to"], "ready");
+
+    assert_eq!(frames[2]["event_type"], "attempt.lease.claimed");
+    assert_eq!(frames[2]["payload"]["owner_id"], "sched-1");
+    assert_eq!(
+        frames[2]["payload"]["lease_expires_at"],
+        expiry_time.to_rfc3339()
+    );
+
+    assert_eq!(frames[3]["event_type"], "attempt.child_session.linked");
+    assert_eq!(frames[3]["child_session_id"], "sess-child-1");
+    assert_eq!(frames[3]["payload"]["session_id"], "sess-child-1");
+
+    assert_eq!(frames[4]["event_type"], "task.state.transition");
+    assert_eq!(frames[4]["payload"]["to"], "cancel_requested");
+
+    assert_eq!(frames[5]["event_type"], "attempt.lease.expired");
+    assert_eq!(frames[5]["child_session_id"], "sess-child-2");
+    assert_eq!(frames[5]["payload"]["recoverable"], true);
+    assert_eq!(frames[5]["recorded_at"], interrupted_time.to_rfc3339());
+}
+
+#[test]
+fn existing_turn_events_remain_backward_compatible() {
+    let request_id = "req-turn-compat";
+    let session_id = "sess-turn-1";
+    let turn_id = "turn-1";
+    let message_id = "msg-1";
+    let tool_call_id = "tool-1";
+
+    let events = [
+        AgentEvent::TurnStarted {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            model: "test-model".to_string(),
+            turn_number: 1,
+            context_used_chars: 128,
+            context_max_chars: 512,
+        },
+        AgentEvent::MessageStarted {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            message_id: message_id.to_string(),
+        },
+        AgentEvent::MessageDelta {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            message_id: message_id.to_string(),
+            delta: "hello".to_string(),
+        },
+        AgentEvent::MessageCompleted {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            message_id: message_id.to_string(),
+            content: "hello world".to_string(),
+        },
+        AgentEvent::ToolCallStarted {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            message_id: message_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: "read".to_string(),
+            arguments: "{\"file\":\"src/lib.rs\"}".to_string(),
+        },
+        AgentEvent::ToolCallCompleted {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            message_id: message_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: "read".to_string(),
+            output_preview: "ok".to_string(),
+            edit_observation: None,
+            success: true,
+            context_used_chars: 196,
+            context_max_chars: 512,
+        },
+        AgentEvent::TurnCompleted {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            model: "test-model".to_string(),
+            turn_number: 1,
+            message_id: message_id.to_string(),
+            context_used_chars: 256,
+            context_max_chars: 512,
+            input_tokens: Some(21),
+            output_tokens: Some(13),
+            total_tokens: Some(34),
+        },
+        AgentEvent::TurnFailed {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            model: "test-model".to_string(),
+            turn_number: 1,
+            error: "aborted".to_string(),
+        },
+    ];
+
+    let frames = events
+        .iter()
+        .map(|event| {
+            serde_json::to_value(
+                runtime_event_to_ui_event(event, request_id, session_id)
+                    .expect("existing turn event should still map"),
+            )
+            .expect("turn UI event should serialize")
+        })
+        .collect::<Vec<_>>();
+
+    let event_types = frames
+        .iter()
+        .map(|frame| frame["type"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_types,
+        vec![
+            "turn.started",
+            "message.started",
+            "message.delta",
+            "message.completed",
+            "tool.started",
+            "tool.completed",
+            "turn.completed",
+            "turn.failed",
+        ]
+    );
+
+    assert_eq!(frames[0]["request_id"], request_id);
+    assert_eq!(frames[0]["session_id"], session_id);
+    assert_eq!(frames[0]["turn_id"], turn_id);
+    assert_eq!(frames[0]["context_usage"]["used_chars"], 128);
+    assert_eq!(frames[0]["context_usage"]["max_chars"], 512);
+
+    assert_eq!(frames[2]["message_id"], message_id);
+    assert_eq!(frames[2]["delta"], "hello");
+
+    assert_eq!(frames[4]["tool_call_id"], tool_call_id);
+    assert_eq!(frames[4]["tool_name"], "read");
+
+    assert_eq!(frames[5]["tool_call_id"], tool_call_id);
+    assert_eq!(frames[5]["success"], true);
+    assert_eq!(frames[5]["context_usage"]["used_chars"], 196);
+
+    assert_eq!(frames[6]["context_usage"]["input_tokens"], 21);
+    assert_eq!(frames[6]["context_usage"]["output_tokens"], 13);
+    assert_eq!(frames[6]["context_usage"]["total_tokens"], 34);
+
+    assert_eq!(frames[7]["request_id"], request_id);
+    assert_eq!(frames[7]["error"], "aborted");
 }

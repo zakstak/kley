@@ -1,11 +1,12 @@
 use chrono::Utc;
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::context_usage::context_usage_from_event;
 use crate::events::AgentEvent;
 use crate::web::protocol::UiEvent;
 
-pub(super) fn runtime_event_to_ui_event(
+pub fn runtime_event_to_ui_event(
     event: &AgentEvent,
     request_id: &str,
     default_session_id: &str,
@@ -216,9 +217,33 @@ pub(super) fn runtime_event_to_ui_event(
             status: "history_compacted".to_string(),
             detail: format!("compacted {old_items} items into {new_chars} chars"),
         }),
+        AgentEvent::TaskLifecycle {
+            sequence,
+            task_id,
+            attempt_id,
+            child_session_id,
+            event_type,
+            payload,
+            recorded_at,
+        } => Some(UiEvent::TaskEvent {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            request_id: request_id.to_string(),
+            sequence: *sequence,
+            task_id: task_id.clone(),
+            attempt_id: attempt_id.clone(),
+            child_session_id: child_session_id.clone(),
+            event_type: event_type.clone(),
+            payload: parse_task_payload(payload),
+            recorded_at: recorded_at.clone(),
+        }),
     }
 }
 
 pub(super) fn ts_now() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn parse_task_payload(payload: &str) -> Value {
+    serde_json::from_str(payload).unwrap_or_else(|_| Value::String(payload.to_string()))
 }
