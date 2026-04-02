@@ -453,7 +453,9 @@ impl RuntimeManager {
         let mut completed_nodes = 0usize;
 
         loop {
-            let Some(candidate) = self.select_next_runnable_candidate(&shared_store)? else {
+            let Some(candidate) =
+                self.select_next_runnable_candidate(&shared_store, parent_session_id)?
+            else {
                 break;
             };
 
@@ -498,7 +500,7 @@ impl RuntimeManager {
                     &store,
                     &candidate.task_id,
                     &candidate.attempt_id,
-                    Some(parent_session_id),
+                    Some(&candidate.owner_session_id),
                     candidate.recovery_inherited_settings.clone(),
                     &candidate.handoff_summary,
                     candidate.handoff_artifact_ids.clone(),
@@ -945,6 +947,7 @@ impl RuntimeManager {
 struct SchedulerCandidate {
     task_id: String,
     attempt_id: String,
+    owner_session_id: String,
     handoff_summary: String,
     handoff_artifact_ids: Vec<String>,
     recovery_child_session_id: Option<String>,
@@ -1059,9 +1062,16 @@ impl RuntimeManager {
     fn select_next_runnable_candidate(
         &self,
         shared_store: &SharedStore,
+        owner_session_id: &str,
     ) -> Result<Option<SchedulerCandidate>> {
         let store = lock_shared_store(shared_store)?;
         let mut tasks = TaskRecord::list(&store)?;
+        tasks.retain(|task| {
+            task.owner_session_id
+                .as_deref()
+                .map(|task_owner_session_id| task_owner_session_id == owner_session_id)
+                .unwrap_or(true)
+        });
         tasks.sort_by(|left, right| {
             right
                 .priority
@@ -1166,6 +1176,9 @@ impl RuntimeManager {
                 .unwrap_or_else(|| format!("Delegated DAG node {}", task.task_id));
 
             return Ok(Some(SchedulerCandidate {
+                owner_session_id: task
+                    .owner_session_id
+                    .unwrap_or_else(|| owner_session_id.to_string()),
                 task_id: task.task_id,
                 attempt_id: runnable_attempt.attempt_id,
                 handoff_summary: summary,
