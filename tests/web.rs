@@ -541,6 +541,34 @@ mod web {
     }
 
     #[tokio::test]
+    async fn openai_complete_with_verifier_state_requires_pending_login() {
+        let server = spawn_server_with_state(test_state_with_mock_openai())
+            .await
+            .unwrap();
+        let mut socket = connect_ws(server.addr).await;
+
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"auth.openai.complete","request_id":"req-openai-complete-no-start","callback_input":"mock-openai-code","verifier":"client-supplied-verifier","state":"client-supplied-state"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let completion = recv_json(&mut socket).await;
+        assert_eq!(completion["type"], "response.error");
+        assert_eq!(completion["request_id"], "req-openai-complete-no-start");
+        assert_eq!(completion["error"]["code"], "auth_completion_failed");
+        assert!(
+            completion["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no OpenAI login is currently pending")
+        );
+    }
+
+    #[tokio::test]
     async fn zai_login_updates_auth_snapshot() {
         let server = spawn_server_with_state(test_state_with_mock_openai())
             .await

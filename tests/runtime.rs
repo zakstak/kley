@@ -1495,7 +1495,7 @@ async fn child_session_bootstrap_uses_handoff_summary_not_parent_transcript() {
 }
 
 #[tokio::test]
-async fn delegated_task_links_child_session_after_attempt_start() {
+async fn delegated_task_links_child_session_without_forcing_attempt_running() {
     let store = Store::open_memory().unwrap();
 
     let parent = Session::create(
@@ -1560,30 +1560,35 @@ async fn delegated_task_links_child_session_after_attempt_start() {
         Some(child_session_id.as_str())
     );
 
+    assert_eq!(
+        attempt.status,
+        AttemptLifecycleState::Queued.to_string(),
+        "bootstrap should not force queued delegated attempts to running"
+    );
+
     let events = TaskEventRecord::list_for_task(&store, "task-link-after-start", 0).unwrap();
-    let running_seq = events
-        .iter()
-        .find(|event| {
-            event.event_type == "attempt.state.transition"
-                && serde_json::from_str::<serde_json::Value>(&event.payload)
-                    .ok()
-                    .and_then(|payload| {
-                        payload
-                            .get("to")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string)
-                    })
-                    .as_deref()
-                    == Some("running")
-        })
-        .map(|event| event.sequence)
-        .expect("running transition event expected");
+    let entered_running = events.iter().any(|event| {
+        event.event_type == "attempt.state.transition"
+            && serde_json::from_str::<serde_json::Value>(&event.payload)
+                .ok()
+                .and_then(|payload| {
+                    payload
+                        .get("to")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .as_deref()
+                == Some("running")
+    });
+    assert!(
+        !entered_running,
+        "bootstrap should not emit running transition before lease claim"
+    );
 
     let linked_event = events
         .iter()
         .find(|event| event.event_type == "attempt.child_session.linked")
         .expect("child link event expected");
-    assert!(linked_event.sequence > running_seq);
     assert_eq!(
         linked_event.session_id.as_deref(),
         Some(child_session_id.as_str())

@@ -358,10 +358,22 @@ impl WebAppState {
         verifier: &str,
         expected_state: &str,
     ) -> Result<()> {
-        let credentials =
-            auth::openai::finish_login_flow(callback_input, verifier, expected_state).await?;
-        let store = CredentialStore::open_noninteractive()?;
-        save_openai_oauth_credentials(&store, credentials)?;
+        let pending = {
+            let mut logins = self.pending_openai_logins.lock().unwrap();
+            cleanup_expired_logins(&mut logins);
+            logins
+                .get(controller_id)
+                .cloned()
+                .context("no OpenAI login is currently pending")?
+        };
+
+        if pending.verifier != verifier || pending.state != expected_state {
+            anyhow::bail!("OpenAI login callback does not match the pending login flow");
+        }
+
+        self.auth_service
+            .complete_openai_login(&pending, callback_input)
+            .await?;
         self.clear_openai_login(controller_id);
         Ok(())
     }

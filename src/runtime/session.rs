@@ -357,13 +357,11 @@ fn child_bootstrap_message(handoff: &ChildHandoffContract) -> String {
 
 fn ensure_task_attempt_running(store: &Store, task_id: &str, attempt_id: &str) -> Result<()> {
     let task_state = TaskRecord::current_state(store, task_id)?;
-    if task_state != TaskLifecycleState::Running {
-        TaskRecord::transition_state(store, task_id, attempt_id, TaskLifecycleState::Running)?;
-    }
-
     let attempt_state = TaskAttemptRecord::get(store, attempt_id)?.state()?;
-    if attempt_state != AttemptLifecycleState::Running {
-        TaskAttemptRecord::transition_state(store, attempt_id, AttemptLifecycleState::Running)?;
+
+    if attempt_state == AttemptLifecycleState::Running && task_state != TaskLifecycleState::Running
+    {
+        TaskRecord::transition_state(store, task_id, attempt_id, TaskLifecycleState::Running)?;
     }
 
     Ok(())
