@@ -1,0 +1,35 @@
+- generic [ref=e3]:
+  - heading "Welcome back" [level=1] [ref=e5]
+  - group [ref=e6]:
+    - form "Pick a log in option" [ref=e7]:
+      - generic [ref=e11]:
+        - generic:
+          - generic:
+            - generic: Email address
+        - textbox "Email address" [active] [ref=e12]
+      - generic [ref=e14]:
+        - button "Continue" [ref=e16] [cursor=pointer]
+        - generic [ref=e17]:
+          - text: Don't have an account?
+          - link "Sign up" [ref=e18] [cursor=pointer]:
+            - /url: /create-account
+        - generic [ref=e21]: OR
+        - generic [ref=e23]:
+          - button "Google logo Continue with Google" [ref=e25] [cursor=pointer]:
+            - img "Google logo" [ref=e28]
+            - text: Continue with Google
+          - button "Apple logo Continue with Apple" [ref=e35] [cursor=pointer]:
+            - img "Apple logo" [ref=e38]
+            - text: Continue with Apple
+          - button "Microsoft logo Continue with Microsoft" [ref=e43] [cursor=pointer]:
+            - img "Microsoft logo" [ref=e46]
+            - text: Continue with Microsoft
+          - button "Continue with phone" [ref=e52] [cursor=pointer]:
+            - img [ref=e54]
+            - text: Continue with phone
+  - generic [ref=e57]:
+    - link "Terms of Use" [ref=e58] [cursor=pointer]:
+      - /url: https://openai.com/policies/terms-of-use
+    - generic [ref=e59]: "|"
+    - link "Privacy Policy" [ref=e60] [cursor=pointer]:
+      - /url: https://openai.com/policies/privacy-policy

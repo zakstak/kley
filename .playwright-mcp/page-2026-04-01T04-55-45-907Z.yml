@@ -1,0 +1,112 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - img "Kley icon" [ref=e5]
+    - generic [ref=e6]: Kley
+    - generic [ref=e8]: Bindery shell port
+    - generic [ref=e9]: idle
+    - generic [ref=e11]:
+      - generic [ref=e12]: workspace controls live
+      - button "Fork (UI-only)" [disabled] [ref=e13]
+      - button "Inspector drawer (UI-only)" [disabled] [ref=e14]
+  - generic [ref=e15]:
+    - generic [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: protocol
+        - generic [ref=e19]: v1
+      - generic [ref=e20]:
+        - generic [ref=e21]: context
+        - generic [ref=e23]: 0% · 1,703/800,000 chars · no token sample
+        - generic [ref=e24]: "types: tool 1,203c · system 241c · assistant 213c · user 46c"
+      - generic [ref=e25]:
+        - generic [ref=e26]: timeline
+        - generic [ref=e27]: bindery visual shell
+    - generic [ref=e28]:
+      - generic [ref=e29]:
+        - generic [ref=e30]: Provider
+        - combobox "Provider" [ref=e31]:
+          - option "openai"
+          - option "zai"
+          - option "test" [selected]
+        - generic [ref=e32]: Model
+        - combobox "Model" [ref=e33]:
+          - option "test-model" [selected]
+        - button "Apply" [ref=e34]
+        - generic [ref=e35]: synced test/test-model
+      - generic [ref=e36]:
+        - generic [ref=e37]: Login provider
+        - combobox "Login provider" [ref=e38]:
+          - option "openai" [selected]
+          - option "zai"
+        - button "Open browser login" [ref=e40]
+        - generic [ref=e41]: openai browser login pending callback
+  - region "Timeline visual strip" [ref=e42]
+  - generic [ref=e48]:
+    - complementary [ref=e49]:
+      - generic [ref=e51]: Sessions
+      - 'button "Here are the files in the repo (recursive listing, incl. hidden files): updated 4/1/2026, 12:55:43 AM" [ref=e145]':
+        - generic [ref=e146]: "Here are the files in the repo (recursive listing, incl. hidden files):"
+        - generic [ref=e147]: updated 4/1/2026, 12:55:43 AM
+      - article [ref=e54]:
+        - generic [ref=e55]: Selected Session
+        - paragraph [ref=e56]: "status: active"
+        - paragraph [ref=e57]: "provider/model: test/test-model"
+        - paragraph [ref=e58]: "created: 3/18/2026, 12:24:58 AM"
+        - paragraph [ref=e59]: "updated: 4/1/2026, 12:55:43 AM"
+    - main [ref=e60]:
+      - generic [ref=e61]:
+        - generic [ref=e62]:
+          - button "All" [pressed] [ref=e63] [cursor=pointer]
+          - button "Messages" [ref=e64] [cursor=pointer]
+          - button "Tools" [ref=e65] [cursor=pointer]
+          - generic [ref=e66]: UI
+        - generic [ref=e67]: "filters: backend feed + UI placeholder"
+      - generic [ref=e68]:
+        - generic [ref=e69]:
+          - generic [ref=e70]: Timeline feed
+          - generic [ref=e71]: message stream + grouped events
+        - generic [ref=e72]:
+          - article [ref=e148]:
+            - generic [ref=e149]: User
+            - paragraph [ref=e150]: list the files in this repo
+          - article [ref=e151]:
+            - generic [ref=e152]: Tool
+            - paragraph [ref=e153]: "{\"arguments\":\"{\\\"command\\\":\\\"ls -la\\\"}\",\"call_id\":\"call_F480ZalbBkkDDEbtIWoYcqwf\",\"name\":\"shell\"}"
+          - article [ref=e154]:
+            - generic [ref=e155]: Tool
+            - paragraph [ref=e156]: "Exit code: 0 Duration: 0.0s Total output lines: 14 Output: total 100 drwxr-xr-x 1 zack zack 158 Mar 18 00:22 . drwxr-xr-x 1 zack zack 22 Mar 17 22:04 .. drwxr-xr-x 1 zack zack 22 Mar 17 22:40 .agents -rw-r--r-- 1 zack zack 88059 Mar 16 22:32 Cargo.lock -rw-r--r-- 1 zack zack 1033 Mar 16 22:32 Cargo.toml drwxr-xr-x 1 zack zack 1038 Mar 17 23:41 .codex-ref drwxr-xr-x 1 zack zack 144 Mar 17 23:11 .git -rw-r--r-- 1 zack zack 249 Mar 15 22:40 .gitignore drwxr-xr-x 1 zack zack 100 Mar 17 22:41 src drwxr-xr-x 1 zack zack 130 Mar 17 23:12 target drwxr-xr-x 1 zack zack 188 Mar 16 22:35 tests -rw-r--r-- 1 zack zack 1209 Mar 18 00:22 test_ws.py drwxr-xr-x 1 zack zack 76 Mar 18 00:22 venv"
+          - article [ref=e157]:
+            - generic [ref=e158]: Tool
+            - paragraph [ref=e159]: "{\"arguments\":\"{\\\"command\\\":\\\"find . -maxdepth 3 -type f | sort\\\"}\",\"call_id\":\"call_5xPdS9LvdbU3e9Y7Q0HZK0KE\",\"name\":\"shell\"}"
+          - article [ref=e160]:
+            - generic [ref=e161]: Tool
+            - paragraph [ref=e162]: "Exit code: 0 Duration: 0.0s Total output lines: 180 Output: ./.agents/rules/00-kley-dev.md ./Cargo.lock ./Cargo.toml ./.codex-ref/AGENTS.md ./.codex-ref/announcement_tip.toml ./.codex-ref/.bazelignore ./.codex-ref/.bazelrc ./.codex-ref/.bazelversion ./.codex-ref/BUILD.bazel ./.codex-ref/CHANGELOG.md ./.codex-ref/cliff.toml ./.codex-ref/.codespellignore ./.codex-ref/.codespellrc ./.codex-ref/codex-cli/Dockerfile ./.codex-ref/codex-cli/.dockerignore ./.codex-ref/codex-cli/.gitignore ./.codex-ref/codex-cli/package.json ./.codex-ref/codex-cli/README.md ./.codex-ref/codex-rs/BUILD.bazel ./.codex-ref/codex-rs/Cargo.lock ./.codex-ref/codex-rs/Cargo.toml ./.codex-ref/codex-rs/clippy.toml ./.codex-ref/codex-rs/config.md ./.codex-ref/codex-rs/default.nix ./.codex-ref/codex-rs/deny.toml ./.codex-ref/codex-rs/.gitignore ./.codex-ref/codex-rs/node-version.txt ./.codex-ref/codex-rs/README.md ./.codex-ref/codex-rs/rustfmt.toml ./.codex-ref/codex-rs/rust-toolchain.toml ./.codex-ref/defs.bzl ./.codex-ref/.devcontainer/devcontainer.json ./.codex-ref/.devcontainer/Dockerfile ./.codex-ref/.devcontainer/README.md ./.codex-ref/docs/agents_md.md ./.codex-ref/docs/authentication.md ./.codex-ref/docs/CLA.md ./.codex-ref/docs/config.md ./.codex-ref/docs/contributing.md ./.codex-ref/docs/example-config.md ./.codex-ref/docs/exec.md ./.codex-ref/docs/execpolicy.md ./.codex-ref/docs/exit-confirmation-prompt-design.md ./.codex-ref/docs/getting-started.md ./.codex-ref/docs/install.md ./.codex-ref/docs/js_repl.md ./.codex-ref/docs/license.md ./.codex-ref/docs/open-source-fund.md ./.codex-ref/docs/prompts.md ./.codex-ref/docs/sandbox.md ./.codex-ref/docs/skills.md ./.codex-ref/docs/slash_commands.md ./.codex-ref/docs/tui-alternate-screen.md ./.codex-ref/docs/tui-chat-composer.md ./.codex-ref/docs/tui-request-user-input.md ./.codex-ref/docs/tui-stream-chunking-review.md ./.codex-ref/docs/tui-stream-chunking-tuning.md ./.codex-ref/docs/tui-stream-chunking-validation.md ./.codex-ref/flake.lock ./.codex-ref/flake.nix ./.codex-ref/.git/config ./.codex-ref/.git/description ./.codex-ref/.git/HEAD ./.codex-ref/.github/blob-size-allowlist.txt ./.codex-ref/.github/codex-cli-splash.png ./.codex-ref/.github/dependabot.yaml ./.codex-ref/.github/dotslash-config.json ./.codex-ref/.github/pull_request_template.md ./.codex-ref/.gitignore ./.codex-ref/.git/index ./.codex-ref/.git/packed-refs ./.codex-ref/.git/shallow ./.codex-ref/justfile ./.codex-ref/LICENSE ./.codex-ref/.markdownlint-cli2.yaml ./.codex-ref/MODULE.bazel ./.codex-ref/MODULE.bazel.lock ./.codex-ref/NOTICE ./.codex-ref/.npmrc ./.codex-ref/package.json ./.codex-ref/patches/aws-lc-sys_memcmp_check.patch ./.codex-ref/patches/BUILD.bazel ./.codex-ref/patches/windows-link.patch ./.codex-ref/pnpm-lock.yaml ./.codex-ref/pnpm-workspace.yaml ./.codex-ref/.prettierignore ./.codex-ref/.prettierrc.toml ./.codex-ref/rbe.bzl ./.codex-ref/README.md ./.codex-ref/scripts/asciicheck.py ./.codex-ref/scripts/check_blob_size.py ./.codex-ref/scripts/check-module-bazel-lock.sh ./.codex-ref/scripts/debug-codex.sh ./.codex-ref/scripts/mock_responses_websocket_server.py ./.codex-ref/scripts/readme_toc.py ./.codex-ref/scripts/stage_npm_packages.py ./.codex-ref/SECURITY.md ./.codex-ref/shell-tool-mcp/.gitignore ./.codex-ref/shell-tool-mcp/jest.config.cjs ./.codex-ref/shell-tool-mcp/package.json ./.codex-ref/shell-tool-mcp/README.md ./.codex-ref/shell-tool-mcp/tsconfig.json ./.codex-ref/shell-tool-mcp/tsup.config.ts ./.codex-ref/.vscode/extensions.json ./.codex-ref/.vscode/launch.json ./.codex-ref/.vscode/settings.json ./.codex-ref/workspace_root_test_launcher.bat.tpl ./.codex-ref/workspace_root_test_launcher.sh.tpl ./.git/COMMIT_EDITMSG ./.git/config ./.git/description ./.git/HEAD ./.git/hooks/applypatch-msg.sample ./.git/hooks/commit-msg.sample ./.git/hooks/fsmonitor-watchman.sample ./.git/hooks/post-update.sample ./.git/hooks/pre-applypatch.sample ./.git/hooks/pre-commit.sample ./.git/hooks/pre-merge-commit.sample ./.git/hooks/prepare-commit-msg.sample ./.git/hooks/pre-push.sample ./.git/hooks/pre-rebase.sample ./.git/hooks/pre-receive.sample ./.git/hooks/push-to-checkout.sample ./.git/hooks/sendemail-validate.sample ./.git/hooks/update.sample ./.gitignore ./.git/index ./.git/info/exclude ./.git/logs/HEAD ./.git/opencode ./src/agent.rs ./src/auth/mod.rs ./src/auth/openai.rs ./src/auth/zai.rs ./src/events.rs ./src/lib.rs ./src/main.rs ./src/skills/mod.rs ./src/store/mod.rs ./src/store/schema.rs ./src/store/session.rs ./src/store/turn.rs ./src/tools/mod.rs ./src/tools/patch.rs ./src/tools/read_file.rs ./src/tools/read_skill.rs ./src/tools/report_status.rs ./src/tools/shell.rs ./target/CACHEDIR.TAG ./target/debug/.cargo-lock ./target/debug/kley ./target/debug/kley.d ./target/debug/libkley.d ./target/debug/libkley.rlib ./target/flycheck0/stderr ./target/flycheck0/stdout ./target/release/.cargo-lock ./target/release/kley ./target/release/kley.d ./target/release/libkley.d ./target/release/libkley.rlib ./target/.rustc_info.json ./tests/auth_backends.rs ./tests/event_pipeline.rs ./tests/harness/mod.rs ./tests/session_lifecycle.rs ./tests/sse_parsing.rs ./tests/store_concurrency.rs ./test_ws.py ./venv/bin/activate ./venv/bin/activate.csh ./venv/bin/activate.fish ./venv/bin/Activate.ps1 ./venv/bin/pip ./venv/bin/pip3 ./venv/bin/pip3.14 ./venv/bin/websockets ./venv/.gitignore ./venv/pyvenv.cfg"
+          - article [ref=e163]:
+            - generic [ref=e164]: Assistant
+            - paragraph [ref=e165]: "Here are the files in the repo (recursive listing, incl. hidden files): - `/.agents/rules/00-kley-dev.md` - `/Cargo.lock` - `/Cargo.toml` - `/.codex-ref/AGENTS.md` - `/.codex-ref/announcement_tip.toml` - `/.codex-ref/...` (many files under `.codex-ref`) - `/.git/...` (Git metadata files) - `/.gitignore` - `/src/agent.rs` - `/src/auth/mod.rs` - `/src/auth/openai.rs` - `/src/auth/zai.rs` - `/src/events.rs` - `/src/lib.rs` - `/src/main.rs` - `/src/skills/mod.rs` - `/src/store/mod.rs` - `/src/store/schema.rs` - `/src/store/session.rs` - `/src/store/turn.rs` - `/src/tools/mod.rs` - `/src/tools/patch.rs` - `/src/tools/read_file.rs` - `/src/tools/read_skill.rs` - `/src/tools/report_status.rs` - `/src/tools/shell.rs` - `/tests/auth_backends.rs` - `/tests/event_pipeline.rs` - `/tests/harness/mod.rs` - `/tests/session_lifecycle.rs` - `/tests/sse_parsing.rs` - `/tests/store_concurrency.rs` - `/test_ws.py` - plus generated/virtual-env files: - `/target/...` - `/venv/...` If you want, I can give a full plain-text recursive list excluding `target/` and `venv/` so it’s cleaner."
+          - article [ref=e166]:
+            - generic [ref=e167]: User
+            - paragraph [ref=e168]: hi
+          - article [ref=e169]:
+            - generic [ref=e170]: User
+            - paragraph [ref=e171]: hi
+          - article [ref=e172]:
+            - generic [ref=e173]: User
+            - paragraph [ref=e174]: hi
+          - article [ref=e175]:
+            - generic [ref=e176]: User
+            - paragraph [ref=e177]: hi
+      - generic [ref=e77]:
+        - generic [ref=e78]: Prompt
+        - textbox "Prompt" [ref=e79]:
+          - /placeholder: Write a prompt...
+        - button "Send" [ref=e80]
+        - button "Abort" [disabled] [ref=e81]
+    - complementary [ref=e82]:
+      - generic [ref=e83]:
+        - generic [ref=e84]: Inspector
+        - generic [ref=e85]: live details
+      - article [ref=e178]:
+        - generic [ref=e179]: Tool Activity
+        - paragraph [ref=e180]: No tool events yet.
+      - generic [ref=e90]: Events
+      - paragraph [ref=e181]: hydrated b7b66245-a50f-4386-aefc-985509131e90
