@@ -1066,12 +1066,7 @@ impl RuntimeManager {
     ) -> Result<Option<SchedulerCandidate>> {
         let store = lock_shared_store(shared_store)?;
         let mut tasks = TaskRecord::list(&store)?;
-        tasks.retain(|task| {
-            task.owner_session_id
-                .as_deref()
-                .map(|task_owner_session_id| task_owner_session_id == owner_session_id)
-                .unwrap_or(true)
-        });
+        tasks.retain(|task| task.owner_session_id.as_deref() == Some(owner_session_id));
         tasks.sort_by(|left, right| {
             right
                 .priority
@@ -1175,10 +1170,12 @@ impl RuntimeManager {
                 .filter(|summary| !summary.trim().is_empty())
                 .unwrap_or_else(|| format!("Delegated DAG node {}", task.task_id));
 
+            let task_owner_session_id = task.owner_session_id.clone().context(
+                "scheduler candidate is missing owner_session_id after owner-scoped filtering",
+            )?;
+
             return Ok(Some(SchedulerCandidate {
-                owner_session_id: task
-                    .owner_session_id
-                    .unwrap_or_else(|| owner_session_id.to_string()),
+                owner_session_id: task_owner_session_id,
                 task_id: task.task_id,
                 attempt_id: runnable_attempt.attempt_id,
                 handoff_summary: summary,

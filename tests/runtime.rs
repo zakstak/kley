@@ -1706,7 +1706,7 @@ async fn scheduler_executes_ready_graph_nodes_via_child_sessions() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -1720,7 +1720,7 @@ async fn scheduler_executes_ready_graph_nodes_via_child_sessions() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -1832,7 +1832,7 @@ async fn scheduler_does_not_run_blocked_nodes_early() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -1846,7 +1846,7 @@ async fn scheduler_does_not_run_blocked_nodes_early() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -1990,7 +1990,7 @@ async fn restart_recovery_resumes_nonterminal_tasks_automatically() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -2191,7 +2191,7 @@ async fn parent_close_requests_descendant_cancellation_before_recovery() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -2205,7 +2205,7 @@ async fn parent_close_requests_descendant_cancellation_before_recovery() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -2291,7 +2291,7 @@ async fn parent_close_requests_descendant_cancellation_before_recovery() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
@@ -2435,7 +2435,7 @@ async fn recovery_bootstrap_uses_durable_inherited_settings_over_live_parent_ses
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
-                owner_session_id: None,
+                owner_session_id: Some(parent_session_id.clone()),
             },
         )
         .unwrap();
