@@ -1,0 +1,84 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - img "Kley icon" [ref=e5]
+    - generic [ref=e6]: Kley
+    - generic [ref=e8]: Bindery shell port
+    - generic [ref=e9]: idle
+    - generic [ref=e11]:
+      - generic [ref=e12]: workspace controls live
+      - button "Fork (UI-only)" [disabled] [ref=e13]
+      - button "Inspector drawer (UI-only)" [disabled] [ref=e14]
+  - generic [ref=e15]:
+    - generic [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: protocol
+        - generic [ref=e19]: v1
+      - generic [ref=e20]:
+        - generic [ref=e21]: context
+        - generic [ref=e23]: 0% · 0/800,000 chars · no token sample
+        - generic [ref=e24]: "types: estimate unavailable"
+      - generic [ref=e25]:
+        - generic [ref=e26]: timeline
+        - generic [ref=e27]: bindery visual shell
+    - generic [ref=e28]:
+      - generic [ref=e29]:
+        - generic [ref=e30]: Provider
+        - combobox "Provider" [ref=e31]:
+          - option "openai"
+          - option "zai"
+          - option "test" [selected]
+        - generic [ref=e32]: Model
+        - combobox "Model" [ref=e33]:
+          - option "test-model" [selected]
+        - button "Apply" [ref=e34]
+        - generic [ref=e35]: ready test/test-model
+      - generic [ref=e36]:
+        - generic [ref=e37]: Login provider
+        - combobox "Login provider" [ref=e38]:
+          - option "openai" [selected]
+          - option "zai"
+        - button "Open browser login" [ref=e40]
+        - generic [ref=e41]: openai browser login required
+  - region "Timeline visual strip" [ref=e42]
+  - generic [ref=e48]:
+    - complementary [ref=e49]:
+      - generic [ref=e51]: Sessions
+      - button "Hi there! 👋 updated 4/1/2026, 12:47:38 AM" [ref=e98]:
+        - generic [ref=e99]: Hi there! 👋
+        - generic [ref=e100]: updated 4/1/2026, 12:47:38 AM
+      - article [ref=e54]:
+        - generic [ref=e55]: Selected Session
+        - paragraph [ref=e56]: "status: active"
+        - paragraph [ref=e57]: "provider/model: openai/gpt-5.3-codex-spark"
+        - paragraph [ref=e58]: "created: 3/18/2026, 12:20:31 AM"
+        - paragraph [ref=e59]: "updated: 4/1/2026, 12:47:38 AM"
+    - main [ref=e60]:
+      - generic [ref=e61]:
+        - generic [ref=e62]:
+          - button "All" [pressed] [ref=e63] [cursor=pointer]
+          - button "Messages" [ref=e64] [cursor=pointer]
+          - button "Tools" [ref=e65] [cursor=pointer]
+          - generic [ref=e66]: UI
+        - generic [ref=e67]: "filters: backend feed + UI placeholder"
+      - generic [ref=e68]:
+        - generic [ref=e69]:
+          - generic [ref=e70]: Timeline feed
+          - generic [ref=e71]: message stream + grouped events
+        - article [ref=e101]:
+          - generic [ref=e102]: Transcript
+          - paragraph [ref=e103]: No messages yet.
+      - generic [ref=e77]:
+        - generic [ref=e78]: Prompt
+        - textbox "Prompt" [ref=e79]:
+          - /placeholder: Write a prompt...
+        - button "Send" [ref=e80]
+        - button "Abort" [disabled] [ref=e81]
+    - complementary [ref=e82]:
+      - generic [ref=e83]:
+        - generic [ref=e84]: Inspector
+        - generic [ref=e85]: live details
+      - article [ref=e104]:
+        - generic [ref=e105]: Tool Activity
+        - paragraph [ref=e106]: No tool events yet.
+      - generic [ref=e90]: Events
+      - paragraph [ref=e107]: hydrated 1ba499fa-3448-47af-8c61-d84f5ea31736

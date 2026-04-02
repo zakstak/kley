@@ -1,0 +1,171 @@
+{
+  "active_plan": "/home/zack/git/kley/.sisyphus/plans/subagent-delegation-system.md",
+  "started_at": "2026-03-31T05:06:11.221Z",
+  "session_ids": [
+    "ses_2bdb70970ffe6GjzRhN9T7sm2f",
+    "ses_2bdb4c550ffexxZO5wDS1rVvcU",
+    "ses_2bdb48feeffeS9lUO323AZGs62",
+    "ses_2bdb4c540ffe0u4AT7ObEZNU80",
+    "ses_2bdb276d9ffeBE3pAFLRQrujgy",
+    "ses_2bd9d17dbffeYvvvKXGeBKzmGm",
+    "ses_2bd9d1776ffehCviiO6EZiVbG6",
+    "ses_2bd9387a6ffez4YKZ1GqBzYgbn",
+    "ses_2bc7cde96ffeOMzeZ620EjSoBU",
+    "ses_2bc73dc12ffeNJJI9K06ZX7XFJ",
+    "ses_2bc680601ffeV1PU0HvOalw3of",
+    "ses_2bc239f64ffeD5unNpQaIXyc1t",
+    "ses_2bc19446effeIC4thmLz9MO4u4",
+    "ses_2ba4f768affeRrhgYv90dp9N2q",
+    "ses_2ba4b9c98ffeRhCJa0Z9hdSZGF",
+    "ses_2ba41e4b6ffepjUJGbQHycKM75",
+    "ses_2ba2b8937ffeEOSbnRgas9K5Mi",
+    "ses_2ba1e981fffecZfEwPTtqTtZm2",
+    "ses_2ba143de6ffe9DpVipFDIUI5p8",
+    "ses_2b9e8aafcffe27Ytjd9SgW7q6g",
+    "ses_2b9e8280bffeMKdn2MuD0sFCbn",
+    "ses_2b9e8accdffe1QG3xsjx74UaFR",
+    "ses_2b9e8ab05ffezBJwW00DGB0zHk",
+    "ses_2b9e8ab06ffeagjQ1pJhJPsyJo",
+    "ses_2b9e2cbcdffeMTn44a9x4pXWmB",
+    "ses_2b9d8b0d5ffefHzu4i9w7YpuM5",
+    "ses_2b9cf7014fferco8Uw9AsLQ4jF"
+  ],
+  "plan_name": "subagent-delegation-system",
+  "task_sessions": {
+    "todo:1": {
+      "task_key": "todo:1",
+      "task_label": "1",
+      "task_title": "Add durable task domain schema",
+      "session_id": "ses_2bdb276d9ffeBE3pAFLRQrujgy",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T05:19:25.752Z"
+    },
+    "todo:2": {
+      "task_key": "todo:2",
+      "task_label": "2",
+      "task_title": "Implement task graph repository and DAG validation",
+      "session_id": "ses_2bd9d17dbffeYvvvKXGeBKzmGm",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T05:38:26.631Z"
+    },
+    "todo:3": {
+      "task_key": "todo:3",
+      "task_label": "3",
+      "task_title": "Add durable task and attempt state machines",
+      "session_id": "ses_2bd9387a6ffez4YKZ1GqBzYgbn",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T05:52:24.946Z"
+    },
+    "todo:5": {
+      "task_key": "todo:5",
+      "task_label": "5",
+      "task_title": "Add scheduler claim and lease concurrency primitives",
+      "session_id": "ses_2bc7cde96ffeOMzeZ620EjSoBU",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T10:56:54.257Z"
+    },
+    "todo:6": {
+      "task_key": "todo:6",
+      "task_label": "6",
+      "task_title": "Implement parent↔child handoff contract and child-session bootstrap",
+      "session_id": "ses_2bc73dc12ffeNJJI9K06ZX7XFJ",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T11:09:57.043Z"
+    },
+    "todo:7": {
+      "task_key": "todo:7",
+      "task_label": "7",
+      "task_title": "Add delegation policy inheritance and autonomous-spawn guardrails",
+      "session_id": "ses_2bc680601ffeV1PU0HvOalw3of",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-03-31T11:22:07.538Z"
+    },
+    "todo:8": {
+      "task_key": "todo:8",
+      "task_label": "8",
+      "task_title": "Integrate DAG scheduler execution into RuntimeManager",
+      "session_id": "ses_2bc239f64ffeD5unNpQaIXyc1t",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T12:34:33.320Z"
+    },
+    "todo:9": {
+      "task_key": "todo:9",
+      "task_label": "9",
+      "task_title": "Implement lifecycle mutation controls",
+      "session_id": "ses_2bc19446effeIC4thmLz9MO4u4",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T12:45:38.688Z"
+    },
+    "todo:10": {
+      "task_key": "todo:10",
+      "task_label": "10",
+      "task_title": "Implement automatic restart recovery and interrupted-attempt",
+      "session_id": "ses_2ba4f768affeRrhgYv90dp9N2q",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T21:00:13.100Z"
+    },
+    "todo:11": {
+      "task_key": "todo:11",
+      "task_label": "11",
+      "task_title": "Extend task lifecycle events through runtime and UI mappings",
+      "session_id": "ses_2ba4b9c98ffeRhCJa0Z9hdSZGF",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-03-31T21:10:46.902Z"
+    },
+    "todo:12": {
+      "task_key": "todo:12",
+      "task_label": "12",
+      "task_title": "Add task snapshots, watch APIs, and control protocol commands",
+      "session_id": "ses_2ba41e4b6ffepjUJGbQHycKM75",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-03-31T21:35:18.932Z"
+    },
+    "todo:13": {
+      "task_key": "todo:13",
+      "task_label": "13",
+      "task_title": "Add CLI task visibility and control surface",
+      "session_id": "ses_2ba2b8937ffeEOSbnRgas9K5Mi",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-03-31T21:49:02.229Z"
+    },
+    "todo:14": {
+      "task_key": "todo:14",
+      "task_label": "14",
+      "task_title": "Add guarded main-agent delegation entrypoint",
+      "session_id": "ses_2ba1e981fffecZfEwPTtqTtZm2",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T22:00:33.291Z"
+    },
+    "todo:15": {
+      "task_key": "todo:15",
+      "task_label": "15",
+      "task_title": "Add end-to-end lifecycle, reconnect, and recovery coverage",
+      "session_id": "ses_2ba143de6ffe9DpVipFDIUI5p8",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-03-31T22:19:16.279Z"
+    },
+    "final-wave:f1": {
+      "task_key": "final-wave:f1",
+      "task_label": "F1",
+      "task_title": "Plan Compliance Audit — oracle",
+      "session_id": "ses_2b9cf7014fferco8Uw9AsLQ4jF",
+      "agent": "oracle",
+      "category": "",
+      "updated_at": "2026-03-31T23:21:42.434Z"
+    }
+  }
+}

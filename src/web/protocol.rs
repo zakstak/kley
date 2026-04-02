@@ -36,6 +36,10 @@ pub enum WebCommand {
     AuthOpenAiComplete {
         request_id: String,
         callback_input: String,
+        #[serde(default)]
+        verifier: Option<String>,
+        #[serde(default)]
+        state: Option<String>,
     },
     #[serde(rename = "auth.login")]
     AuthLogin {
@@ -48,6 +52,39 @@ pub enum WebCommand {
         request_id: String,
         session_id: String,
         turn_id: String,
+    },
+    #[serde(rename = "task.watch")]
+    TaskWatch {
+        request_id: String,
+        session_id: String,
+        task_id: String,
+        #[serde(default)]
+        after_sequence: Option<i64>,
+    },
+    #[serde(rename = "task.cancel")]
+    TaskCancel {
+        request_id: String,
+        session_id: String,
+        task_id: String,
+    },
+    #[serde(rename = "task.retry")]
+    TaskRetry {
+        request_id: String,
+        session_id: String,
+        task_id: String,
+    },
+    #[serde(rename = "task.resume")]
+    TaskResume {
+        request_id: String,
+        session_id: String,
+        task_id: String,
+    },
+    #[serde(rename = "task.reprioritize")]
+    TaskReprioritize {
+        request_id: String,
+        session_id: String,
+        task_id: String,
+        priority: i64,
     },
 }
 
@@ -81,6 +118,110 @@ pub struct StateSnapshotData {
     pub transcript: Vec<TranscriptEntry>,
     pub active_turn: Option<ActiveTurnSnapshot>,
     pub context_usage: ContextUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskWatchCursor {
+    pub after_sequence: i64,
+    pub latest_sequence: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskGraphSnapshot {
+    pub nodes: Vec<TaskGraphNodeSnapshot>,
+    pub edges: Vec<TaskGraphEdgeSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskGraphNodeSnapshot {
+    pub task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub priority: i64,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attempt_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskGraphEdgeSnapshot {
+    pub task_id: String,
+    pub depends_on_task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskListSnapshotData {
+    pub request_id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub cursor: TaskWatchCursor,
+    pub graph: TaskGraphSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskDetailSnapshotData {
+    pub request_id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub cursor: TaskWatchCursor,
+    pub graph: TaskGraphSnapshot,
+    pub task: TaskDetailSnapshot,
+    pub attempts: Vec<TaskAttemptSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskControlResponseData {
+    pub action: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub task_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_task_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskDetailSnapshot {
+    pub task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub priority: i64,
+    pub state: String,
+    pub policy_snapshot: Value,
+    pub parent_close_policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_checkpoint: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attempt_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskAttemptSnapshot {
+    pub attempt_id: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_checkpoint: Option<Value>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,12 +392,40 @@ pub enum UiEvent {
         to: String,
         reason: String,
     },
+    #[serde(rename = "task.list.snapshot")]
+    TaskListSnapshot {
+        event_id: String,
+        ts: String,
+        #[serde(flatten)]
+        data: TaskListSnapshotData,
+    },
+    #[serde(rename = "task.detail.snapshot")]
+    TaskDetailSnapshot {
+        event_id: String,
+        ts: String,
+        #[serde(flatten)]
+        data: TaskDetailSnapshotData,
+    },
     #[serde(rename = "auth.token_refreshed")]
     AuthTokenRefreshed {
         event_id: String,
         ts: String,
         session_id: String,
         provider: String,
+    },
+    #[serde(rename = "task.event")]
+    TaskEvent {
+        event_id: String,
+        ts: String,
+        request_id: String,
+        sequence: i64,
+        task_id: String,
+        attempt_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+        event_type: String,
+        payload: Value,
+        recorded_at: String,
     },
 }
 
@@ -294,7 +463,12 @@ impl WebCommand {
             | WebCommand::AuthOpenAiStart { request_id }
             | WebCommand::AuthOpenAiComplete { request_id, .. }
             | WebCommand::AuthLogin { request_id, .. }
-            | WebCommand::TurnAbort { request_id, .. } => request_id,
+            | WebCommand::TurnAbort { request_id, .. }
+            | WebCommand::TaskWatch { request_id, .. }
+            | WebCommand::TaskCancel { request_id, .. }
+            | WebCommand::TaskRetry { request_id, .. }
+            | WebCommand::TaskResume { request_id, .. }
+            | WebCommand::TaskReprioritize { request_id, .. } => request_id,
         }
     }
 }

@@ -7,15 +7,18 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::auth::{
-    self, CredentialStore, Credentials, OpenAiCredentials, ZaiCredentials,
-    save_openai_oauth_credentials,
+    self, CredentialStore, Credentials, ZaiCredentials, save_openai_oauth_credentials,
 };
 use crate::runtime::RuntimeManager;
 use crate::store::{SharedStore, Store};
 
+#[cfg(feature = "testing")]
+use crate::auth::OpenAiCredentials;
+
 use super::protocol::AuthStateSnapshot;
 
 const PENDING_OPENAI_LOGIN_TTL: Duration = Duration::from_secs(600);
+#[cfg(feature = "testing")]
 const OPENAI_AUTH_MODE_ENV: &str = "KLEY_WEB_OPENAI_AUTH_MODE";
 const WEB_AUTH_AUTO_RESET_ENV: &str = "KLEY_WEB_AUTH_AUTO_RESET";
 
@@ -120,7 +123,6 @@ impl WebAuthService for LiveWebAuthService {
     }
 
     fn start_openai_login(&self) -> Result<PendingOpenAiLogin> {
-        let _ = self.credential_store()?;
         let flow = auth::openai::start_login_flow()?;
         Ok(PendingOpenAiLogin::new(
             flow.authorize_url,
@@ -313,6 +315,10 @@ impl WebAppState {
         self.auth_service.summary(pending_openai_login)
     }
 
+    pub(crate) fn pending_openai_login(&self, controller_id: &str) -> bool {
+        self.has_pending_openai_login(controller_id)
+    }
+
     pub fn start_openai_login(&self, controller_id: &str) -> Result<String> {
         let pending = self.auth_service.start_openai_login()?;
         let authorize_url = pending.authorize_url.clone();
@@ -341,6 +347,33 @@ impl WebAppState {
             .complete_openai_login(&pending, callback_input)
             .await?;
 
+        self.clear_openai_login(controller_id);
+        Ok(())
+    }
+
+    pub async fn complete_openai_login_with_verifier_state(
+        &self,
+        controller_id: &str,
+        callback_input: &str,
+        verifier: &str,
+        expected_state: &str,
+    ) -> Result<()> {
+        let pending = {
+            let mut logins = self.pending_openai_logins.lock().unwrap();
+            cleanup_expired_logins(&mut logins);
+            logins
+                .get(controller_id)
+                .cloned()
+                .context("no OpenAI login is currently pending")?
+        };
+
+        if pending.verifier != verifier || pending.state != expected_state {
+            anyhow::bail!("OpenAI login callback does not match the pending login flow");
+        }
+
+        self.auth_service
+            .complete_openai_login(&pending, callback_input)
+            .await?;
         self.clear_openai_login(controller_id);
         Ok(())
     }
@@ -374,6 +407,8 @@ mod tests {
     use std::ffi::OsStr;
     use std::sync::OnceLock;
 
+    const TEST_AGE_MAX_WORK_FACTOR: u8 = 1;
+
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn env_lock() -> &'static Mutex<()> {
@@ -395,9 +430,10 @@ mod tests {
     fn write_credentials_with_passphrase(config_home: &std::path::Path, passphrase: &str) {
         let kley_config = config_home.join("kley");
         std::fs::create_dir_all(&kley_config).unwrap();
-        let backend = crate::auth::AgeFileBackend::new(
+        let backend = crate::auth::AgeFileBackend::with_max_work_factor(
             kley_config.join("credentials.age"),
             SecretString::from(passphrase.to_owned()),
+            TEST_AGE_MAX_WORK_FACTOR,
         );
         backend
             .save(&Credentials {
@@ -419,6 +455,10 @@ mod tests {
 
         set_env("XDG_CONFIG_HOME", temp.path());
         set_env("KLEY_PASSPHRASE", "new-pass");
+        set_env(
+            "KLEY_AGE_MAX_WORK_FACTOR",
+            TEST_AGE_MAX_WORK_FACTOR.to_string(),
+        );
         set_env(WEB_AUTH_AUTO_RESET_ENV, "1");
         remove_env("VAULT_ADDR");
         remove_env("VAULT_TOKEN");
@@ -435,6 +475,7 @@ mod tests {
         assert!(credentials.active_provider.is_none());
 
         remove_env(WEB_AUTH_AUTO_RESET_ENV);
+        remove_env("KLEY_AGE_MAX_WORK_FACTOR");
         remove_env("KLEY_PASSPHRASE");
         remove_env("XDG_CONFIG_HOME");
     }
@@ -447,6 +488,10 @@ mod tests {
 
         set_env("XDG_CONFIG_HOME", temp.path());
         set_env("KLEY_PASSPHRASE", "new-pass");
+        set_env(
+            "KLEY_AGE_MAX_WORK_FACTOR",
+            TEST_AGE_MAX_WORK_FACTOR.to_string(),
+        );
         set_env(WEB_AUTH_AUTO_RESET_ENV, "0");
         remove_env("VAULT_ADDR");
         remove_env("VAULT_TOKEN");
@@ -457,6 +502,7 @@ mod tests {
         assert!(snapshot.storage_error.is_some());
 
         remove_env(WEB_AUTH_AUTO_RESET_ENV);
+        remove_env("KLEY_AGE_MAX_WORK_FACTOR");
         remove_env("KLEY_PASSPHRASE");
         remove_env("XDG_CONFIG_HOME");
     }

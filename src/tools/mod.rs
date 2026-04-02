@@ -17,6 +17,74 @@ use serde_json::Value;
 
 use crate::tools::editing::EditObservation;
 
+pub struct DelegateTaskTool;
+
+impl Tool for DelegateTaskTool {
+    fn name(&self) -> &str {
+        "delegate_task"
+    }
+
+    fn description(&self) -> &str {
+        "Create a delegated child task with a bounded handoff brief and return stable task-id tracking details."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "parent_task_id": {
+                    "type": "string",
+                    "description": "Stable task_id for the parent task that is delegating work."
+                },
+                "child_task_id": {
+                    "type": "string",
+                    "description": "Optional stable task_id for the child; if omitted, one is generated."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional child task title shown to the delegated worker."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Child task priority. Higher numbers run first."
+                },
+                "handoff_brief": {
+                    "type": "string",
+                    "description": "Bounded delegation brief for child bootstrap; do not pass raw transcript replay."
+                },
+                "artifact_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional artifact references included in child handoff bootstrap."
+                },
+                "requested_policy_json": {
+                    "type": "string",
+                    "description": "Optional JSON object string requesting a narrowed child policy."
+                },
+                "after_sequence": {
+                    "type": "integer",
+                    "description": "Optional task event replay cursor for initial status subscription."
+                }
+            },
+            "required": [
+                "parent_task_id",
+                "child_task_id",
+                "title",
+                "priority",
+                "handoff_brief",
+                "artifact_ids",
+                "requested_policy_json",
+                "after_sequence"
+            ],
+            "additionalProperties": false,
+        })
+    }
+
+    fn execute(&self, _args: Value) -> Result<String> {
+        Ok("delegate_task is handled by the runtime delegation entrypoint".to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolExecutionResult {
     pub output: String,
@@ -119,6 +187,7 @@ pub fn default_registry(project_dir: std::path::PathBuf) -> ToolRegistry {
     reg.register(Box::new(patch::PatchTool));
     reg.register(Box::new(hashline_edit::HashlineEditTool));
     reg.register(Box::new(read_skill::ReadSkillTool::new(project_dir)));
+    reg.register(Box::new(DelegateTaskTool));
     reg.register(Box::new(report_status::ReportStatusTool));
     reg
 }
@@ -208,6 +277,7 @@ mod tests {
         assert!(reg.get("patch").is_some());
         assert!(reg.get("hashline_edit").is_some());
         assert!(reg.get("read_skill").is_some());
+        assert!(reg.get("delegate_task").is_some());
         assert!(reg.get("report_status").is_some());
     }
 

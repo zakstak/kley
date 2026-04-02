@@ -425,6 +425,74 @@
         color: var(--text-meta);
         word-break: break-word;
       }
+      .tool-transcript {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .tool-transcript-meta {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .tool-transcript-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 7px;
+        border: 1px solid var(--border-tone);
+        border-radius: var(--radius-pill);
+        background: var(--surface-muted);
+        color: var(--text-meta-strong);
+        font-family: "Fira Code", monospace;
+        font-size: 10px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .tool-transcript-chip[data-tone="active"] {
+        border-color: rgba(56, 189, 248, 0.45);
+        color: var(--color-cyan);
+        background: rgba(56, 189, 248, 0.12);
+      }
+      .tool-transcript-chip[data-tone="ok"] {
+        border-color: rgba(52, 211, 153, 0.45);
+        color: var(--color-ok);
+        background: rgba(52, 211, 153, 0.12);
+      }
+      .tool-transcript-chip[data-tone="error"] {
+        border-color: rgba(251, 113, 133, 0.5);
+        color: var(--color-alert);
+        background: rgba(251, 113, 133, 0.12);
+      }
+      .tool-transcript-section {
+        border: 1px solid var(--border-tone);
+        border-radius: var(--radius-sm);
+        background: rgba(12, 10, 18, 0.44);
+        padding: 6px 8px;
+      }
+      .tool-transcript-label {
+        font-family: "Fira Code", monospace;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-meta);
+      }
+      .tool-transcript-pre {
+        margin-top: 4px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow-x: auto;
+        font-family: "Fira Code", monospace;
+        font-size: 11px;
+        line-height: 1.45;
+        color: var(--text-meta-strong);
+      }
+      .tool-transcript-note {
+        font-family: "Fira Code", monospace;
+        font-size: 10px;
+        line-height: 1.45;
+        color: var(--text-meta);
+      }
       .chrome-shell {
         border: 1px solid var(--border-tone-strong);
         background: var(--surface-shell);
@@ -1497,6 +1565,324 @@
           return "var(--color-bdr2)";
         }
 
+        function isToolTranscriptKind(kind) {
+          return kind === "function_call" || kind === "function_call_output";
+        }
+
+        function tryParseJson(raw) {
+          if (typeof raw !== "string") {
+            return { ok: false, value: null };
+          }
+          const trimmed = raw.trim();
+          if (!trimmed) {
+            return { ok: false, value: null };
+          }
+          try {
+            return { ok: true, value: JSON.parse(trimmed) };
+          } catch (_error) {
+            return { ok: false, value: null };
+          }
+        }
+
+        function stringifyJsonSafe(value) {
+          try {
+            return JSON.stringify(value, null, 2);
+          } catch (_error) {
+            return String(value);
+          }
+        }
+
+        function formatToolBlockValue(value) {
+          if (value === null || value === undefined) {
+            return "(missing)";
+          }
+          if (typeof value === "string") {
+            if (!value.trim()) {
+              return "(empty)";
+            }
+            const parsed = tryParseJson(value);
+            if (parsed.ok) {
+              return stringifyJsonSafe(parsed.value);
+            }
+            return value;
+          }
+          if (typeof value === "object") {
+            return stringifyJsonSafe(value);
+          }
+          return String(value);
+        }
+
+        function normalizeEditObservation(rawObservation) {
+          if (!rawObservation || typeof rawObservation !== "object") {
+            return null;
+          }
+          const asCount = (value) =>
+            Number.isFinite(value) ? Math.max(0, Number(value)) : 0;
+          return {
+            engine:
+              typeof rawObservation.engine === "string" &&
+              rawObservation.engine.trim()
+                ? rawObservation.engine.trim()
+                : null,
+            path:
+              typeof rawObservation.path === "string" && rawObservation.path.trim()
+                ? rawObservation.path.trim()
+                : null,
+            artifactPath:
+              typeof rawObservation.artifact_path === "string" &&
+              rawObservation.artifact_path.trim()
+                ? rawObservation.artifact_path.trim()
+                : null,
+            failureKind:
+              typeof rawObservation.failure_kind === "string" &&
+              rawObservation.failure_kind.trim()
+                ? rawObservation.failure_kind.trim()
+                : null,
+            appliedCount: asCount(rawObservation.applied_count),
+            editCount: asCount(rawObservation.edit_count),
+            staleReferenceCount: asCount(rawObservation.stale_reference_count),
+            noopCount: asCount(rawObservation.noop_count),
+            durationMs: Number.isFinite(rawObservation.duration_ms)
+              ? Math.max(0, Number(rawObservation.duration_ms))
+              : null,
+          };
+        }
+
+        function normalizeToolTranscriptPayload(role, kind, content, attrs) {
+          const fallback =
+            attrs?.toolFallback && typeof attrs.toolFallback === "object"
+              ? attrs.toolFallback
+              : null;
+          const parsed = tryParseJson(content);
+          const payload =
+            parsed.ok && parsed.value && typeof parsed.value === "object"
+              ? parsed.value
+              : {};
+          const toolNameFromPayload =
+            typeof payload.name === "string" && payload.name.trim()
+              ? payload.name.trim()
+              : "";
+          const callIdFromPayload =
+            typeof payload.call_id === "string" && payload.call_id.trim()
+              ? payload.call_id.trim()
+              : "";
+          const statusFromPayload =
+            typeof payload.status === "string" && payload.status.trim()
+              ? payload.status.trim().toLowerCase()
+              : null;
+
+          const toolName =
+            (typeof fallback?.toolName === "string" && fallback.toolName.trim()
+              ? fallback.toolName.trim()
+              : "") || toolNameFromPayload || "unknown";
+
+          const callId =
+            (typeof fallback?.callId === "string" && fallback.callId.trim()
+              ? fallback.callId.trim()
+              : "") || callIdFromPayload;
+
+          const status =
+            (typeof fallback?.status === "string" && fallback.status.trim()
+              ? fallback.status.trim().toLowerCase()
+              : null) ||
+            statusFromPayload ||
+            (kind === "function_call" ? "running" : null);
+
+          const argumentsValue = Object.hasOwn(payload, "arguments")
+            ? payload.arguments
+            : Object.hasOwn(fallback || {}, "arguments")
+              ? fallback.arguments
+              : undefined;
+          const outputValue = Object.hasOwn(payload, "output")
+            ? payload.output
+            : Object.hasOwn(fallback || {}, "output")
+              ? fallback.output
+              : undefined;
+
+          const rawObservation =
+            payload.edit_observation && typeof payload.edit_observation === "object"
+              ? payload.edit_observation
+              : fallback?.editObservation &&
+                  typeof fallback.editObservation === "object"
+                ? fallback.editObservation
+                : null;
+
+          const notes = [];
+          if (typeof content === "string" && content.trim() && !parsed.ok) {
+            notes.push("Could not parse payload as JSON; showing raw content.");
+          }
+
+          return {
+            role,
+            kind,
+            source:
+              typeof fallback?.source === "string" ? fallback.source : "snapshot",
+            toolName,
+            callId,
+            status,
+            argumentsValue,
+            outputValue,
+            editObservation: normalizeEditObservation(rawObservation),
+            rawContent:
+              typeof content === "string" && content.trim() ? content : "(empty)",
+            notes,
+          };
+        }
+
+        function toolStatusTone(status) {
+          if (!status) {
+            return null;
+          }
+          if (status === "running") {
+            return "active";
+          }
+          if (status === "completed" || status === "success") {
+            return "ok";
+          }
+          if (status === "failed" || status === "error") {
+            return "error";
+          }
+          return null;
+        }
+
+        function addToolSection(container, label, value) {
+          const section = document.createElement("div");
+          section.className = "tool-transcript-section";
+
+          const heading = document.createElement("div");
+          heading.className = "tool-transcript-label";
+          heading.textContent = label;
+
+          const block = document.createElement("pre");
+          block.className = "tool-transcript-pre";
+          block.textContent = value;
+
+          section.appendChild(heading);
+          section.appendChild(block);
+          container.appendChild(section);
+        }
+
+        function renderToolTranscriptBody(body, role, kind, content, attrs) {
+          clearChildren(body);
+          body.className = "tool-transcript mt-2 text-sm app-text-1";
+
+          const normalized = normalizeToolTranscriptPayload(role, kind, content, attrs);
+
+          const meta = document.createElement("div");
+          meta.className = "tool-transcript-meta";
+
+          const toolChip = document.createElement("span");
+          toolChip.className = "tool-transcript-chip";
+          toolChip.textContent = normalized.toolName;
+          meta.appendChild(toolChip);
+
+          if (normalized.callId) {
+            const callChip = document.createElement("span");
+            callChip.className = "tool-transcript-chip";
+            callChip.textContent = `call ${normalized.callId}`;
+            meta.appendChild(callChip);
+          }
+
+          const kindChip = document.createElement("span");
+          kindChip.className = "tool-transcript-chip";
+          kindChip.textContent =
+            normalized.kind === "function_call_output" ? "output" : "call";
+          meta.appendChild(kindChip);
+
+          if (normalized.status) {
+            const statusChip = document.createElement("span");
+            statusChip.className = "tool-transcript-chip";
+            const tone = toolStatusTone(normalized.status);
+            if (tone) {
+              statusChip.dataset.tone = tone;
+            }
+            statusChip.textContent = normalized.status;
+            meta.appendChild(statusChip);
+          }
+
+          body.appendChild(meta);
+
+          if (
+            normalized.argumentsValue !== undefined ||
+            normalized.kind === "function_call" ||
+            normalized.source === "live"
+          ) {
+            const argumentsText =
+              normalized.argumentsValue !== undefined
+                ? formatToolBlockValue(normalized.argumentsValue)
+                : normalized.source === "live"
+                  ? "(unavailable from live tool events)"
+                  : "(missing)";
+            addToolSection(body, "Arguments", argumentsText);
+          }
+
+          if (
+            normalized.outputValue !== undefined ||
+            normalized.kind === "function_call_output" ||
+            normalized.source === "live"
+          ) {
+            const outputText =
+              normalized.outputValue !== undefined
+                ? formatToolBlockValue(normalized.outputValue)
+                : normalized.status === "running"
+                  ? "(waiting for tool completion)"
+                  : normalized.source === "live"
+                    ? "(unavailable from live tool events)"
+                    : "(missing)";
+            addToolSection(body, "Output", outputText);
+          }
+
+          if (normalized.editObservation) {
+            const summaryLines = [
+              `applied ${normalized.editObservation.appliedCount}/${normalized.editObservation.editCount} · stale ${normalized.editObservation.staleReferenceCount} · noop ${normalized.editObservation.noopCount}${normalized.editObservation.durationMs !== null ? ` · ${normalized.editObservation.durationMs}ms` : ""}`,
+            ];
+            if (normalized.editObservation.engine) {
+              summaryLines.unshift(`engine: ${normalized.editObservation.engine}`);
+            }
+            if (normalized.editObservation.path) {
+              summaryLines.push(`path: ${normalized.editObservation.path}`);
+            }
+            if (normalized.editObservation.failureKind) {
+              summaryLines.push(
+                `failure kind: ${normalized.editObservation.failureKind}`,
+              );
+            }
+            if (normalized.editObservation.artifactPath) {
+              summaryLines.push(
+                `artifact: ${normalized.editObservation.artifactPath}`,
+              );
+            }
+            addToolSection(body, "Edit observation", summaryLines.join("\n"));
+          }
+
+          if (normalized.notes.length) {
+            const note = document.createElement("p");
+            note.className = "tool-transcript-note";
+            note.textContent = normalized.notes.join(" ");
+            body.appendChild(note);
+          }
+
+          if (normalized.notes.length) {
+            addToolSection(body, "Raw payload", normalized.rawContent);
+          }
+        }
+
+        function setTranscriptBodyContent(body, role, kind, content, attrs) {
+          if (
+            isToolTranscriptKind(kind) ||
+            (attrs?.toolFallback && typeof attrs.toolFallback === "object")
+          ) {
+            renderToolTranscriptBody(body, role, kind, content, attrs);
+            return;
+          }
+          body.className = "mt-2 whitespace-pre-wrap text-sm app-text-1";
+          if (typeof content === "string") {
+            body.textContent = content;
+            return;
+          }
+          body.textContent = content == null ? "" : String(content);
+        }
+
         function createTranscriptRow(role, kind, content, attrs) {
           const row = document.createElement("article");
           row.className = "shell-card rounded-lg border app-surface-2 p-3";
@@ -1518,10 +1904,11 @@
           heading.className = "meta-kicker";
           heading.textContent = roleLabel(role, kind);
 
-          const body = document.createElement("p");
-          body.className = "mt-2 whitespace-pre-wrap text-sm app-text-1";
+          const body = document.createElement(
+            isToolTranscriptKind(kind) ? "div" : "p",
+          );
           body.dataset.field = "content";
-          body.textContent = content || "";
+          setTranscriptBodyContent(body, role, kind, content, attrs);
 
           row.appendChild(heading);
           row.appendChild(body);
@@ -1858,13 +2245,25 @@
             return existing;
           }
 
+          const payload = stringifyJsonSafe({
+            call_id: toolCallId,
+            name: toolName,
+            status: "running",
+          });
+
           const row = createTranscriptRow(
             "tool",
             "function_call",
-            `${toolName} · running`,
+            payload,
             {
               turnId,
               category: "tools",
+              toolFallback: {
+                source: "live",
+                callId: toolCallId,
+                toolName,
+                status: "running",
+              },
             },
           );
           row.dataset.toolCallId = toolCallId;
@@ -1889,11 +2288,31 @@
             frame.edit_observation && typeof frame.edit_observation === "object"
               ? frame.edit_observation
               : null;
-          const statusText = frame.success ? "completed" : "failed";
-          const observationSummary = observation
-            ? `\n${observation.applied_count}/${observation.edit_count} edits applied · stale ${observation.stale_reference_count} · noop ${observation.noop_count}`
-            : "";
-          body.textContent = `${frame.tool_name} · ${statusText}${observationSummary}`;
+
+          const payload = {
+            call_id: frame.tool_call_id,
+            name: frame.tool_name,
+            status: frame.success ? "completed" : "failed",
+          };
+          if (observation) {
+            payload.edit_observation = observation;
+          }
+
+          setTranscriptBodyContent(
+            body,
+            "tool",
+            "function_call_output",
+            stringifyJsonSafe(payload),
+            {
+              toolFallback: {
+                source: "live",
+                callId: frame.tool_call_id,
+                toolName: frame.tool_name,
+                status: frame.success ? "completed" : "failed",
+                editObservation: observation,
+              },
+            },
+          );
           applyTranscriptFilter();
         }
 

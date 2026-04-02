@@ -19,8 +19,9 @@ impl Tool for ReportStatusTool {
     fn description(&self) -> &str {
         "Report progress on a long-running task. Call this periodically to keep \
          the user informed of what you have accomplished and what you plan to do \
-         next. This does NOT end your turn — you should continue working after \
-         calling this."
+         next. You can also pass a delegated task_id to fetch durable task-event \
+         updates by stable id. This does NOT end your turn — you should continue \
+         working after calling this."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -30,9 +31,17 @@ impl Tool for ReportStatusTool {
                 "summary": {
                     "type": "string",
                     "description": "A brief status update describing what you just accomplished and what you plan to do next."
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Optional stable delegated task_id to fetch durable outcome updates."
+                },
+                "after_sequence": {
+                    "type": "integer",
+                    "description": "Optional task event replay cursor. Returns events with sequence > after_sequence."
                 }
             },
-            "required": ["summary"],
+            "required": ["summary", "task_id", "after_sequence"],
             "additionalProperties": false,
         })
     }

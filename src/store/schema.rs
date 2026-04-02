@@ -76,6 +76,63 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE INDEX idx_rate_limits_session ON rate_limits(session_id);
     "#,
+    r#"
+    CREATE TABLE tasks (
+        task_id                  TEXT PRIMARY KEY,
+        parent_task_id           TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+        title                    TEXT,
+        priority                 INTEGER NOT NULL,
+        policy_snapshot          TEXT NOT NULL,
+        parent_close_policy      TEXT NOT NULL,
+        recovery_checkpoint      TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL
+    );
+
+    CREATE INDEX idx_tasks_parent ON tasks(parent_task_id);
+    CREATE INDEX idx_tasks_priority ON tasks(priority, created_at);
+
+    CREATE TABLE task_edges (
+        task_id                  TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        depends_on_task_id       TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        created_at               TEXT NOT NULL,
+        PRIMARY KEY (task_id, depends_on_task_id),
+        CHECK (task_id <> depends_on_task_id)
+    );
+
+    CREATE INDEX idx_task_edges_depends_on ON task_edges(depends_on_task_id);
+
+    CREATE TABLE task_attempts (
+        attempt_id               TEXT PRIMARY KEY,
+        task_id                  TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        session_id               TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        status                   TEXT NOT NULL,
+        recovery_checkpoint      TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL
+    );
+
+    CREATE INDEX idx_task_attempts_task ON task_attempts(task_id, created_at);
+    CREATE INDEX idx_task_attempts_session ON task_attempts(session_id);
+
+    CREATE TABLE task_events (
+        sequence                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id                  TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        attempt_id               TEXT NOT NULL REFERENCES task_attempts(attempt_id) ON DELETE CASCADE,
+        session_id               TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        event_type               TEXT NOT NULL,
+        payload                  TEXT NOT NULL,
+        recorded_at              TEXT NOT NULL
+    );
+
+    CREATE INDEX idx_task_events_task_sequence ON task_events(task_id, sequence);
+    CREATE INDEX idx_task_events_attempt_sequence ON task_events(attempt_id, sequence);
+    "#,
+    r#"
+    ALTER TABLE tasks ADD COLUMN owner_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL;
+
+    CREATE INDEX idx_tasks_owner_session ON tasks(owner_session_id, created_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

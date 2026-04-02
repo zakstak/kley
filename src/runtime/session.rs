@@ -1,15 +1,20 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use uuid::Uuid;
 
+use super::settings::{InheritedSettingsSnapshot, spawn_autonomous_child_task_with_policy};
 use super::{SessionSettingsOverrides, canonical_settings_json};
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter};
 use crate::provider::{Provider, SendContext, TokenUsage, ToolCall, TurnResult, merge_token_usage};
-use crate::store::{NewSession, NewTurn, Session, SessionStatus, SharedStore, Store, Turn};
+use crate::store::{
+    AttemptLifecycleState, NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord, NewTaskEventRecord,
+    NewTurn, Session, SessionStatus, SharedStore, Store, TaskAttemptRecord, TaskEdgeRecord,
+    TaskEventRecord, TaskLifecycleState, TaskRecord, Turn,
+};
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::ToolRegistry;
 use crate::tools::editing::EditObservation;
@@ -18,6 +23,9 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
 const DEFAULT_ZAI_MODEL: &str = "glm-4.7";
 const REQUEST_COMPACTION_MARGIN_CHARS: usize = 8_192;
 const CONTEXT_OVERFLOW_RETRY_LIMIT: usize = 2;
+const CHILD_HANDOFF_SUMMARY_MAX_CHARS: usize = 12_000;
+const CHILD_HANDOFF_ARTIFACT_LIMIT: usize = 16;
+const CHILD_HANDOFF_ARTIFACT_ID_MAX_CHARS: usize = 256;
 
 /// Re-export Message from the ZAI provider for backwards compatibility.
 pub use crate::provider::zai::Message;
@@ -118,6 +126,363 @@ struct InitializedSessionState {
     session: Session,
     history: Vec<serde_json::Value>,
     turn_number: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildSessionBootstrapMode {
+    CreateNew,
+    LinkExisting { session_id: String },
+    Skip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChildHandoffContract {
+    pub summary: String,
+    pub artifact_ids: Vec<String>,
+    pub inherited_settings: InheritedSettingsSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegatedChildBootstrapOutcome {
+    Started {
+        child_session_id: Option<String>,
+        handoff: ChildHandoffContract,
+    },
+    InterruptedRetryable {
+        handoff: ChildHandoffContract,
+        error: String,
+    },
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DelegateTaskArgs {
+    parent_task_id: String,
+    #[serde(default)]
+    child_task_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default = "default_delegate_priority")]
+    priority: i64,
+    handoff_brief: String,
+    #[serde(default)]
+    artifact_ids: Vec<String>,
+    #[serde(default)]
+    requested_policy_json: Option<String>,
+    #[serde(default)]
+    after_sequence: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ReportStatusArgs {
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    after_sequence: Option<i64>,
+}
+
+fn default_delegate_priority() -> i64 {
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn bootstrap_delegated_child_session(
+    store: &Store,
+    task_id: &str,
+    attempt_id: &str,
+    parent_session_id: Option<&str>,
+    inherited_settings_override: Option<InheritedSettingsSnapshot>,
+    handoff_summary: &str,
+    artifact_ids: Vec<String>,
+    child_session_mode: ChildSessionBootstrapMode,
+) -> Result<DelegatedChildBootstrapOutcome> {
+    let attempt = TaskAttemptRecord::get(store, attempt_id)?;
+    if attempt.task_id != task_id {
+        anyhow::bail!("attempt {attempt_id} does not belong to task {task_id}");
+    }
+
+    let inherited_settings = if let Some(snapshot) = inherited_settings_override {
+        snapshot
+    } else if let Some(snapshot) =
+        inherited_settings_from_checkpoint(attempt.recovery_checkpoint.as_deref())?
+    {
+        snapshot
+    } else {
+        let parent_session_id = parent_session_id.context(
+            "delegated child bootstrap requires parent_session_id when checkpoint has no inherited_settings",
+        )?;
+        let parent_session = Session::get(store, parent_session_id)?;
+        InheritedSettingsSnapshot::from_parent_session(&parent_session)
+    };
+
+    let handoff = ChildHandoffContract {
+        summary: truncate(handoff_summary, CHILD_HANDOFF_SUMMARY_MAX_CHARS),
+        artifact_ids: bounded_artifact_ids(artifact_ids),
+        inherited_settings,
+    };
+
+    ensure_task_attempt_running(store, task_id, attempt_id)?;
+    persist_child_bootstrap_checkpoint(store, attempt_id, None, &handoff, "starting", None, false)?;
+
+    let child_session_result = (|| -> Result<Option<String>> {
+        match child_session_mode {
+            ChildSessionBootstrapMode::CreateNew => {
+                let mut child_session = Session::create(
+                    store,
+                    NewSession {
+                        model: handoff.inherited_settings.model.clone(),
+                        provider: handoff.inherited_settings.provider.clone(),
+                    },
+                )?;
+                let settings_json = handoff.inherited_settings.canonical_settings_json();
+                Session::update_settings(store, &child_session.id, &settings_json)?;
+                child_session.settings = Some(settings_json);
+
+                Turn::append(
+                    store,
+                    NewTurn {
+                        session_id: child_session.id.clone(),
+                        kind: "message".to_string(),
+                        role: "user".to_string(),
+                        content: child_bootstrap_message(&handoff),
+                        model: None,
+                        tokens_in: None,
+                        tokens_out: None,
+                    },
+                )?;
+
+                Ok(Some(child_session.id))
+            }
+            ChildSessionBootstrapMode::LinkExisting { session_id } => Ok(Some(session_id)),
+            ChildSessionBootstrapMode::Skip => Ok(None),
+        }
+    })();
+
+    match child_session_result {
+        Ok(child_session_id) => {
+            if let Some(session_id) = child_session_id.as_deref()
+                && let Err(err) = link_attempt_session(store, task_id, attempt_id, session_id)
+            {
+                let error = format!("{err:#}");
+                mark_bootstrap_interrupted_retryable(store, task_id, attempt_id, &handoff, &error)?;
+                return Ok(DelegatedChildBootstrapOutcome::InterruptedRetryable { handoff, error });
+            }
+
+            persist_child_bootstrap_checkpoint(
+                store,
+                attempt_id,
+                child_session_id.as_deref(),
+                &handoff,
+                "ready",
+                None,
+                false,
+            )?;
+
+            Ok(DelegatedChildBootstrapOutcome::Started {
+                child_session_id,
+                handoff,
+            })
+        }
+        Err(err) => {
+            let error = format!("{err:#}");
+            mark_bootstrap_interrupted_retryable(store, task_id, attempt_id, &handoff, &error)?;
+            Ok(DelegatedChildBootstrapOutcome::InterruptedRetryable { handoff, error })
+        }
+    }
+}
+
+fn inherited_settings_from_checkpoint(
+    recovery_checkpoint: Option<&str>,
+) -> Result<Option<InheritedSettingsSnapshot>> {
+    let Some(raw) = recovery_checkpoint else {
+        return Ok(None);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(raw)
+        .context("failed to parse delegated child recovery checkpoint JSON")?;
+    let Some(inherited_settings) = parsed
+        .get("child_bootstrap")
+        .and_then(|value| value.get("handoff"))
+        .and_then(|value| value.get("inherited_settings"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+
+    let snapshot: InheritedSettingsSnapshot = serde_json::from_value(inherited_settings.clone())
+        .context("failed to decode delegated child inherited_settings from checkpoint")?;
+    Ok(Some(snapshot))
+}
+
+fn run_immediate_transaction<T>(store: &Store, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    store
+        .conn()
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .context("failed to begin transaction")?;
+
+    match f() {
+        Ok(result) => {
+            store
+                .conn()
+                .execute_batch("COMMIT TRANSACTION")
+                .context("failed to commit transaction")?;
+            Ok(result)
+        }
+        Err(err) => {
+            let _ = store.conn().execute_batch("ROLLBACK TRANSACTION");
+            Err(err)
+        }
+    }
+}
+
+fn bounded_artifact_ids(artifact_ids: Vec<String>) -> Vec<String> {
+    artifact_ids
+        .into_iter()
+        .map(|id| truncate(id.trim(), CHILD_HANDOFF_ARTIFACT_ID_MAX_CHARS))
+        .filter(|id| !id.is_empty())
+        .take(CHILD_HANDOFF_ARTIFACT_LIMIT)
+        .collect()
+}
+
+fn child_bootstrap_message(handoff: &ChildHandoffContract) -> String {
+    let mut message = crate::compact::format_handoff_summary(&handoff.summary);
+    if !handoff.artifact_ids.is_empty() {
+        message.push_str("\n\nReferenced artifacts:\n");
+        for artifact_id in &handoff.artifact_ids {
+            message.push_str(&format!("- {artifact_id}\n"));
+        }
+    }
+    message.trim_end().to_string()
+}
+
+fn ensure_task_attempt_running(store: &Store, task_id: &str, attempt_id: &str) -> Result<()> {
+    let task_state = TaskRecord::current_state(store, task_id)?;
+    let attempt_state = TaskAttemptRecord::get(store, attempt_id)?.state()?;
+
+    if attempt_state == AttemptLifecycleState::Running && task_state != TaskLifecycleState::Running
+    {
+        TaskRecord::transition_state(store, task_id, attempt_id, TaskLifecycleState::Running)?;
+    }
+
+    Ok(())
+}
+
+fn mark_bootstrap_interrupted_retryable(
+    store: &Store,
+    task_id: &str,
+    attempt_id: &str,
+    handoff: &ChildHandoffContract,
+    error: &str,
+) -> Result<()> {
+    let attempt_state = TaskAttemptRecord::get(store, attempt_id)?.state()?;
+    if attempt_state == AttemptLifecycleState::Running {
+        TaskAttemptRecord::transition_state(store, attempt_id, AttemptLifecycleState::Interrupted)?;
+    }
+
+    let task_state = TaskRecord::current_state(store, task_id)?;
+    if task_state == TaskLifecycleState::Running {
+        TaskRecord::transition_state(store, task_id, attempt_id, TaskLifecycleState::Interrupted)?;
+    }
+
+    persist_child_bootstrap_checkpoint(
+        store,
+        attempt_id,
+        None,
+        handoff,
+        "interrupted",
+        Some(error),
+        true,
+    )?;
+
+    Ok(())
+}
+
+fn link_attempt_session(
+    store: &Store,
+    task_id: &str,
+    attempt_id: &str,
+    session_id: &str,
+) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    store
+        .conn()
+        .execute(
+            "UPDATE task_attempts SET session_id = ?1, updated_at = ?2 WHERE attempt_id = ?3",
+            (session_id, &now, attempt_id),
+        )
+        .context("failed to link child session to task attempt")?;
+
+    TaskEventRecord::append(
+        store,
+        NewTaskEventRecord {
+            task_id: task_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            session_id: Some(session_id.to_string()),
+            event_type: "attempt.child_session.linked".to_string(),
+            payload: serde_json::json!({
+                "session_id": session_id,
+            })
+            .to_string(),
+        },
+    )?;
+
+    Ok(())
+}
+
+fn persist_child_bootstrap_checkpoint(
+    store: &Store,
+    attempt_id: &str,
+    child_session_id: Option<&str>,
+    handoff: &ChildHandoffContract,
+    status: &str,
+    error: Option<&str>,
+    retryable: bool,
+) -> Result<()> {
+    let existing = TaskAttemptRecord::get(store, attempt_id)?.recovery_checkpoint;
+    let checkpoint = merge_child_bootstrap_checkpoint(
+        existing.as_deref(),
+        child_session_id,
+        handoff,
+        status,
+        error,
+        retryable,
+    )?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    store
+        .conn()
+        .execute(
+            "UPDATE task_attempts SET recovery_checkpoint = ?1, updated_at = ?2 WHERE attempt_id = ?3",
+            (&checkpoint, &now, attempt_id),
+        )
+        .context("failed to update delegated child bootstrap checkpoint")?;
+    Ok(())
+}
+
+fn merge_child_bootstrap_checkpoint(
+    existing: Option<&str>,
+    child_session_id: Option<&str>,
+    handoff: &ChildHandoffContract,
+    status: &str,
+    error: Option<&str>,
+    retryable: bool,
+) -> Result<String> {
+    let mut checkpoint = existing
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !checkpoint.is_object() {
+        checkpoint = serde_json::json!({});
+    }
+
+    checkpoint["child_bootstrap"] = serde_json::json!({
+        "status": status,
+        "retryable": retryable,
+        "child_session_id": child_session_id,
+        "handoff": handoff,
+        "error": error,
+    });
+
+    serde_json::to_string(&checkpoint).context("failed to serialize child bootstrap checkpoint")
 }
 
 impl<'a> SessionRuntime<'a> {
@@ -298,6 +663,158 @@ impl<'a> SessionRuntime<'a> {
 
     pub fn session_id(&self) -> &str {
         &self.session.id
+    }
+
+    fn execute_delegate_task_entrypoint(&self, args: &serde_json::Value) -> Result<String> {
+        let parsed: DelegateTaskArgs =
+            serde_json::from_value(args.clone()).context("invalid delegate_task arguments")?;
+        let parent_task_id = parsed.parent_task_id.trim();
+        if parent_task_id.is_empty() {
+            anyhow::bail!("delegate_task.parent_task_id must not be empty");
+        }
+
+        let handoff_brief = parsed.handoff_brief.trim();
+        if handoff_brief.is_empty() {
+            anyhow::bail!("delegate_task.handoff_brief must not be empty");
+        }
+
+        let child_task_id = parsed
+            .child_task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("task-{}", Uuid::new_v4()));
+
+        let requested_policy = parsed
+            .requested_policy_json
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let after_sequence = parsed.after_sequence.unwrap_or(0);
+
+        self.with_store(|store| {
+            run_immediate_transaction(store, || {
+                let task = spawn_autonomous_child_task_with_policy(
+                    store,
+                    &self.registry,
+                    parent_task_id,
+                    &child_task_id,
+                    parsed.title.clone(),
+                    parsed.priority,
+                    requested_policy.as_deref(),
+                )?;
+
+                TaskEdgeRecord::create(
+                    store,
+                    NewTaskEdgeRecord {
+                        task_id: task.task_id.clone(),
+                        depends_on_task_id: parent_task_id.to_string(),
+                    },
+                )?;
+
+                let attempt_id = Uuid::new_v4().to_string();
+                TaskAttemptRecord::create(
+                    store,
+                    NewTaskAttemptRecord {
+                        attempt_id: attempt_id.clone(),
+                        task_id: task.task_id.clone(),
+                        session_id: None,
+                        status: AttemptLifecycleState::Queued.to_string(),
+                        recovery_checkpoint: None,
+                    },
+                )?;
+
+                let bootstrap_outcome = bootstrap_delegated_child_session(
+                    store,
+                    &task.task_id,
+                    &attempt_id,
+                    Some(&self.session.id),
+                    None,
+                    handoff_brief,
+                    parsed.artifact_ids.clone(),
+                    ChildSessionBootstrapMode::CreateNew,
+                )?;
+
+                let events = TaskEventRecord::list_for_task(store, &task.task_id, after_sequence)?;
+                let latest_sequence = events
+                    .last()
+                    .map(|event| event.sequence)
+                    .unwrap_or(after_sequence);
+                let event_payloads = events.iter().map(task_event_payload).collect::<Vec<_>>();
+                let task_state = TaskRecord::current_state(store, &task.task_id)?;
+
+                let bootstrap_json = match bootstrap_outcome {
+                    DelegatedChildBootstrapOutcome::Started {
+                        child_session_id,
+                        handoff,
+                    } => serde_json::json!({
+                        "status": "started",
+                        "child_session_id": child_session_id,
+                        "handoff": handoff,
+                    }),
+                    DelegatedChildBootstrapOutcome::InterruptedRetryable { handoff, error } => {
+                        serde_json::json!({
+                            "status": "interrupted_retryable",
+                            "handoff": handoff,
+                            "error": error,
+                        })
+                    }
+                };
+
+                Ok(serde_json::json!({
+                    "task_id": task.task_id,
+                    "attempt_id": attempt_id,
+                    "task_state": task_state.to_string(),
+                    "bootstrap": bootstrap_json,
+                    "event_stream": {
+                        "after_sequence": after_sequence,
+                        "next_after_sequence": latest_sequence,
+                        "events": event_payloads,
+                    }
+                })
+                .to_string())
+            })
+        })
+    }
+
+    fn maybe_execute_task_status_report(&self, args: &serde_json::Value) -> Result<Option<String>> {
+        let parsed: ReportStatusArgs =
+            serde_json::from_value(args.clone()).context("invalid report_status arguments")?;
+
+        let Some(task_id) = parsed
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        let after_sequence = parsed.after_sequence.unwrap_or(0);
+        let summary = parsed.summary.unwrap_or_default();
+        self.with_store(|store| {
+            let task_state = TaskRecord::current_state(store, task_id)?;
+            let events = TaskEventRecord::list_for_task(store, task_id, after_sequence)?;
+            let next_after_sequence = events
+                .last()
+                .map(|event| event.sequence)
+                .unwrap_or(after_sequence);
+            let event_payloads = events.iter().map(task_event_payload).collect::<Vec<_>>();
+
+            Ok(Some(
+                serde_json::json!({
+                    "summary": summary,
+                    "task_id": task_id,
+                    "task_state": task_state.to_string(),
+                    "after_sequence": after_sequence,
+                    "next_after_sequence": next_after_sequence,
+                    "events": event_payloads,
+                })
+                .to_string(),
+            ))
+        })
     }
 
     pub fn loaded_turns(&self) -> usize {
@@ -533,28 +1050,46 @@ impl<'a> SessionRuntime<'a> {
                                 false,
                             )
                         } else {
-                            match self.registry.get(&call.name) {
-                                Some(tool) => {
-                                    if self.abort_signal.load(Ordering::Relaxed) {
-                                        return self.finish_aborted_submit(
-                                            &turn_id,
-                                            &message_id,
-                                            turn_number,
-                                        );
-                                    }
-                                    let args: serde_json::Value =
-                                        serde_json::from_str(&call.arguments).unwrap_or_default();
-                                    match tool.execute_with_result(args) {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&call.arguments).unwrap_or_default();
+                            if self.abort_signal.load(Ordering::Relaxed) {
+                                return self.finish_aborted_submit(
+                                    &turn_id,
+                                    &message_id,
+                                    turn_number,
+                                );
+                            }
+
+                            let runtime_handled: Option<Result<String>> = match call.name.as_str() {
+                                "delegate_task" => {
+                                    Some(self.execute_delegate_task_entrypoint(&args))
+                                }
+                                "report_status" => {
+                                    self.maybe_execute_task_status_report(&args)?.map(Ok)
+                                }
+                                _ => None,
+                            };
+
+                            if let Some(result) = runtime_handled {
+                                match result {
+                                    Ok(output) => (output, None, true),
+                                    Err(err) => (format!("Tool error: {err:#}"), None, false),
+                                }
+                            } else {
+                                match self.registry.get(&call.name) {
+                                    Some(tool) => match tool.execute_with_result(args) {
                                         Ok(result) => (
                                             result.output,
                                             result.edit_observations.first().cloned(),
                                             true,
                                         ),
                                         Err(e) => (format!("Tool error: {e:#}"), None, false),
-                                    }
-                                }
-                                None => {
-                                    (format!("Error: unknown tool '{}'", call.name), None, false)
+                                    },
+                                    None => (
+                                        format!("Error: unknown tool '{}'", call.name),
+                                        None,
+                                        false,
+                                    ),
                                 }
                             }
                         };
@@ -892,6 +1427,20 @@ fn tool_output_preview(output: &str, edit_observation: Option<&EditObservation>)
     truncate(output.lines().next().unwrap_or("(empty)"), 80)
 }
 
+fn task_event_payload(event: &TaskEventRecord) -> serde_json::Value {
+    let payload = serde_json::from_str::<serde_json::Value>(&event.payload)
+        .unwrap_or_else(|_| serde_json::json!({ "raw": event.payload }));
+    serde_json::json!({
+        "sequence": event.sequence,
+        "task_id": &event.task_id,
+        "attempt_id": &event.attempt_id,
+        "session_id": &event.session_id,
+        "event_type": &event.event_type,
+        "payload": payload,
+        "recorded_at": event.recorded_at.to_rfc3339(),
+    })
+}
+
 fn serialize_edit_observation_best_effort(observation: &EditObservation) -> serde_json::Value {
     serde_json::to_value(observation).unwrap_or_else(|_| {
         serde_json::json!({
@@ -1170,9 +1719,18 @@ pub fn history_items_from_turns(turns: &[Turn]) -> Vec<serde_json::Value> {
         match t.kind.as_str() {
             "function_call" => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t.content) {
+                    let call_id = v
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if call_id.is_empty() {
+                        continue;
+                    }
                     items.push(serde_json::json!({
                         "type": "function_call",
-                        "call_id": v.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "call_id": call_id,
                         "name": v.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                         "arguments": v.get("arguments").and_then(|v| v.as_str()).unwrap_or(""),
                     }));
@@ -1185,7 +1743,11 @@ pub fn history_items_from_turns(turns: &[Turn]) -> Vec<serde_json::Value> {
                     .get("call_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
+                    .trim()
                     .to_string();
+                if call_id.is_empty() {
+                    continue;
+                }
                 let output = parsed
                     .get("output")
                     .and_then(|v| v.as_str())
@@ -1232,7 +1794,7 @@ mod tests {
     use crate::compact::CompactConfig;
     use crate::events::event_channel;
     use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
-    use crate::store::{Session, Store, Turn};
+    use crate::store::{NewTaskRecord, Session, Store, TaskRecord, Turn};
     use crate::tools::editing::EditObservation;
     use crate::tools::{Tool, ToolExecutionResult, ToolRegistry};
     use serde_json::{Value, json};
@@ -1444,6 +2006,31 @@ mod tests {
     }
 
     #[test]
+    fn immediate_transaction_rolls_back_failed_delegate_steps() {
+        let store = Store::open_memory().unwrap();
+
+        let result: anyhow::Result<()> = run_immediate_transaction(&store, || {
+            TaskRecord::create(
+                &store,
+                NewTaskRecord {
+                    task_id: "tx-rollback-task".to_string(),
+                    parent_task_id: None,
+                    title: Some("tx-rollback-task".to_string()),
+                    priority: 1,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel_descendants".to_string(),
+                    recovery_checkpoint: None,
+                    owner_session_id: None,
+                },
+            )?;
+            anyhow::bail!("forced failure")
+        });
+
+        assert!(format!("{:#}", result.unwrap_err()).contains("forced failure"));
+        assert!(TaskRecord::get(&store, "tx-rollback-task").is_err());
+    }
+
+    #[test]
     fn retry_compact_config_tightens_budget() {
         let base = CompactConfig {
             threshold_chars: 800,
@@ -1549,6 +2136,62 @@ mod tests {
         assert_eq!(
             history[1].get("type").and_then(|v| v.as_str()),
             Some("function_call_output")
+        );
+    }
+
+    #[test]
+    fn history_items_from_turns_skips_function_call_without_call_id() {
+        let turns = vec![
+            Turn {
+                id: 1,
+                session_id: "s1".to_string(),
+                turn_number: 1,
+                kind: "function_call".to_string(),
+                role: "assistant".to_string(),
+                content: serde_json::json!({
+                    "name": "shell",
+                    "arguments": "{}",
+                })
+                .to_string(),
+                model: None,
+                tokens_in: None,
+                tokens_out: None,
+                created_at: chrono::Utc::now(),
+            },
+            Turn {
+                id: 2,
+                session_id: "s1".to_string(),
+                turn_number: 2,
+                kind: "function_call_output".to_string(),
+                role: "tool".to_string(),
+                content: serde_json::json!({
+                    "output": "ok",
+                })
+                .to_string(),
+                model: None,
+                tokens_in: None,
+                tokens_out: None,
+                created_at: chrono::Utc::now(),
+            },
+            Turn {
+                id: 3,
+                session_id: "s1".to_string(),
+                turn_number: 3,
+                kind: "message".to_string(),
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                model: None,
+                tokens_in: None,
+                tokens_out: None,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+
+        let items = history_items_from_turns(&turns);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].get("type").and_then(|v| v.as_str()),
+            Some("message")
         );
     }
 
