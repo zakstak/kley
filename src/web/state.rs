@@ -395,6 +395,8 @@ mod tests {
     use std::ffi::OsStr;
     use std::sync::OnceLock;
 
+    const TEST_AGE_MAX_WORK_FACTOR: u8 = 1;
+
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn env_lock() -> &'static Mutex<()> {
@@ -416,9 +418,10 @@ mod tests {
     fn write_credentials_with_passphrase(config_home: &std::path::Path, passphrase: &str) {
         let kley_config = config_home.join("kley");
         std::fs::create_dir_all(&kley_config).unwrap();
-        let backend = crate::auth::AgeFileBackend::new(
+        let backend = crate::auth::AgeFileBackend::with_max_work_factor(
             kley_config.join("credentials.age"),
             SecretString::from(passphrase.to_owned()),
+            TEST_AGE_MAX_WORK_FACTOR,
         );
         backend
             .save(&Credentials {
@@ -440,6 +443,10 @@ mod tests {
 
         set_env("XDG_CONFIG_HOME", temp.path());
         set_env("KLEY_PASSPHRASE", "new-pass");
+        set_env(
+            "KLEY_AGE_MAX_WORK_FACTOR",
+            TEST_AGE_MAX_WORK_FACTOR.to_string(),
+        );
         set_env(WEB_AUTH_AUTO_RESET_ENV, "1");
         remove_env("VAULT_ADDR");
         remove_env("VAULT_TOKEN");
@@ -456,6 +463,7 @@ mod tests {
         assert!(credentials.active_provider.is_none());
 
         remove_env(WEB_AUTH_AUTO_RESET_ENV);
+        remove_env("KLEY_AGE_MAX_WORK_FACTOR");
         remove_env("KLEY_PASSPHRASE");
         remove_env("XDG_CONFIG_HOME");
     }
@@ -468,6 +476,10 @@ mod tests {
 
         set_env("XDG_CONFIG_HOME", temp.path());
         set_env("KLEY_PASSPHRASE", "new-pass");
+        set_env(
+            "KLEY_AGE_MAX_WORK_FACTOR",
+            TEST_AGE_MAX_WORK_FACTOR.to_string(),
+        );
         set_env(WEB_AUTH_AUTO_RESET_ENV, "0");
         remove_env("VAULT_ADDR");
         remove_env("VAULT_TOKEN");
@@ -478,6 +490,7 @@ mod tests {
         assert!(snapshot.storage_error.is_some());
 
         remove_env(WEB_AUTH_AUTO_RESET_ENV);
+        remove_env("KLEY_AGE_MAX_WORK_FACTOR");
         remove_env("KLEY_PASSPHRASE");
         remove_env("XDG_CONFIG_HOME");
     }

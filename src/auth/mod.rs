@@ -520,6 +520,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    const TEST_AGE_MAX_WORK_FACTOR: u8 = 1;
+
     // ── In-memory backend for contract tests ────────────────────────────────
     // Tests should verify behavior through the trait, not specific backends.
 
@@ -634,7 +636,11 @@ mod tests {
     fn backend_contract_age_file() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let path = tmp_dir.path().join("creds.age");
-        let backend = AgeFileBackend::new(path, SecretString::from("test-passphrase".to_owned()));
+        let backend = AgeFileBackend::with_max_work_factor(
+            path,
+            SecretString::from("test-passphrase".to_owned()),
+            TEST_AGE_MAX_WORK_FACTOR,
+        );
         run_backend_contract(&backend);
     }
 
@@ -644,8 +650,11 @@ mod tests {
     fn secrets_are_not_readable_on_disk() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let path = tmp_dir.path().join("creds.age");
-        let backend =
-            AgeFileBackend::new(path.clone(), SecretString::from("my-passphrase".to_owned()));
+        let backend = AgeFileBackend::with_max_work_factor(
+            path.clone(),
+            SecretString::from("my-passphrase".to_owned()),
+            TEST_AGE_MAX_WORK_FACTOR,
+        );
 
         backend.save(&sample_openai_creds()).unwrap();
 
@@ -666,8 +675,16 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let path = tmp_dir.path().join("creds.age");
 
-        let writer = AgeFileBackend::new(path.clone(), SecretString::from("correct".to_owned()));
-        let reader = AgeFileBackend::new(path, SecretString::from("incorrect".to_owned()));
+        let writer = AgeFileBackend::with_max_work_factor(
+            path.clone(),
+            SecretString::from("correct".to_owned()),
+            TEST_AGE_MAX_WORK_FACTOR,
+        );
+        let reader = AgeFileBackend::with_max_work_factor(
+            path,
+            SecretString::from("incorrect".to_owned()),
+            TEST_AGE_MAX_WORK_FACTOR,
+        );
 
         writer.save(&sample_openai_creds()).unwrap();
         let err = reader.load().unwrap_err().to_string();
@@ -682,7 +699,11 @@ mod tests {
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let path = tmp_dir.path().join("creds.age");
-        let backend = AgeFileBackend::new(path.clone(), SecretString::from("correct".to_owned()));
+        let backend = AgeFileBackend::with_max_work_factor(
+            path.clone(),
+            SecretString::from("correct".to_owned()),
+            TEST_AGE_MAX_WORK_FACTOR,
+        );
 
         backend.save(&sample_openai_creds()).unwrap();
 
