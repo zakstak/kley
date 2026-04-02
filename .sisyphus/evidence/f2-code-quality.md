@@ -1,69 +1,57 @@
-# F2 Code Quality Review (Re-review)
+# F2 Code Quality Review
 
 Verdict: APPROVE
 
 Reviewed modules:
 
-- `src/runtime/session.rs`
-- `src/runtime/manager.rs`
-- `src/runtime/settings.rs`
 - `src/store/session.rs`
-- `src/store/mod.rs`
-- `src/main.rs`
-- `src/web/ws.rs`
-- `src/web/ws/snapshot.rs`
+- `src/store/turn.rs`
+- `src/pricing/models_dev.rs`
+- `src/pricing/mod.rs`
+- `src/runtime/session.rs`
+- `tests/store_session_usage.rs`
+- `tests/pricing_models_dev.rs`
 - `tests/runtime.rs`
-- `tests/store_concurrency.rs`
 
-Reassessment of prior blockers:
+Blocking-severity assessment:
 
-1. Durable recovery settings source: fixed.
+- No CRITICAL or MAJOR defects were found in the delivered plan scope.
+- Required behaviors are covered by code and tests: empty-session totals,
+  null-token handling, grouped effective-model slices, exact models.dev lookup,
+  micro-USD composition, explicit unpriced models, offline parser failures, and
+  `store_run` integration.
 
-- `src/runtime/session.rs:189-216` now prefers `inherited_settings_override`,
-  then durable checkpoint data via `inherited_settings_from_checkpoint(...)`,
-  and only falls back to a live parent session when durable settings are absent.
-- `src/runtime/manager.rs:1154-1180` and `src/runtime/manager.rs:1275-1322` now
-  recover `handoff.inherited_settings` from
-  `task_attempts.recovery_checkpoint.child_bootstrap` and pass it back into
-  bootstrap.
-- `tests/runtime.rs:2379-2505` specifically verifies recovery uses durable
-  inherited settings instead of changed live parent-session settings.
+Key quality findings:
 
-2. Atomic delegation creation / orphan-row safety: fixed.
+- `src/store/turn.rs::message_usage_slices_by_effective_model` correctly limits
+  aggregation to `kind = 'message'`, ignores rows where both token columns are
+  null, and zeroes individual null cells via SQL `COALESCE`.
+- `src/store/session.rs::Session::usage_totals_with_catalog` uses canonical
+  `sessions.provider`, exact model lookup, checked `u128` intermediate math, and
+  explicit `None` + sorted unique `unpriced_models` when any slice is not
+  priceable.
+- `src/pricing/models_dev.rs::ModelsDevCatalog::{from_reader, resolve}` keeps
+  semantics exact and does not treat partial pricing as free.
+- The runtime unblock patch in `src/runtime/session.rs` is localized and does
+  not couple back into the store/pricing query implementation.
 
-- `src/runtime/session.rs:321-339` adds `run_immediate_transaction(...)` using
-  `BEGIN IMMEDIATE` with rollback on error.
-- `src/runtime/session.rs:704-785` wraps child task creation, DAG edge creation,
-  attempt creation, and bootstrap/session-link work in that transaction, so a
-  downstream failure does not leave a committed orphan task row.
-- `src/runtime/session.rs:2015-2035` includes a rollback regression test proving
-  failed delegate steps do not leave the inserted task behind.
+Non-blocking observations:
 
-3. `max_concurrency` race safety: fixed enough for the current SQLite design.
+- `src/store/session.rs` uses `saturating_add` for token totals, which only
+  affects pathological overflow scenarios.
+- `src/store/session.rs::micros_per_million` still rounds from `f64`, which is
+  acceptable for current models.dev input but could merit stricter decimal
+  handling if future pricing precision increases.
+- `src/pricing/models_dev.rs` still has a minor dead-code warning around an
+  unused provider-id field noted in the notepad, but it does not affect
+  correctness.
 
-- `src/runtime/settings.rs:377-439` removes the separate count-then-insert
-  window and folds admission into a single
-  `INSERT ... SELECT ... WHERE COUNT(*) < max_concurrency` write.
-- That makes the policy check and child-row insert happen at one database write
-  boundary instead of two separate operations.
-- `tests/store_concurrency.rs:582-659` exercises concurrent spawns across
-  separate store connections and expects exactly one winner when
-  `max_concurrency = 1`.
+Verification basis:
 
-Additional review notes:
+- `cargo test --test store_session_usage` passed
+- `cargo test --test pricing_models_dev` passed
+- `cargo test` passed
+- `lsp_diagnostics` on reviewed files was clean
 
-- Identity separation still looks correct: `task_id` remains canonical,
-  `attempt_id` remains per execution, and `session_id` is still only an optional
-  execution artifact rather than task identity.
-- The fixes are localized and maintainable: durable recovery parsing lives in
-  one place, transactional delegation is explicit, and concurrency admission
-  logic is now narrower than the previous read-then-write path.
-- I did not find remaining hidden `task=session` coupling in the reviewed
-  recovery, scheduler, CLI, or websocket task-watch paths.
-
-Conclusion:
-
-- The three blocking issues from the prior review have been addressed in code
-  and covered by targeted regression tests.
-- Based on the reviewed implementation, this wave is acceptable from a
-  maintainability, concurrency-safety, and identity-separation standpoint.
+Conclusion: the implementation is correct, maintainable enough for the current
+scope, and free of blocking quality issues. APPROVE.

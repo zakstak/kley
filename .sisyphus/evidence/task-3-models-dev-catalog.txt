@@ -1,0 +1,9 @@
+   Compiling kley v0.1.0 (/home/zack/git/kley)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.36s
+     Running tests/pricing_models_dev.rs (target/debug/deps/pricing_models_dev-d951637d3a73f0fd)
+
+running 1 test
+test models_dev_catalog_resolves_exact_provider_and_model ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

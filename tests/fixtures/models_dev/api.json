@@ -1,0 +1,35 @@
+{
+  "openai": {
+    "id": "openai",
+    "models": {
+      "gpt-4-mini": {
+        "id": "gpt-4-mini",
+        "cost": {
+          "input": 0.02,
+          "output": 0.04
+        }
+      },
+      "gpt-4-mini-partial": {
+        "id": "gpt-4-mini-partial",
+        "cost": {
+          "input": 0.015
+        }
+      },
+      "unpriced-model": {
+        "id": "unpriced-model"
+      }
+    }
+  },
+  "anthropic": {
+    "id": "anthropic",
+    "models": {
+      "claude-3-mini": {
+        "id": "claude-3-mini",
+        "cost": {
+          "input": 0.03,
+          "output": 0.06
+        }
+      }
+    }
+  }
+}

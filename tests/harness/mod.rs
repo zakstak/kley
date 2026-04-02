@@ -104,6 +104,11 @@ impl TurnBuilder {
         self
     }
 
+    pub fn kind(mut self, kind: &str) -> Self {
+        self.kind = kind.into();
+        self
+    }
+
     pub fn model(mut self, model: &str) -> Self {
         self.model = Some(model.into());
         self

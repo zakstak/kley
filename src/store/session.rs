@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 /// Lightweight error for row-mapping failures (implements `std::error::Error`).
@@ -18,6 +18,8 @@ impl fmt::Display for RowParseError {
 impl std::error::Error for RowParseError {}
 
 use super::Store;
+use super::turn;
+use crate::pricing::ModelsDevCatalog;
 
 /// Session status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +74,33 @@ pub struct Session {
     pub settings: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Public contract describing aggregated session usage totals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionUsageTotals {
+    pub session_id: String,
+    pub provider: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd_micros: Option<u64>,
+    pub unpriced_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionUsageSlice {
+    pub effective_model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+pub trait SessionUsageCatalog {
+    fn record_slice(&self, slice: &SessionUsageSlice);
+}
+
+impl SessionUsageCatalog for () {
+    fn record_slice(&self, _slice: &SessionUsageSlice) {}
 }
 
 /// Data needed to create a new session.
@@ -394,6 +423,114 @@ impl Session {
             settings: None,
             created_at: now,
             updated_at: now,
+        })
+    }
+
+    const MICROS_PER_MILLION: u128 = 1_000_000;
+
+    fn micros_per_million(price_usd_per_million: f64) -> Option<u128> {
+        if !price_usd_per_million.is_finite() || price_usd_per_million < 0.0 {
+            return None;
+        }
+
+        let micros = price_usd_per_million * (Self::MICROS_PER_MILLION as f64);
+        if !micros.is_finite() {
+            return None;
+        }
+
+        let micros_rounded = micros.round();
+        if micros_rounded < 0.0 || micros_rounded > (u128::MAX as f64) {
+            return None;
+        }
+
+        Some(micros_rounded as u128)
+    }
+
+    fn tokens_cost(tokens: u64, price_micros_per_million: u128) -> Option<u128> {
+        let tokens = u128::from(tokens);
+        tokens
+            .checked_mul(price_micros_per_million)?
+            .checked_div(Self::MICROS_PER_MILLION)
+    }
+
+    /// Derived session usage totals entry point.
+    pub fn usage_totals_with_catalog<C>(
+        store: &Store,
+        session_id: &str,
+        catalog: &C,
+        pricing_catalog: &ModelsDevCatalog,
+    ) -> Result<SessionUsageTotals>
+    where
+        C: SessionUsageCatalog + ?Sized,
+    {
+        let session = Self::get(store, session_id)?;
+        let slices = turn::message_usage_slices_by_effective_model(store, session_id)?;
+
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        let mut total_cost = 0u128;
+        let mut all_priced = true;
+        let mut unpriced_models = BTreeSet::new();
+
+        for slice in &slices {
+            catalog.record_slice(slice);
+            input_tokens = input_tokens.saturating_add(slice.input_tokens);
+            output_tokens = output_tokens.saturating_add(slice.output_tokens);
+
+            match pricing_catalog.resolve(&session.provider, &slice.effective_model) {
+                Some(pricing) => {
+                    let input_price = Self::micros_per_million(pricing.cost.input);
+                    let output_price = Self::micros_per_million(pricing.cost.output);
+
+                    if let (Some(input_price), Some(output_price)) = (input_price, output_price) {
+                        let input_cost = Self::tokens_cost(slice.input_tokens, input_price)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "session cost overflowed while pricing a slice input"
+                                )
+                            })?;
+                        let output_cost = Self::tokens_cost(slice.output_tokens, output_price)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "session cost overflowed while pricing a slice output"
+                                )
+                            })?;
+
+                        total_cost = total_cost
+                            .checked_add(input_cost)
+                            .and_then(|sum| sum.checked_add(output_cost))
+                            .ok_or_else(|| anyhow::anyhow!("session cost overflowed u128"))?;
+                    } else {
+                        unpriced_models.insert(slice.effective_model.clone());
+                        all_priced = false;
+                    }
+                }
+                None => {
+                    unpriced_models.insert(slice.effective_model.clone());
+                    all_priced = false;
+                }
+            }
+        }
+
+        let total_tokens = input_tokens.saturating_add(output_tokens);
+        let cost_usd_micros = if all_priced {
+            Some(
+                total_cost
+                    .try_into()
+                    .context("session cost overflowed u64")?,
+            )
+        } else {
+            None
+        };
+
+        Ok(SessionUsageTotals {
+            session_id: session.id,
+            provider: session.provider,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cost_usd_micros,
+            unpriced_models: unpriced_models.into_iter().collect(),
         })
     }
 

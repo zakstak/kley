@@ -6,8 +6,9 @@ mod turn;
 
 pub use session::{
     AttemptLifecycleState, NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord, NewTaskEventRecord,
-    NewTaskRecord, Session, SessionStatus, TaskAttemptRecord, TaskEdgeRecord, TaskEventRecord,
-    TaskLifecycleState, TaskRecord,
+    NewTaskRecord, Session, SessionStatus, SessionUsageCatalog, SessionUsageSlice,
+    SessionUsageTotals, TaskAttemptRecord, TaskEdgeRecord, TaskEventRecord, TaskLifecycleState,
+    TaskRecord,
 };
 pub use turn::{NewTurn, Turn};
 

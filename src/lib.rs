@@ -9,6 +9,7 @@ pub mod compact;
 pub mod events;
 pub mod harness;
 pub mod preflight;
+pub mod pricing;
 pub mod provider;
 pub mod runtime;
 pub mod skills;

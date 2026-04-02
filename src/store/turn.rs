@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
 use super::Store;
+use super::session::SessionUsageSlice;
 
 /// A persisted conversation turn.
 #[derive(Debug, Clone)]
@@ -125,4 +126,41 @@ impl Turn {
                 })?,
         })
     }
+}
+
+pub(crate) fn message_usage_slices_by_effective_model(
+    store: &Store,
+    session_id: &str,
+) -> Result<Vec<SessionUsageSlice>> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT COALESCE(turns.model, sessions.model) AS effective_model,
+                COALESCE(SUM(COALESCE(turns.tokens_in, 0)), 0) AS tokens_in,
+                COALESCE(SUM(COALESCE(turns.tokens_out, 0)), 0) AS tokens_out
+             FROM turns
+             JOIN sessions ON sessions.id = turns.session_id
+             WHERE turns.session_id = ?1
+               AND turns.kind = 'message'
+               AND (turns.tokens_in IS NOT NULL OR turns.tokens_out IS NOT NULL)
+             GROUP BY effective_model
+             ORDER BY effective_model",
+        )
+        .context("failed to prepare usage slice aggregation")?;
+
+    let rows = stmt
+        .query_map([session_id], |row| {
+            let model: String = row.get(0)?;
+            let input: i64 = row.get(1)?;
+            let output: i64 = row.get(2)?;
+            Ok(SessionUsageSlice {
+                effective_model: model,
+                input_tokens: if input < 0 { 0 } else { input as u64 },
+                output_tokens: if output < 0 { 0 } else { output as u64 },
+            })
+        })
+        .context("failed to query usage slices")?;
+
+    let slices = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(slices)
 }

@@ -278,6 +278,12 @@ pub fn bootstrap_delegated_child_session(
                 None,
                 false,
             )?;
+            append_child_bootstrap_ready_event(
+                store,
+                task_id,
+                attempt_id,
+                child_session_id.as_deref(),
+            )?;
 
             Ok(DelegatedChildBootstrapOutcome::Started {
                 child_session_id,
@@ -375,12 +381,26 @@ fn mark_bootstrap_interrupted_retryable(
     error: &str,
 ) -> Result<()> {
     let attempt_state = TaskAttemptRecord::get(store, attempt_id)?.state()?;
-    if attempt_state == AttemptLifecycleState::Running {
+    if matches!(
+        attempt_state,
+        AttemptLifecycleState::Queued
+            | AttemptLifecycleState::Ready
+            | AttemptLifecycleState::Running
+            | AttemptLifecycleState::Blocked
+            | AttemptLifecycleState::CancelRequested
+    ) {
         TaskAttemptRecord::transition_state(store, attempt_id, AttemptLifecycleState::Interrupted)?;
     }
 
     let task_state = TaskRecord::current_state(store, task_id)?;
-    if task_state == TaskLifecycleState::Running {
+    if matches!(
+        task_state,
+        TaskLifecycleState::Queued
+            | TaskLifecycleState::Ready
+            | TaskLifecycleState::Running
+            | TaskLifecycleState::Blocked
+            | TaskLifecycleState::CancelRequested
+    ) {
         TaskRecord::transition_state(store, task_id, attempt_id, TaskLifecycleState::Interrupted)?;
     }
 
@@ -421,6 +441,30 @@ fn link_attempt_session(
             event_type: "attempt.child_session.linked".to_string(),
             payload: serde_json::json!({
                 "session_id": session_id,
+            })
+            .to_string(),
+        },
+    )?;
+
+    Ok(())
+}
+
+fn append_child_bootstrap_ready_event(
+    store: &Store,
+    task_id: &str,
+    attempt_id: &str,
+    child_session_id: Option<&str>,
+) -> Result<()> {
+    TaskEventRecord::append(
+        store,
+        NewTaskEventRecord {
+            task_id: task_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            session_id: child_session_id.map(str::to_string),
+            event_type: "attempt.child_session.bootstrap.ready".to_string(),
+            payload: serde_json::json!({
+                "status": "ready",
+                "child_session_id": child_session_id,
             })
             .to_string(),
         },
