@@ -1712,6 +1712,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel_descendants".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: None,
                 },
             )?;
             let replay_attempt = TaskAttemptRecord::create(
@@ -1735,6 +1736,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel_descendants".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: None,
                 },
             )?;
             let noise_attempt = TaskAttemptRecord::create(
@@ -1815,6 +1817,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel_descendants".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: None,
                 },
             )?;
             let attempt = TaskAttemptRecord::create(
@@ -1908,6 +1911,7 @@ mod web {
                         })
                         .to_string(),
                     ),
+                    owner_session_id: Some(parent_session.id.clone()),
                 },
             )?;
             TaskRecord::create(
@@ -1920,6 +1924,7 @@ mod web {
                     policy_snapshot: serde_json::json!({"budget": 1}).to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(parent_session.id.clone()),
                 },
             )?;
             TaskRecord::create(
@@ -1932,6 +1937,7 @@ mod web {
                     policy_snapshot: serde_json::json!({"budget": 2}).to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(parent_session.id.clone()),
                 },
             )?;
             TaskRecord::create(
@@ -1944,6 +1950,7 @@ mod web {
                     policy_snapshot: serde_json::json!({"budget": 99}).to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(unrelated_session_id.clone()),
                 },
             )?;
 
@@ -2204,6 +2211,7 @@ mod web {
                     policy_snapshot: serde_json::json!({"budget": 4}).to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(parent_session.id.clone()),
                 },
             )?;
             TaskRecord::create(
@@ -2216,6 +2224,7 @@ mod web {
                     policy_snapshot: serde_json::json!({"budget": 1}).to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(unrelated_session_id.clone()),
                 },
             )?;
 
@@ -2480,6 +2489,377 @@ mod web {
         );
     }
 
+    pub(super) async fn task_watch_keeps_runtime_events_flowing() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let session_id = store::store_run(&store, |s| {
+            let session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(
+                s,
+                &session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "task-watch-live".to_string(),
+                    parent_task_id: None,
+                    title: Some("task-watch-live".to_string()),
+                    priority: 5,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
+                },
+            )?;
+            Ok(session.id)
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={session_id}")).await;
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert_eq!(bootstrap["session_id"], session_id);
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.watch","request_id":"req-watch-live","session_id":"{}","task_id":"task-watch-live"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let watch_ack = recv_until_type(&mut socket, "response.ok").await;
+        assert_eq!(watch_ack["request_id"], "req-watch-live");
+        let _ = recv_until_type(&mut socket, "task.list.snapshot").await;
+        let _ = recv_until_type(&mut socket, "task.detail.snapshot").await;
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"prompt.submit","request_id":"req-watch-prompt","session_id":"{}","prompt":"hello while watching"}}"#,
+                    session_id
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let prompt_ack = recv_until_type(&mut socket, "response.ok").await;
+        assert_eq!(prompt_ack["request_id"], "req-watch-prompt");
+
+        let started = recv_until_type(&mut socket, "turn.started").await;
+        assert_eq!(started["request_id"], "req-watch-prompt");
+        let delta = recv_until_type(&mut socket, "message.delta").await;
+        assert_eq!(delta["request_id"], "req-watch-prompt");
+        let completed = recv_until_type(&mut socket, "turn.completed").await;
+        assert_eq!(completed["request_id"], "req-watch-prompt");
+    }
+
+    pub(super) async fn task_commands_reject_cross_session_access() {
+        let state = test_state();
+        let store = state.store.clone();
+
+        let attached_session_id = store::store_run(&store, |s| {
+            let attached_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(
+                s,
+                &attached_session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
+
+            let foreign_session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            let foreign_session_id = foreign_session.id.clone();
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "watch-foreign".to_string(),
+                    parent_task_id: None,
+                    title: Some("watch-foreign".to_string()),
+                    priority: 10,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                    owner_session_id: Some(foreign_session_id.clone()),
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-watch-foreign-1".to_string(),
+                    task_id: "watch-foreign".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Running.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "watch-foreign",
+                "attempt-watch-foreign-1",
+                TaskLifecycleState::Running,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "cancel-foreign".to_string(),
+                    parent_task_id: None,
+                    title: Some("cancel-foreign".to_string()),
+                    priority: 20,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel_descendants".to_string(),
+                    recovery_checkpoint: None,
+                    owner_session_id: Some(foreign_session_id.clone()),
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-cancel-foreign-1".to_string(),
+                    task_id: "cancel-foreign".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-cancel-foreign-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "cancel-foreign",
+                "attempt-cancel-foreign-1",
+                TaskLifecycleState::Running,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "retry-foreign".to_string(),
+                    parent_task_id: None,
+                    title: Some("retry-foreign".to_string()),
+                    priority: 30,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                    owner_session_id: Some(foreign_session_id.clone()),
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-retry-foreign-1".to_string(),
+                    task_id: "retry-foreign".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-retry-foreign-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "retry-foreign",
+                "attempt-retry-foreign-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-retry-foreign-1",
+                AttemptLifecycleState::Failed,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "retry-foreign",
+                "attempt-retry-foreign-1",
+                TaskLifecycleState::Failed,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "resume-foreign".to_string(),
+                    parent_task_id: None,
+                    title: Some("resume-foreign".to_string()),
+                    priority: 40,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                    owner_session_id: Some(foreign_session_id.clone()),
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-resume-foreign-1".to_string(),
+                    task_id: "resume-foreign".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: Some(r#"{"resume":"checkpoint"}"#.to_string()),
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-resume-foreign-1",
+                AttemptLifecycleState::Running,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "resume-foreign",
+                "attempt-resume-foreign-1",
+                TaskLifecycleState::Running,
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-resume-foreign-1",
+                AttemptLifecycleState::Interrupted,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "resume-foreign",
+                "attempt-resume-foreign-1",
+                TaskLifecycleState::Interrupted,
+            )?;
+
+            TaskRecord::create(
+                s,
+                NewTaskRecord {
+                    task_id: "reprio-foreign".to_string(),
+                    parent_task_id: None,
+                    title: Some("reprio-foreign".to_string()),
+                    priority: 50,
+                    policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
+                    parent_close_policy: "request_cancel".to_string(),
+                    recovery_checkpoint: None,
+                    owner_session_id: Some(foreign_session_id.clone()),
+                },
+            )?;
+            TaskAttemptRecord::create(
+                s,
+                NewTaskAttemptRecord {
+                    attempt_id: "attempt-reprio-foreign-1".to_string(),
+                    task_id: "reprio-foreign".to_string(),
+                    session_id: None,
+                    status: AttemptLifecycleState::Queued.to_string(),
+                    recovery_checkpoint: None,
+                },
+            )?;
+            TaskAttemptRecord::transition_state(
+                s,
+                "attempt-reprio-foreign-1",
+                AttemptLifecycleState::Ready,
+            )?;
+            TaskRecord::transition_state(
+                s,
+                "reprio-foreign",
+                "attempt-reprio-foreign-1",
+                TaskLifecycleState::Ready,
+            )?;
+
+            Ok(attached_session.id)
+        })
+        .await
+        .unwrap();
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket = connect_ws_path(
+            server.addr,
+            &format!("/ws?session_id={attached_session_id}"),
+        )
+        .await;
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"task.watch","request_id":"req-watch-foreign","session_id":"{}","task_id":"watch-foreign"}}"#,
+                    attached_session_id
+                ),
+            ))
+            .await
+            .unwrap();
+        let watch_error = recv_until_type(&mut socket, "response.error").await;
+        assert_eq!(watch_error["request_id"], "req-watch-foreign");
+        assert_eq!(watch_error["error"]["code"], "task_not_found");
+
+        for (request_id, command, task_id, action) in [
+            (
+                "req-cancel-foreign",
+                format!(
+                    r#"{{"type":"task.cancel","request_id":"req-cancel-foreign","session_id":"{}","task_id":"cancel-foreign"}}"#,
+                    attached_session_id
+                ),
+                "cancel-foreign",
+                "cancel",
+            ),
+            (
+                "req-retry-foreign",
+                format!(
+                    r#"{{"type":"task.retry","request_id":"req-retry-foreign","session_id":"{}","task_id":"retry-foreign"}}"#,
+                    attached_session_id
+                ),
+                "retry-foreign",
+                "retry",
+            ),
+            (
+                "req-resume-foreign",
+                format!(
+                    r#"{{"type":"task.resume","request_id":"req-resume-foreign","session_id":"{}","task_id":"resume-foreign"}}"#,
+                    attached_session_id
+                ),
+                "resume-foreign",
+                "resume",
+            ),
+            (
+                "req-reprio-foreign",
+                format!(
+                    r#"{{"type":"task.reprioritize","request_id":"req-reprio-foreign","session_id":"{}","task_id":"reprio-foreign","priority":99}}"#,
+                    attached_session_id
+                ),
+                "reprio-foreign",
+                "reprioritize",
+            ),
+        ] {
+            socket.send(Message::Text(command)).await.unwrap();
+            let error = recv_until_type(&mut socket, "response.error").await;
+            assert_eq!(error["request_id"], request_id);
+            assert_eq!(error["error"]["code"], "task_not_found");
+            assert_eq!(error["error"]["details"]["action"], action);
+            assert_eq!(error["error"]["details"]["task_id"], task_id);
+        }
+    }
+
     pub(super) async fn task_control_commands_apply_runtime_lifecycle_helpers() {
         let state = test_state();
         let store = state.store.clone();
@@ -2508,6 +2888,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel_descendants".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskRecord::create(
@@ -2520,6 +2901,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel_descendants".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskEdgeRecord::create(
@@ -2571,6 +2953,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskAttemptRecord::create(
@@ -2616,6 +2999,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskAttemptRecord::create(
@@ -2661,6 +3045,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskAttemptRecord::create(
@@ -2867,6 +3252,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskAttemptRecord::create(
@@ -2912,6 +3298,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskAttemptRecord::create(
@@ -2946,6 +3333,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskAttemptRecord::create(
@@ -2991,6 +3379,7 @@ mod web {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: Some(session.id.clone()),
                 },
             )?;
             TaskAttemptRecord::create(
@@ -3129,6 +3518,16 @@ async fn task_snapshot_includes_graph_and_attempt_state() {
 #[tokio::test]
 async fn task_watch_reconnect_from_cursor_recovers_missed_events() {
     web::task_watch_reconnect_from_cursor_recovers_missed_events().await;
+}
+
+#[tokio::test]
+async fn task_watch_keeps_runtime_events_flowing() {
+    web::task_watch_keeps_runtime_events_flowing().await;
+}
+
+#[tokio::test]
+async fn task_commands_reject_cross_session_access() {
+    web::task_commands_reject_cross_session_access().await;
 }
 
 #[tokio::test]

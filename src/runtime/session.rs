@@ -2022,6 +2022,7 @@ mod tests {
                     policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                     parent_close_policy: "request_cancel_descendants".to_string(),
                     recovery_checkpoint: None,
+                    owner_session_id: None,
                 },
             )?;
             anyhow::bail!("forced failure")

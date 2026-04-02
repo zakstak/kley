@@ -1256,9 +1256,6 @@ async fn handle_socket(
                 }
             }
             runtime_event = next_runtime_event(&mut runtime_events) => {
-                if task_watch.is_some() {
-                    continue;
-                }
                 if let Some(envelope) = runtime_event {
                     let Some(ui_event) = runtime_event_to_ui_event(
                         &envelope.event,
@@ -1387,16 +1384,31 @@ fn task_control_error(action: &str, task_id: &str, error: anyhow::Error) -> Resp
     }
 }
 
+async fn ensure_task_owned_by_session(
+    state: &WebAppState,
+    session_id: &str,
+    task_id: &str,
+) -> anyhow::Result<TaskRecord> {
+    let store_ref = state.store.clone();
+    let session_id_owned = session_id.to_string();
+    let task_id_owned = task_id.to_string();
+    store::store_run(&store_ref, move |store| {
+        TaskRecord::get_owned_by_session(store, &task_id_owned, &session_id_owned)
+    })
+    .await
+}
+
 async fn cancel_task_via_api(
     state: &WebAppState,
     session_id: &str,
     task_id: &str,
 ) -> anyhow::Result<TaskControlResponseData> {
+    ensure_task_owned_by_session(state, session_id, task_id).await?;
     validate_cancelable_task_for_api(state, task_id).await?;
     let affected_task_ids = state
         .runtime_manager
         .cancel_task_graph(&state.store, task_id)?;
-    let (_, task_state) = task_snapshot_for_control(state, task_id).await?;
+    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
     Ok(TaskControlResponseData {
         action: "cancel".to_string(),
         session_id: session_id.to_string(),
@@ -1413,8 +1425,9 @@ async fn retry_task_via_api(
     session_id: &str,
     task_id: &str,
 ) -> anyhow::Result<TaskControlResponseData> {
+    ensure_task_owned_by_session(state, session_id, task_id).await?;
     let new_attempt_id = state.runtime_manager.retry_task(&state.store, task_id)?;
-    let (_, task_state) = task_snapshot_for_control(state, task_id).await?;
+    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
     Ok(TaskControlResponseData {
         action: "retry".to_string(),
         session_id: session_id.to_string(),
@@ -1431,8 +1444,9 @@ async fn resume_task_via_api(
     session_id: &str,
     task_id: &str,
 ) -> anyhow::Result<TaskControlResponseData> {
+    ensure_task_owned_by_session(state, session_id, task_id).await?;
     let new_attempt_id = state.runtime_manager.resume_task(&state.store, task_id)?;
-    let (_, task_state) = task_snapshot_for_control(state, task_id).await?;
+    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
     Ok(TaskControlResponseData {
         action: "resume".to_string(),
         session_id: session_id.to_string(),
@@ -1450,10 +1464,11 @@ async fn reprioritize_task_via_api(
     task_id: &str,
     priority: i64,
 ) -> anyhow::Result<TaskControlResponseData> {
+    ensure_task_owned_by_session(state, session_id, task_id).await?;
     state
         .runtime_manager
         .reprioritize_task(&state.store, task_id, priority)?;
-    let (task, task_state) = task_snapshot_for_control(state, task_id).await?;
+    let (task, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
     Ok(TaskControlResponseData {
         action: "reprioritize".to_string(),
         session_id: session_id.to_string(),
@@ -1467,12 +1482,14 @@ async fn reprioritize_task_via_api(
 
 async fn task_snapshot_for_control(
     state: &WebAppState,
+    session_id: &str,
     task_id: &str,
 ) -> anyhow::Result<(TaskRecord, TaskLifecycleState)> {
     let store_ref = state.store.clone();
+    let session_id_owned = session_id.to_string();
     let task_id_owned = task_id.to_string();
     store::store_run(&store_ref, move |store| {
-        let task = TaskRecord::get(store, &task_id_owned)?;
+        let task = TaskRecord::get_owned_by_session(store, &task_id_owned, &session_id_owned)?;
         let task_state = TaskRecord::current_state(store, &task_id_owned)?;
         Ok((task, task_state))
     })

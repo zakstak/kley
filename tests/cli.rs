@@ -132,6 +132,7 @@ fn seed_task_graph(home_dir: &Path) -> SeededGraph {
                     })
                     .to_string(),
                 ),
+                owner_session_id: None,
             },
         )
         .unwrap();
@@ -145,6 +146,7 @@ fn seed_task_graph(home_dir: &Path) -> SeededGraph {
                 policy_snapshot: serde_json::json!({"budget": 1}).to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )
         .unwrap();
@@ -158,6 +160,7 @@ fn seed_task_graph(home_dir: &Path) -> SeededGraph {
                 policy_snapshot: serde_json::json!({"budget": 2}).to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )
         .unwrap();
@@ -171,6 +174,7 @@ fn seed_task_graph(home_dir: &Path) -> SeededGraph {
                 policy_snapshot: serde_json::json!({"budget": 99}).to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )
         .unwrap();
@@ -346,6 +350,7 @@ fn seed_control_tasks(home_dir: &Path) {
                 policy_snapshot: serde_json::json!({"mode": "auto"}).to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )
         .unwrap();
@@ -378,6 +383,7 @@ fn seed_control_tasks(home_dir: &Path) {
                 policy_snapshot: serde_json::json!({"mode": "auto"}).to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )
         .unwrap();
@@ -417,6 +423,7 @@ fn seed_control_tasks(home_dir: &Path) {
                 policy_snapshot: serde_json::json!({"mode": "auto"}).to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )
         .unwrap();

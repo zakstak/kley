@@ -128,6 +128,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_task_events_task_sequence ON task_events(task_id, sequence);
     CREATE INDEX idx_task_events_attempt_sequence ON task_events(attempt_id, sequence);
     "#,
+    r#"
+    ALTER TABLE tasks ADD COLUMN owner_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL;
+
+    CREATE INDEX idx_tasks_owner_session ON tasks(owner_session_id, created_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

@@ -185,6 +185,7 @@ async fn task_rows_persist_policy_and_recovery_metadata() {
                 policy_snapshot: r#"{"max_depth":3,"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: Some(r#"{"checkpoint":"task-level"}"#.to_string()),
+                owner_session_id: None,
             },
         )?;
 
@@ -288,6 +289,7 @@ async fn task_claim_is_single_winner_under_race() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
 
@@ -386,6 +388,7 @@ async fn expired_task_lease_is_recoverable_without_double_run() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
 
@@ -613,6 +616,7 @@ async fn autonomous_spawn_max_concurrency_is_atomic_across_store_connections() {
                 .to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )
         .unwrap();
@@ -674,6 +678,7 @@ async fn cancel_retry_resume_and_reprioritize_are_serialized() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
         TaskRecord::create(
@@ -686,6 +691,7 @@ async fn cancel_retry_resume_and_reprioritize_are_serialized() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
         TaskRecord::create(
@@ -698,6 +704,7 @@ async fn cancel_retry_resume_and_reprioritize_are_serialized() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
         TaskEdgeRecord::create(
@@ -776,6 +783,7 @@ async fn cancel_retry_resume_and_reprioritize_are_serialized() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
         let retry_attempt = TaskAttemptRecord::create(
@@ -811,6 +819,7 @@ async fn cancel_retry_resume_and_reprioritize_are_serialized() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
         let resume_attempt = TaskAttemptRecord::create(
@@ -846,6 +855,7 @@ async fn cancel_retry_resume_and_reprioritize_are_serialized() {
                 policy_snapshot: r#"{"mode":"auto"}"#.to_string(),
                 parent_close_policy: "request_cancel_descendants".to_string(),
                 recovery_checkpoint: None,
+                owner_session_id: None,
             },
         )?;
         TaskAttemptRecord::create(

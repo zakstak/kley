@@ -89,6 +89,7 @@ pub struct TaskRecord {
     pub policy_snapshot: String,
     pub parent_close_policy: String,
     pub recovery_checkpoint: Option<String>,
+    pub owner_session_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -101,6 +102,7 @@ pub struct NewTaskRecord {
     pub policy_snapshot: String,
     pub parent_close_policy: String,
     pub recovery_checkpoint: Option<String>,
+    pub owner_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,8 +550,8 @@ impl TaskRecord {
         store
             .conn()
             .execute(
-                "INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 (
                     &new.task_id,
                     &new.parent_task_id,
@@ -558,6 +560,7 @@ impl TaskRecord {
                     &new.policy_snapshot,
                     &new.parent_close_policy,
                     &new.recovery_checkpoint,
+                    &new.owner_session_id,
                     &now_str,
                     &now_str,
                 ),
@@ -572,6 +575,7 @@ impl TaskRecord {
             policy_snapshot: new.policy_snapshot,
             parent_close_policy: new.parent_close_policy,
             recovery_checkpoint: new.recovery_checkpoint,
+            owner_session_id: new.owner_session_id,
             created_at: now,
             updated_at: now,
         })
@@ -581,7 +585,7 @@ impl TaskRecord {
         store
             .conn()
             .query_row(
-                "SELECT task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, created_at, updated_at
+                "SELECT task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at
                  FROM tasks WHERE task_id = ?1",
                 [task_id],
                 Self::from_row,
@@ -589,9 +593,25 @@ impl TaskRecord {
             .context("task not found")
     }
 
+    pub fn get_owned_by_session(
+        store: &Store,
+        task_id: &str,
+        owner_session_id: &str,
+    ) -> Result<TaskRecord> {
+        store
+            .conn()
+            .query_row(
+                "SELECT task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at
+                 FROM tasks WHERE task_id = ?1 AND owner_session_id = ?2",
+                (task_id, owner_session_id),
+                Self::from_row,
+            )
+            .context("task not found")
+    }
+
     pub fn list(store: &Store) -> Result<Vec<TaskRecord>> {
         let mut stmt = store.conn().prepare(
-            "SELECT task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, created_at, updated_at
+            "SELECT task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at
              FROM tasks ORDER BY created_at, task_id",
         )?;
 
@@ -609,8 +629,8 @@ impl TaskRecord {
         store
             .conn()
             .execute(
-                "INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                "INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
                  ON CONFLICT(task_id) DO UPDATE SET
                     parent_task_id = excluded.parent_task_id,
                     title = excluded.title,
@@ -618,6 +638,7 @@ impl TaskRecord {
                     policy_snapshot = excluded.policy_snapshot,
                     parent_close_policy = excluded.parent_close_policy,
                     recovery_checkpoint = excluded.recovery_checkpoint,
+                    owner_session_id = excluded.owner_session_id,
                     updated_at = excluded.updated_at",
                 (
                     &new.task_id,
@@ -627,6 +648,7 @@ impl TaskRecord {
                     &new.policy_snapshot,
                     &new.parent_close_policy,
                     &new.recovery_checkpoint,
+                    &new.owner_session_id,
                     &now_str,
                 ),
             )
@@ -710,8 +732,8 @@ impl TaskRecord {
     }
 
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
-        let created_at: String = row.get(7)?;
-        let updated_at: String = row.get(8)?;
+        let created_at: String = row.get(8)?;
+        let updated_at: String = row.get(9)?;
 
         Ok(TaskRecord {
             task_id: row.get(0)?,
@@ -721,11 +743,12 @@ impl TaskRecord {
             policy_snapshot: row.get(4)?,
             parent_close_policy: row.get(5)?,
             recovery_checkpoint: row.get(6)?,
+            owner_session_id: row.get(7)?,
             created_at: DateTime::parse_from_rfc3339(&created_at)
                 .map(|dt| dt.with_timezone(&Utc))
                 .map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        7,
+                        8,
                         rusqlite::types::Type::Text,
                         Box::new(e),
                     )
@@ -734,7 +757,7 @@ impl TaskRecord {
                 .map(|dt| dt.with_timezone(&Utc))
                 .map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        8,
+                        9,
                         rusqlite::types::Type::Text,
                         Box::new(e),
                     )

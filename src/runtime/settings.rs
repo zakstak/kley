@@ -398,8 +398,8 @@ pub(crate) fn spawn_autonomous_child_task_with_policy(
     let inserted_rows = store
         .conn()
         .execute(
-            "INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, created_at, updated_at)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8
+            "INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9
              WHERE (
                  SELECT COUNT(*)
                  FROM tasks child
@@ -411,8 +411,8 @@ pub(crate) fn spawn_autonomous_child_task_with_policy(
                          AND task_events.event_type = 'task.state.transition'
                        ORDER BY task_events.sequence DESC
                        LIMIT 1
-                   ), 'queued') NOT IN ('cancelled', 'failed', 'completed')
-             ) < ?9",
+                    ), 'queued') NOT IN ('cancelled', 'failed', 'completed')
+             ) < ?10",
             (
                 child_task_id,
                 parent_task_id,
@@ -421,6 +421,7 @@ pub(crate) fn spawn_autonomous_child_task_with_policy(
                 &policy_snapshot,
                 &parent_close_policy,
                 Option::<String>::None,
+                &parent_task.owner_session_id,
                 &now,
                 i64::from(parent_policy.max_concurrency),
             ),
@@ -532,6 +533,7 @@ mod tests {
             .to_string(),
             parent_close_policy: "request_cancel_descendants".to_string(),
             recovery_checkpoint: None,
+            owner_session_id: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

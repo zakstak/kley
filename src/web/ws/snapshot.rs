@@ -134,9 +134,22 @@ pub(super) async fn task_watch_bootstrap_data(
     let store_ref = state.store.clone();
 
     store::store_run(&store_ref, move |store| {
-        let selected_task = TaskRecord::get(store, &task_id)?;
-        let all_tasks = TaskRecord::list(store)?;
-        let all_edges = TaskEdgeRecord::list(store)?;
+        let selected_task = TaskRecord::get_owned_by_session(store, &task_id, &session_id)?;
+        let all_tasks = TaskRecord::list(store)?
+            .into_iter()
+            .filter(|task| task.owner_session_id.as_deref() == Some(session_id.as_str()))
+            .collect::<Vec<_>>();
+        let owned_task_ids = all_tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect::<HashSet<_>>();
+        let all_edges = TaskEdgeRecord::list(store)?
+            .into_iter()
+            .filter(|edge| {
+                owned_task_ids.contains(&edge.task_id)
+                    && owned_task_ids.contains(&edge.depends_on_task_id)
+            })
+            .collect::<Vec<_>>();
         let related_task_ids = collect_related_task_ids(&task_id, &all_tasks, &all_edges);
 
         let related_tasks = all_tasks
