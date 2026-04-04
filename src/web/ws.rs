@@ -2,7 +2,9 @@ use std::future::pending;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::response::Response;
+use axum::http::HeaderMap;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -21,6 +23,7 @@ mod io;
 mod session;
 mod snapshot;
 
+use super::origin::is_websocket_origin_allowed;
 use super::protocol::{ResponseError, TaskControlResponseData, UiEvent, WebCommand, WebResponse};
 use super::state::WebAppState;
 use errors::{
@@ -56,9 +59,14 @@ struct TaskWatchState {
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(query): Query<WsConnectQuery>,
     State(state): State<WebAppState>,
 ) -> Response {
+    if !is_websocket_origin_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_socket(socket, state, query.session_id))
 }
 

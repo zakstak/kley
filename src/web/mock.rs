@@ -1,15 +1,21 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
 use crate::tools::editing::EditObservation;
 
+use super::origin::is_websocket_origin_allowed;
 use super::protocol::{
     AuthStateSnapshot, ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession,
     SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
-pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, headers: HeaderMap) -> Response {
+    if !is_websocket_origin_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
+    }
+
     ws.on_upgrade(handle_socket)
 }
 

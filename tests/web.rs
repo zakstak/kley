@@ -15,7 +15,10 @@ use kley::store::{
 use kley::web::state::{MockWebAuthService, WebAppState, WebAuthService};
 use kley::web::ws::runtime_event_to_ui_event;
 use serde_json::Value;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{self, Message, client::IntoClientRequest},
+};
 use tower::util::ServiceExt;
 
 mod web {
@@ -76,9 +79,28 @@ mod web {
         path: &str,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
+        connect_ws_path_with_origin(addr, path, &format!("http://{addr}"))
+            .await
+            .unwrap()
+    }
+
+    async fn connect_ws_path_with_origin(
+        addr: std::net::SocketAddr,
+        path: &str,
+        origin: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::Error,
+    > {
         let url = format!("ws://{addr}{path}");
-        let (socket, _) = connect_async(url).await.unwrap();
-        socket
+        let mut request = url.into_client_request()?;
+        request.headers_mut().insert(
+            "Origin",
+            tungstenite::http::HeaderValue::from_str(origin).unwrap(),
+        );
+        connect_async(request).await.map(|(socket, _)| socket)
     }
 
     async fn connect_mock_ws(
@@ -313,6 +335,34 @@ mod web {
         );
         let transcript = frame["transcript"].as_array().unwrap();
         assert!(transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ws_connect_rejects_cross_origin_requests() {
+        let server = spawn_server().await;
+        let err = connect_ws_path_with_origin(server.addr, "/ws", "https://evil.example")
+            .await
+            .expect_err("cross-origin websocket should be rejected");
+        match err {
+            tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+            other => panic!("unexpected websocket error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_ws_connect_rejects_cross_origin_requests() {
+        let server = spawn_server().await;
+        let err = connect_ws_path_with_origin(server.addr, "/ws/mock", "https://evil.example")
+            .await
+            .expect_err("cross-origin websocket should be rejected");
+        match err {
+            tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+            other => panic!("unexpected websocket error: {other}"),
+        }
     }
 
     #[tokio::test]
