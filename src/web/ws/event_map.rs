@@ -192,7 +192,8 @@ pub fn runtime_event_to_ui_event(
         }),
         AgentEvent::StatusReport {
             session_id,
-            summary,
+            status,
+            detail,
             ..
         } => Some(UiEvent::StatusReport {
             event_id: format!("evt-{}", Uuid::new_v4()),
@@ -200,8 +201,8 @@ pub fn runtime_event_to_ui_event(
             session_id: session_id
                 .clone()
                 .unwrap_or_else(|| default_session_id.to_string()),
-            status: "runtime".to_string(),
-            detail: summary.clone(),
+            status: status.clone(),
+            detail: detail.clone(),
         }),
         AgentEvent::HistoryCompacted {
             session_id,

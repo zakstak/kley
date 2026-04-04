@@ -2,11 +2,13 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use serde_json::{Value, json};
 
+use crate::lsp::builtin_catalog;
 use crate::tools::editing::EditObservation;
 
 use super::protocol::{
-    AuthStateSnapshot, ContextUsage, PROTOCOL_VERSION, ResponseError, SelectedSession,
-    SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
+    AuthStateSnapshot, ContextUsage, LspSnapshot, LspSupportedServer, PROTOCOL_VERSION,
+    ResponseError, SelectedSession, SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent,
+    WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -368,6 +370,25 @@ fn snapshot_data(auth: &AuthStateSnapshot) -> StateSnapshotData {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         },
         auth: auth.clone(),
+        lsp: LspSnapshot {
+            supported: builtin_catalog()
+                .iter()
+                .map(|server| LspSupportedServer {
+                    server_id: server.id.to_string(),
+                    command: server
+                        .command
+                        .iter()
+                        .map(|part| (*part).to_string())
+                        .collect(),
+                    extensions: server
+                        .extensions
+                        .iter()
+                        .map(|extension| (*extension).to_string())
+                        .collect(),
+                })
+                .collect(),
+            active: Vec::new(),
+        },
         sessions: sessions(),
         transcript: Vec::<TranscriptEntry>::new(),
         active_turn: None,

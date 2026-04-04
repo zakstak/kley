@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -7,6 +8,8 @@ use axum::{
 use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use kley::events::AgentEvent;
+use kley::lsp::{LspClient, LspClientError, LspClientFactory};
+use kley::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
 use kley::store::{
     self, AttemptLifecycleState, NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord,
     NewTaskEventRecord, NewTaskRecord, NewTurn, Session, SessionStatus, SharedStore, Store,
@@ -20,6 +23,60 @@ use tower::util::ServiceExt;
 
 mod web {
     use super::*;
+
+    fn controlled_tool_prompt(name: &str, arguments: Value) -> String {
+        let control = serde_json::json!({
+            "type": "tool_call",
+            "name": name,
+            "arguments": arguments,
+        });
+        format!("invoke tool {CONTROL_BLOCK_START}{control}{CONTROL_BLOCK_END}")
+    }
+
+    struct ReadyDiagnosticsClient;
+
+    impl LspClient for ReadyDiagnosticsClient {
+        fn request(&self, method: &str, _params: Value) -> Result<Value, LspClientError> {
+            match method {
+                "initialize" => Ok(serde_json::json!({ "capabilities": {} })),
+                _ => Ok(serde_json::json!({ "items": [] })),
+            }
+        }
+    }
+
+    struct ReadyDiagnosticsFactory;
+
+    impl LspClientFactory for ReadyDiagnosticsFactory {
+        fn create(
+            &self,
+            _command: &[String],
+            _workspace_root: &Path,
+        ) -> Result<Arc<dyn LspClient>, String> {
+            Ok(Arc::new(ReadyDiagnosticsClient))
+        }
+    }
+
+    struct FailingStartupFactory {
+        message: String,
+    }
+
+    impl FailingStartupFactory {
+        fn new(message: &str) -> Self {
+            Self {
+                message: message.to_string(),
+            }
+        }
+    }
+
+    impl LspClientFactory for FailingStartupFactory {
+        fn create(
+            &self,
+            _command: &[String],
+            _workspace_root: &Path,
+        ) -> Result<Arc<dyn LspClient>, String> {
+            Err(self.message.clone())
+        }
+    }
 
     struct TestServer {
         addr: std::net::SocketAddr,
@@ -62,6 +119,29 @@ mod web {
 
     fn test_state_with_mock_openai() -> WebAppState {
         test_state_with_auth_service(Arc::new(MockWebAuthService::default()))
+    }
+
+    async fn seed_test_session(state: &WebAppState, title: &str) -> Session {
+        let store = state.store.clone();
+        let title = title.to_string();
+        store::store_run(&store, move |s| {
+            let session = Session::create(
+                s,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )?;
+            Session::update_settings(
+                s,
+                &session.id,
+                r#"{"model":"test-model","provider":"test"}"#,
+            )?;
+            Session::update_title(s, &session.id, &title)?;
+            Ok(session)
+        })
+        .await
+        .unwrap()
     }
 
     async fn connect_ws(
@@ -3536,6 +3616,221 @@ mod web {
                 .contains("queued/ready")
         );
     }
+
+    pub(super) async fn lsp_status_is_exposed_in_web_snapshot_and_events() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname = \"web-lsp\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = fixture.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("lib.rs");
+        std::fs::write(&file_path, "fn demo() {}\n").unwrap();
+
+        let state = test_state();
+        state
+            .runtime_manager
+            .set_lsp_test_factory(Arc::new(ReadyDiagnosticsFactory));
+        let session = seed_test_session(&state, "LSP Snapshot Session").await;
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={}", session.id)).await;
+
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+        assert!(bootstrap["lsp"]["supported"].as_array().is_some());
+        assert_eq!(bootstrap["lsp"]["active"], serde_json::json!([]));
+        assert!(
+            bootstrap["lsp"]["supported"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| {
+                    entry["server_id"] == "rust-analyzer"
+                        && entry["command"] == serde_json::json!(["rust-analyzer"])
+                        && entry["extensions"] == serde_json::json!(["rs"])
+                })
+        );
+
+        let prompt = controlled_tool_prompt(
+            "lsp_diagnostics",
+            serde_json::json!({
+                "file_path": file_path.display().to_string(),
+                "severity": "all",
+                "extension": null,
+            }),
+        );
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "prompt.submit",
+                    "request_id": "req-lsp-ready",
+                    "session_id": session.id.clone(),
+                    "prompt": prompt,
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        assert_eq!(ack["request_id"], "req-lsp-ready");
+
+        let mut statuses = Vec::new();
+        loop {
+            let frame = recv_json(&mut socket).await;
+            if frame["type"] == "status.report" {
+                statuses.push(frame["status"].as_str().unwrap().to_string());
+            }
+            if frame["type"] == "turn.completed" {
+                break;
+            }
+        }
+
+        assert_eq!(
+            statuses,
+            vec![
+                "lsp.detected".to_string(),
+                "lsp.starting".to_string(),
+                "lsp.ready".to_string(),
+            ]
+        );
+
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "state.get",
+                    "request_id": "req-lsp-snapshot",
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let snapshot = recv_json(&mut socket).await;
+        assert_eq!(snapshot["type"], "response.ok");
+        assert_eq!(snapshot["request_id"], "req-lsp-snapshot");
+        assert_eq!(
+            snapshot["data"]["lsp"]["supported"],
+            bootstrap["lsp"]["supported"]
+        );
+        assert_eq!(
+            snapshot["data"]["lsp"]["active"],
+            serde_json::json!([{
+                "server_id": "rust-analyzer",
+                "status": "lsp.ready",
+                "command": ["rust-analyzer"],
+                "workspace_root": fixture.path().display().to_string(),
+                "last_file": file_path.display().to_string(),
+                "last_error": Value::Null,
+            }])
+        );
+    }
+
+    pub(super) async fn lsp_failed_server_emits_failed_status_once() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname = \"web-lsp-fail\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = fixture.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("lib.rs");
+        std::fs::write(&file_path, "fn demo() {}\n").unwrap();
+
+        let state = test_state();
+        state
+            .runtime_manager
+            .set_lsp_test_factory(Arc::new(FailingStartupFactory::new(
+                "missing binary: rust-analyzer",
+            )));
+        let session = seed_test_session(&state, "LSP Failed Session").await;
+
+        let server = spawn_server_with_state(state).await.unwrap();
+        let mut socket =
+            connect_ws_path(server.addr, &format!("/ws?session_id={}", session.id)).await;
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+
+        let prompt = controlled_tool_prompt(
+            "lsp_diagnostics",
+            serde_json::json!({
+                "file_path": file_path.display().to_string(),
+                "severity": "all",
+                "extension": null,
+            }),
+        );
+
+        let mut statuses = Vec::new();
+
+        for request_id in ["req-lsp-fail-1", "req-lsp-fail-2"] {
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "type": "prompt.submit",
+                        "request_id": request_id,
+                        "session_id": session.id.clone(),
+                        "prompt": prompt.clone(),
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+
+            let ack = recv_json(&mut socket).await;
+            assert_eq!(ack["type"], "response.ok");
+            assert_eq!(ack["request_id"], request_id);
+
+            loop {
+                let frame = recv_json(&mut socket).await;
+                if frame["type"] == "status.report" {
+                    statuses.push(frame["status"].as_str().unwrap().to_string());
+                }
+                if frame["type"] == "turn.completed" {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(
+            statuses,
+            vec![
+                "lsp.detected".to_string(),
+                "lsp.starting".to_string(),
+                "lsp.failed".to_string(),
+            ]
+        );
+
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "state.get",
+                    "request_id": "req-lsp-fail-snapshot",
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let snapshot = recv_json(&mut socket).await;
+        assert_eq!(snapshot["type"], "response.ok");
+        assert_eq!(snapshot["request_id"], "req-lsp-fail-snapshot");
+        assert_eq!(
+            snapshot["data"]["lsp"]["active"],
+            serde_json::json!([{
+                "server_id": "rust-analyzer",
+                "status": "lsp.failed",
+                "command": ["rust-analyzer"],
+                "workspace_root": fixture.path().display().to_string(),
+                "last_file": file_path.display().to_string(),
+                "last_error": "missing binary: rust-analyzer",
+            }])
+        );
+    }
 }
 
 #[tokio::test]
@@ -3556,6 +3851,16 @@ async fn task_watch_keeps_runtime_events_flowing() {
 #[tokio::test]
 async fn task_commands_reject_cross_session_access() {
     web::task_commands_reject_cross_session_access().await;
+}
+
+#[tokio::test]
+async fn lsp_status_is_exposed_in_web_snapshot_and_events() {
+    web::lsp_status_is_exposed_in_web_snapshot_and_events().await;
+}
+
+#[tokio::test]
+async fn lsp_failed_server_emits_failed_status_once() {
+    web::lsp_failed_server_emits_failed_status_once().await;
 }
 
 #[tokio::test]
