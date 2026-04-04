@@ -3,13 +3,13 @@
 //! Mirrors the JS implementation in packages/ai/dist/utils/oauth/openai-codex.js.
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
-use super::{CredentialStore, OpenAiCredentials, save_openai_oauth_credentials};
+use super::{save_openai_oauth_credentials, CredentialStore, OpenAiCredentials};
 
 // ── Constants (verbatim from the JS) ────────────────────────────────────────
 
@@ -419,7 +419,7 @@ pub async fn login_interactive() -> Result<()> {
 
     eprintln!("Opening browser for OpenAI login...");
     eprintln!(
-        "If the browser doesn't open (or you are in Docker/SSH), visit this URL:\n\n  {}\n",
+        "If the browser doesn't open (or you are over SSH), visit this URL:\n\n  {}\n",
         flow.authorize_url
     );
 

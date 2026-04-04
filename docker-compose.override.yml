@@ -1,3 +1,0 @@
-services:
-  kley:
-    entrypoint: ["bash", "/workspace/docker-entrypoint.sh"]

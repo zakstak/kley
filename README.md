@@ -175,7 +175,7 @@ rollback on `saga-dev2`, followed by repo source-of-truth (`flake.lock` /
 ## Development notes
 
 - `./kley-run.sh` is the canonical runner (Cargo from repo or installed binary).
-- `./kley-session.sh` and `./docker-session.sh` are compatibility wrappers.
+- `./kley-session.sh` is a compatibility wrapper.
 - Rust integration tests live in `tests/`.
 - Browser coverage lives in `playwright/` and is driven by
   `playwright.config.ts`.

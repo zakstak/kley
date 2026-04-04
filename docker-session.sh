@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-
-set -euo pipefail
-
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
-
-printf 'docker-session.sh now forwards to the agnostic runner (Docker not required).\n' >&2
-exec "$SCRIPT_DIR/kley-run.sh" "$@"

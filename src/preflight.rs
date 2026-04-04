@@ -20,10 +20,7 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
     let launcher = resolve_launcher(env);
 
     report.push_line(format!("── Running from: {} ──", env.current_dir.display()));
-    report.push_line(format!(
-        "   Environment: {}",
-        if env.in_docker { "Docker" } else { "Host" }
-    ));
+    report.push_line("   Environment: Host");
     report.push_line(format!(
         "   Git user:  {}",
         command_value_or(runner, git_config_command("user.name"), "(not set)")
@@ -105,67 +102,54 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
     report.optional(
         "gcc is installed",
         runner.run(&command("gcc").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "make is installed",
         runner.run(&command("make").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "cmake is installed",
         runner.run(&command("cmake").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "node is installed",
         runner.run(&command("node").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "npm is installed",
         runner.run(&command("npm").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "go is installed",
         runner.run(&command("go").arg("version")).success,
-        env.in_docker,
     );
     report.optional(
         "python3 is installed",
         runner.run(&command("python3").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "sqlite3 is installed",
         runner.run(&command("sqlite3").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "shellcheck is installed",
         runner.run(&command("shellcheck").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "tree is installed",
         runner.run(&command("tree").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "jq is installed",
         runner.run(&command("jq").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "fd is installed",
         runner.run(&command("fd").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "bat is installed",
         runner.run(&command("bat").arg("--version")).success,
-        env.in_docker,
     );
     report.blank_line();
 
@@ -179,24 +163,20 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
         runner
             .run(&command("golangci-lint").arg("--version"))
             .success,
-        env.in_docker,
     );
     report.optional(
         "prettier",
         runner.run(&command("prettier").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "gitleaks",
         runner.run(&command("gitleaks").arg("version")).success,
-        env.in_docker,
     );
     report.optional(
         "cargo-nextest",
         runner
             .run(&command("cargo").args(["nextest", "--version"]))
             .success,
-        env.in_docker,
     );
     report.blank_line();
 
@@ -409,7 +389,6 @@ fn cargo_launcher_help_command(manifest_path: &Path) -> CommandSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeEnv {
-    in_docker: bool,
     current_dir: PathBuf,
     current_exe: PathBuf,
 }
@@ -417,7 +396,6 @@ struct RuntimeEnv {
 impl RuntimeEnv {
     fn detect() -> Self {
         Self {
-            in_docker: Path::new("/.dockerenv").exists(),
             current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             current_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kley")),
         }
@@ -466,16 +444,13 @@ impl Report {
         }
     }
 
-    fn optional(&mut self, label: &str, success: bool, in_docker: bool) {
+    fn optional(&mut self, label: &str, success: bool) {
         if success {
             self.pass += 1;
             self.push_line(format!("  ✓ {label}"));
-        } else if in_docker {
-            self.fail += 1;
-            self.push_line(format!("  ✗ {label}"));
         } else {
             self.warn += 1;
-            self.push_line(format!("  ⚠ {label} (optional on host)"));
+            self.push_line(format!("  ⚠ {label} (optional)"));
         }
     }
 
@@ -578,11 +553,11 @@ pub mod preflight_test_support {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
 
-    pub use super::{CommandOutput, CommandRunner, CommandSpec};
     pub use super::{
-        LspCheckResult, LspRequirement, command_for_lsp_requirement, lsp_requirements,
-        run_required_lsp_checks_with_runner,
+        command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
+        LspCheckResult, LspRequirement,
     };
+    pub use super::{CommandOutput, CommandRunner, CommandSpec};
 
     pub struct FakeRunner {
         responses: RefCell<HashMap<String, VecDeque<CommandOutput>>>,
@@ -630,21 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn optional_checks_warn_on_host_and_fail_in_docker() {
-        let mut host_report = Report::default();
-        host_report.optional("cmake is installed", false, false);
-        assert_eq!(host_report.warn, 1);
-        assert_eq!(host_report.fail, 0);
-        assert_eq!(
-            host_report.lines,
-            vec!["  ⚠ cmake is installed (optional on host)"]
-        );
-
-        let mut docker_report = Report::default();
-        docker_report.optional("cmake is installed", false, true);
-        assert_eq!(docker_report.warn, 0);
-        assert_eq!(docker_report.fail, 1);
-        assert_eq!(docker_report.lines, vec!["  ✗ cmake is installed"]);
+    fn optional_checks_always_warn_when_missing() {
+        let mut report = Report::default();
+        report.optional("cmake is installed", false);
+        assert_eq!(report.warn, 1);
+        assert_eq!(report.fail, 0);
+        assert_eq!(report.lines, vec!["  ⚠ cmake is installed (optional)"]);
     }
 
     #[test]
@@ -656,7 +622,6 @@ mod tests {
         fs::write(repo_root.join("Cargo.toml"), "[package]\nname = 'kley'\n").unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: work_dir,
             current_exe: PathBuf::from("/usr/local/bin/kley"),
         };
@@ -678,7 +643,6 @@ mod tests {
         fs::write(repo_root.join("Cargo.toml"), "[package]\nname = 'kley'\n").unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: PathBuf::from("/tmp"),
             current_exe: exe_dir.join("kley"),
         };
@@ -694,7 +658,6 @@ mod tests {
     #[test]
     fn launcher_falls_back_to_path_binary_without_repo_manifest() {
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: PathBuf::from("/tmp"),
             current_exe: PathBuf::from("/usr/local/bin/kley"),
         };
@@ -719,7 +682,6 @@ mod tests {
         .unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: work_dir,
             current_exe: PathBuf::from("/usr/local/bin/kley"),
         };
@@ -738,7 +700,6 @@ mod tests {
         fs::write(&manifest_path, "[package]\nname = 'kley'\n").unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: work_dir.clone(),
             current_exe: PathBuf::from("/tmp/kley"),
         };
@@ -856,7 +817,7 @@ mod tests {
         assert!(text.contains("   Remote:    (none reachable)"));
         assert!(text.contains("  ✗ can fetch from a remote"));
         assert!(text.contains("  ✗ kley binary works"));
-        assert!(text.contains("  ⚠ cmake is installed (optional on host)"));
+        assert!(text.contains("  ⚠ cmake is installed (optional)"));
         assert!(text.contains("  Passed: 31  Failed: 2  Warnings: 1"));
         assert!(text.contains("⚠ Fix the failing checks above before continuing."));
     }
