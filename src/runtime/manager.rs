@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,10 +20,15 @@ use super::settings::{
 use crate::auth::{CredentialStore, ResolvedAuth};
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, event_channel};
+use crate::lsp::{LspClientFactory, LspManager, LspService, builtin_catalog};
 use crate::runtime::{RuntimeHooks, SessionRuntime, SubmitResult, TurnCorrelation};
 use crate::store::{
     AttemptLifecycleState, NewTaskAttemptRecord, Session, SharedStore, Store, TaskAttemptRecord,
     TaskEdgeRecord, TaskLifecycleState, TaskRecord,
+};
+use crate::tools::{
+    DelegateTaskTool, ToolRegistry, hashline_edit, lsp, patch, read_file, read_skill,
+    report_status, shell,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +57,11 @@ pub struct ActiveTurnReplay {
 pub struct RuntimeEventEnvelope {
     pub request_id: String,
     pub event: AgentEvent,
+}
+
+struct PromptExecutionIdentifiers<'a> {
+    request_id: &'a str,
+    session_id: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +105,7 @@ pub enum AbortTurnOutcome {
     Requested { session_id: String, turn_id: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RuntimeWorker {
     session_id: String,
     model: String,
@@ -103,10 +113,43 @@ struct RuntimeWorker {
     project_dir: PathBuf,
     instructions: String,
     compact_config: CompactConfig,
+    lsp_manager: Arc<LspManager>,
+}
+
+impl std::fmt::Debug for RuntimeWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeWorker")
+            .field("session_id", &self.session_id)
+            .field("model", &self.model)
+            .field("provider", &self.provider)
+            .field("project_dir", &self.project_dir)
+            .field("instructions", &self.instructions)
+            .field("compact_config", &self.compact_config)
+            .finish()
+    }
 }
 
 impl RuntimeWorker {
-    fn from_session(session: &Session) -> Self {
+    fn from_session(session: &Session, lsp_factory: Option<Arc<dyn LspClientFactory>>) -> Self {
+        let lsp_manager = match lsp_factory {
+            Some(factory) => Arc::new(LspManager::with_test_factory(factory)),
+            None => Arc::new(LspManager::new()),
+        };
+
+        let mut worker = Self {
+            session_id: session.id.clone(),
+            model: session.model.clone(),
+            provider: session.provider.clone(),
+            project_dir: std::env::current_dir().unwrap_or_default(),
+            instructions: String::new(),
+            compact_config: CompactConfig::default(),
+            lsp_manager,
+        };
+        worker.refresh_from_session(session);
+        worker
+    }
+
+    fn refresh_from_session(&mut self, session: &Session) {
         let mut model = session.model.clone();
         let mut provider = session.provider.clone();
         let mut compact_config = CompactConfig::default();
@@ -119,15 +162,12 @@ impl RuntimeWorker {
         let rules = crate::skills::discover_rules(&project_dir);
         let skills = crate::skills::discover_skills(&project_dir);
         let instructions = crate::skills::build_system_prompt(&rules, &skills);
-
-        Self {
-            session_id: session.id.clone(),
-            model,
-            provider,
-            project_dir,
-            instructions,
-            compact_config,
-        }
+        self.session_id = session.id.clone();
+        self.model = model;
+        self.provider = provider;
+        self.project_dir = project_dir;
+        self.instructions = instructions;
+        self.compact_config = compact_config;
     }
 
     fn resolved_auth(
@@ -186,30 +226,37 @@ impl RuntimeWorker {
             });
 
             let resolved_auth = worker.resolved_auth(&runtime_rt, &events)?;
-            let registry = crate::tools::default_registry(worker.project_dir.clone());
-            let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
-                shared_store,
-                resolved_auth,
-                Some(&worker.model),
-                Some(&worker.session_id),
-                events.clone(),
-                worker.compact_config.clone(),
-                registry,
-                worker.instructions.clone(),
-                RuntimeHooks::default(),
-                abort_signal,
-                None,
-            )?;
+            worker.lsp_manager.set_event_emitter(events.clone());
+            let submit_result = (|| -> Result<SubmitResult> {
+                let registry =
+                    runtime_registry(worker.project_dir.clone(), worker.lsp_manager.clone());
+                let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
+                    shared_store,
+                    resolved_auth,
+                    Some(&worker.model),
+                    Some(&worker.session_id),
+                    events.clone(),
+                    worker.compact_config.clone(),
+                    registry,
+                    worker.instructions.clone(),
+                    RuntimeHooks::default(),
+                    abort_signal,
+                    None,
+                )?;
 
-            let submit = runtime_rt
-                .block_on(runtime.submit_prompt_with_ids(prompt, correlation))
-                .context("runtime submit failed")?;
+                let submit = runtime_rt
+                    .block_on(runtime.submit_prompt_with_ids(prompt, correlation))
+                    .context("runtime submit failed")?;
 
-            drop(runtime);
+                drop(runtime);
+                Ok(submit)
+            })();
+
+            worker.lsp_manager.clear_event_emitter();
             drop(events);
             let _ = forwarder.join();
 
-            Ok(submit)
+            submit_result
         })
         .await
         .map_err(join_error)?
@@ -222,6 +269,29 @@ struct ActivePrompt {
     abort_signal: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLspSupport {
+    pub server_id: String,
+    pub command: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLspServerState {
+    pub server_id: String,
+    pub status: String,
+    pub command: Vec<String>,
+    pub workspace_root: String,
+    pub last_file: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLspSnapshot {
+    pub supported: Vec<RuntimeLspSupport>,
+    pub active: Vec<RuntimeLspServerState>,
+}
+
 #[derive(Debug)]
 struct ManagedSession {
     runtime: RuntimeWorker,
@@ -232,11 +302,26 @@ struct ManagedSession {
     last_token_usage: Option<(Option<usize>, Option<usize>, Option<usize>)>,
     active_prompt: Option<ActivePrompt>,
     events: broadcast::Sender<RuntimeEventEnvelope>,
+    lsp_servers: HashMap<(String, String), RuntimeLspServerState>,
 }
 
-#[derive(Debug, Default)]
+const DEFAULT_SCHEDULER_OWNER_ID: &str = "runtime-manager";
+const DEFAULT_SCHEDULER_LEASE_TTL_SECONDS: i64 = 60;
+
 pub struct RuntimeManager {
     sessions: Mutex<HashMap<String, ManagedSession>>,
+    bound_store: Mutex<Option<SharedStore>>,
+    lsp_test_factory: Mutex<Option<Arc<dyn LspClientFactory>>>,
+}
+
+impl Default for RuntimeManager {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            bound_store: Mutex::new(None),
+            lsp_test_factory: Mutex::new(None),
+        }
+    }
 }
 
 pub fn spawn_autonomous_child_task_with_policy(
@@ -265,10 +350,65 @@ impl RuntimeManager {
         Self::default()
     }
 
+    pub fn bind_shared_store(&self, shared_store: SharedStore) {
+        let mut bound_store = self
+            .bound_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *bound_store = Some(shared_store);
+    }
+
+    fn bound_store(&self) -> Option<SharedStore> {
+        self.bound_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn lsp_test_factory(&self) -> Option<Arc<dyn LspClientFactory>> {
+        self.lsp_test_factory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn set_lsp_test_factory(&self, factory: Arc<dyn LspClientFactory>) {
+        let mut slot = self
+            .lsp_test_factory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(factory);
+    }
+
     fn lock_sessions(&self) -> MutexGuard<'_, HashMap<String, ManagedSession>> {
         match self.sessions.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn ensure_managed_session(&self, session: &Session) {
+        let lsp_factory = self.lsp_test_factory();
+        let mut sessions = self.lock_sessions();
+        let entry = sessions
+            .entry(session.id.clone())
+            .or_insert_with(|| ManagedSession {
+                runtime: RuntimeWorker::from_session(session, lsp_factory.clone()),
+                settings: session.settings.clone(),
+                controller_id: None,
+                active_turn: None,
+                last_context_usage: None,
+                last_token_usage: None,
+                active_prompt: None,
+                events: broadcast::channel(256).0,
+                lsp_servers: HashMap::new(),
+            });
+
+        entry.settings = session.settings.clone();
+        if entry.runtime.session_id != session.id {
+            entry.runtime = RuntimeWorker::from_session(session, lsp_factory);
+        } else {
+            entry.runtime.refresh_from_session(session);
         }
     }
 
@@ -277,22 +417,11 @@ impl RuntimeManager {
         session: &Session,
         controller_id: &str,
     ) -> Result<(), AttachControllerError> {
+        self.ensure_managed_session(session);
         let mut sessions = self.lock_sessions();
         let entry = sessions
-            .entry(session.id.clone())
-            .or_insert_with(|| ManagedSession {
-                runtime: RuntimeWorker::from_session(session),
-                settings: session.settings.clone(),
-                controller_id: None,
-                active_turn: None,
-                last_context_usage: None,
-                last_token_usage: None,
-                active_prompt: None,
-                events: broadcast::channel(256).0,
-            });
-
-        entry.settings = session.settings.clone();
-        entry.runtime = RuntimeWorker::from_session(session);
+            .get_mut(&session.id)
+            .expect("managed session should exist after ensure_managed_session");
 
         if let Some(active) = &entry.controller_id
             && active != controller_id
@@ -305,6 +434,120 @@ impl RuntimeManager {
 
         entry.controller_id = Some(controller_id.to_string());
         Ok(())
+    }
+
+    fn reserve_prompt_execution(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<(RuntimeWorker, ActiveTurnReplay, Arc<AtomicBool>), SubmitPromptError>
+    {
+        let mut sessions = self.lock_sessions();
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return Err(SubmitPromptError::NoRuntime {
+                session_id: session_id.to_string(),
+            });
+        };
+        let Some(active_turn) = entry.active_turn.clone() else {
+            return Err(SubmitPromptError::NoActiveTurn {
+                session_id: session_id.to_string(),
+            });
+        };
+        if let Some(active_prompt) = &entry.active_prompt {
+            return Err(SubmitPromptError::TurnInProgress {
+                session_id: session_id.to_string(),
+                turn_id: active_prompt.turn_id.clone(),
+            });
+        }
+
+        let abort_signal = Arc::new(AtomicBool::new(false));
+        entry.active_prompt = Some(ActivePrompt {
+            turn_id: active_turn.turn_id.clone(),
+            abort_signal: abort_signal.clone(),
+        });
+
+        Ok((entry.runtime.clone(), active_turn, abort_signal))
+    }
+
+    async fn execute_reserved_prompt<'a>(
+        &self,
+        worker: RuntimeWorker,
+        shared_store: SharedStore,
+        prompt: String,
+        correlation: TurnCorrelation,
+        abort_signal: Arc<AtomicBool>,
+        identifiers: PromptExecutionIdentifiers<'a>,
+    ) -> Result<SubmitResult> {
+        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+        let request_id_for_events = identifiers.request_id.to_string();
+        let session_id_for_events = identifiers.session_id.to_string();
+
+        let worker_task = tokio::spawn(async move {
+            worker
+                .submit_prompt_stream(shared_store, prompt, correlation, abort_signal, stream_tx)
+                .await
+        });
+
+        while let Some(event) = stream_rx.recv().await {
+            self.publish_runtime_event(&session_id_for_events, &request_id_for_events, event);
+        }
+
+        match worker_task.await {
+            Ok(result) => result,
+            Err(err) => Err(join_error(err)),
+        }
+    }
+
+    pub fn kick_scheduler_for_owner_session(self: &Arc<Self>, owner_session_id: &str) {
+        let Some(shared_store) = self.bound_store() else {
+            return;
+        };
+
+        let owner_session_id = owner_session_id.to_string();
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(error) = manager
+                .execute_scheduler_ready_graph_nodes(
+                    shared_store,
+                    &owner_session_id,
+                    DEFAULT_SCHEDULER_OWNER_ID,
+                    DEFAULT_SCHEDULER_LEASE_TTL_SECONDS,
+                )
+                .await
+            {
+                eprintln!(
+                    "warning: failed to execute delegated task scheduler for session {owner_session_id}: {error:#}"
+                );
+            }
+        });
+    }
+
+    pub async fn recover_bound_store_on_startup(&self) -> Result<usize> {
+        let Some(shared_store) = self.bound_store() else {
+            return Ok(0);
+        };
+
+        let owner_session_ids = {
+            let store = lock_shared_store(&shared_store)?;
+            TaskRecord::list(&store)?
+                .into_iter()
+                .filter_map(|task| task.owner_session_id)
+                .collect::<BTreeSet<_>>()
+        };
+
+        let mut recovered = 0usize;
+        for owner_session_id in owner_session_ids {
+            recovered = recovered.saturating_add(
+                self.recover_nonterminal_attempts_on_startup(
+                    Arc::clone(&shared_store),
+                    &owner_session_id,
+                    DEFAULT_SCHEDULER_OWNER_ID,
+                    DEFAULT_SCHEDULER_LEASE_TTL_SECONDS,
+                )
+                .await?,
+            );
+        }
+
+        Ok(recovered)
     }
 
     pub fn release_controller(&self, session_id: &str, controller_id: &str) {
@@ -429,6 +672,41 @@ impl RuntimeManager {
             .and_then(|entry| entry.active_turn.clone())
     }
 
+    pub fn lsp_snapshot(&self, session_id: &str) -> RuntimeLspSnapshot {
+        let sessions = self.lock_sessions();
+        let mut active = sessions
+            .get(session_id)
+            .map(|entry| entry.lsp_servers.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        drop(sessions);
+
+        active.sort_by(|left, right| {
+            left.server_id
+                .cmp(&right.server_id)
+                .then_with(|| left.workspace_root.cmp(&right.workspace_root))
+        });
+
+        RuntimeLspSnapshot {
+            supported: builtin_catalog()
+                .iter()
+                .map(|server| RuntimeLspSupport {
+                    server_id: server.id.to_string(),
+                    command: server
+                        .command
+                        .iter()
+                        .map(|part| (*part).to_string())
+                        .collect(),
+                    extensions: server
+                        .extensions
+                        .iter()
+                        .map(|extension| (*extension).to_string())
+                        .collect(),
+                })
+                .collect(),
+            active,
+        }
+    }
+
     pub fn clear_active_turn(&self, session_id: &str, turn_id: &str) {
         let mut sessions = self.lock_sessions();
         if let Some(entry) = sessions.get_mut(session_id) {
@@ -528,22 +806,48 @@ impl RuntimeManager {
                 Session::get(&store, &child_session_id)?
             };
 
-            let worker = RuntimeWorker::from_session(&child_session);
-            let correlation = TurnCorrelation {
-                turn_id: Uuid::new_v4().to_string(),
-                message_id: Uuid::new_v4().to_string(),
-            };
-            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            self.ensure_managed_session(&child_session);
+            let request_id = format!("scheduler-{}", Uuid::new_v4());
+            let turn_id = Uuid::new_v4().to_string();
+            let message_id = Uuid::new_v4().to_string();
+            self.start_active_turn(&child_session.id, request_id.clone(), turn_id, message_id)
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to start child scheduler turn: {error:?}")
+                })?;
 
-            let result = worker
-                .submit_prompt_stream(
+            let (worker, active_turn, abort_signal) = self
+                .reserve_prompt_execution(&child_session.id)
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to reserve child scheduler prompt: {error:?}")
+                })?;
+            let correlation = TurnCorrelation {
+                turn_id: active_turn.turn_id.clone(),
+                message_id: active_turn.message_id.clone(),
+            };
+
+            let result = self
+                .execute_reserved_prompt(
+                    worker,
                     Arc::clone(&shared_store),
                     candidate.execution_prompt.clone(),
-                    correlation,
-                    Arc::new(AtomicBool::new(false)),
-                    event_tx,
+                    correlation.clone(),
+                    abort_signal,
+                    PromptExecutionIdentifiers {
+                        request_id: &request_id,
+                        session_id: &child_session.id,
+                    },
                 )
                 .await;
+            let finish_result = match &result {
+                Ok(submit_result) => Ok(submit_result.clone()),
+                Err(error) => Err(anyhow::anyhow!(format!("{error:#}"))),
+            };
+            self.finish_prompt(
+                &child_session.id,
+                &request_id,
+                &correlation.turn_id,
+                finish_result,
+            );
 
             let store = lock_shared_store(&shared_store)?;
             match result {
@@ -671,33 +975,7 @@ impl RuntimeManager {
         session_id: &str,
         prompt: String,
     ) -> std::result::Result<SubmitPromptOutcome, SubmitPromptError> {
-        let (worker, active_turn, abort_signal) = {
-            let mut sessions = self.lock_sessions();
-            let Some(entry) = sessions.get_mut(session_id) else {
-                return Err(SubmitPromptError::NoRuntime {
-                    session_id: session_id.to_string(),
-                });
-            };
-            let Some(active_turn) = entry.active_turn.clone() else {
-                return Err(SubmitPromptError::NoActiveTurn {
-                    session_id: session_id.to_string(),
-                });
-            };
-            if let Some(active_prompt) = &entry.active_prompt {
-                return Err(SubmitPromptError::TurnInProgress {
-                    session_id: session_id.to_string(),
-                    turn_id: active_prompt.turn_id.clone(),
-                });
-            }
-
-            let abort_signal = Arc::new(AtomicBool::new(false));
-            entry.active_prompt = Some(ActivePrompt {
-                turn_id: active_turn.turn_id.clone(),
-                abort_signal: abort_signal.clone(),
-            });
-
-            (entry.runtime.clone(), active_turn, abort_signal)
-        };
+        let (worker, active_turn, abort_signal) = self.reserve_prompt_execution(session_id)?;
 
         let manager = Arc::clone(self);
         let session_id_owned = session_id.to_string();
@@ -711,37 +989,22 @@ impl RuntimeManager {
         };
 
         tokio::spawn(async move {
-            let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
-            let request_id_for_events = request_id.clone();
-            let session_id_for_events = session_id_owned.clone();
-            let event_manager = Arc::clone(&manager);
-
-            let worker_task = tokio::spawn(async move {
-                worker
-                    .submit_prompt_stream(
-                        shared_store,
-                        prompt,
-                        correlation,
-                        abort_signal,
-                        stream_tx,
-                    )
-                    .await
-            });
-
-            while let Some(event) = stream_rx.recv().await {
-                event_manager.publish_runtime_event(
-                    &session_id_for_events,
-                    &request_id_for_events,
-                    event,
-                );
-            }
-
-            let result = match worker_task.await {
-                Ok(result) => result,
-                Err(err) => Err(join_error(err)),
-            };
+            let result = manager
+                .execute_reserved_prompt(
+                    worker,
+                    shared_store,
+                    prompt,
+                    correlation,
+                    abort_signal,
+                    PromptExecutionIdentifiers {
+                        request_id: &request_id,
+                        session_id: &session_id_owned,
+                    },
+                )
+                .await;
 
             manager.finish_prompt(&session_id_owned, &request_id, &finish_turn_id, result);
+            manager.kick_scheduler_for_owner_session(&session_id_owned);
         });
 
         Ok(SubmitPromptOutcome::Accepted {
@@ -867,10 +1130,33 @@ impl RuntimeManager {
             }
         }
 
-        let _ = entry.events.send(RuntimeEventEnvelope {
-            request_id: request_id.to_string(),
-            event: event.clone(),
-        });
+        let should_publish = match &event {
+            AgentEvent::StatusReport {
+                status,
+                server_id,
+                command,
+                workspace_root,
+                last_file,
+                last_error,
+                ..
+            } if status.starts_with("lsp.") => apply_lsp_status_report(
+                &mut entry.lsp_servers,
+                status,
+                server_id.as_deref(),
+                command.as_deref(),
+                workspace_root.as_deref(),
+                last_file.as_deref(),
+                last_error.as_deref(),
+            ),
+            _ => true,
+        };
+
+        if should_publish {
+            let _ = entry.events.send(RuntimeEventEnvelope {
+                request_id: request_id.to_string(),
+                event: event.clone(),
+            });
+        }
 
         match event {
             AgentEvent::TurnCompleted { .. } => {
@@ -1499,6 +1785,134 @@ fn assistant_message_context_chars(content: &str) -> usize {
     })])
 }
 
+fn runtime_registry(project_dir: PathBuf, lsp_service: Arc<dyn LspService>) -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+
+    registry.register(Box::new(shell::ShellTool::new()));
+    registry.register(Box::new(read_file::ReadFileTool));
+    registry.register(Box::new(patch::PatchTool));
+    registry.register(Box::new(hashline_edit::HashlineEditTool));
+    registry.register(Box::new(lsp::LspDiagnosticsTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    registry.register(Box::new(lsp::LspSymbolsTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    registry.register(Box::new(lsp::LspGotoDefinitionTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    registry.register(Box::new(lsp::LspFindReferencesTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    registry.register(Box::new(lsp::LspPrepareRenameTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    registry.register(Box::new(lsp::LspRenameTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service,
+    )));
+    registry.register(Box::new(read_skill::ReadSkillTool::new(project_dir)));
+    registry.register(Box::new(DelegateTaskTool));
+    registry.register(Box::new(report_status::ReportStatusTool));
+    registry
+}
+
+fn apply_lsp_status_report(
+    states: &mut HashMap<(String, String), RuntimeLspServerState>,
+    status: &str,
+    server_id: Option<&str>,
+    command: Option<&[String]>,
+    workspace_root: Option<&str>,
+    last_file: Option<&str>,
+    last_error: Option<&str>,
+) -> bool {
+    let Some(server_id) = server_id else {
+        return true;
+    };
+    let Some(workspace_root) = workspace_root else {
+        return true;
+    };
+
+    let key = (server_id.to_string(), workspace_root.to_string());
+    let is_new = !states.contains_key(&key);
+    let entry = states.entry(key).or_insert_with(|| RuntimeLspServerState {
+        server_id: server_id.to_string(),
+        status: "lsp.detected".to_string(),
+        command: command.map(|parts| parts.to_vec()).unwrap_or_default(),
+        workspace_root: workspace_root.to_string(),
+        last_file: last_file.map(str::to_string),
+        last_error: last_error.map(str::to_string),
+    });
+
+    if let Some(command) = command
+        && !command.is_empty()
+    {
+        entry.command = command.to_vec();
+    }
+    if let Some(last_file) = last_file {
+        entry.last_file = Some(last_file.to_string());
+    }
+    if let Some(last_error) = last_error {
+        entry.last_error = Some(last_error.to_string());
+    }
+
+    match status {
+        "lsp.detected" => {
+            if is_new {
+                return true;
+            }
+            if entry.status == "lsp.detected" {
+                return false;
+            }
+            if matches!(
+                entry.status.as_str(),
+                "lsp.starting" | "lsp.ready" | "lsp.failed"
+            ) {
+                return false;
+            }
+            entry.status = status.to_string();
+            true
+        }
+        "lsp.starting" => {
+            if matches!(entry.status.as_str(), "lsp.ready" | "lsp.failed") {
+                return false;
+            }
+            if entry.status == status {
+                return false;
+            }
+            entry.status = status.to_string();
+            true
+        }
+        "lsp.ready" => {
+            if entry.status == status {
+                return false;
+            }
+            entry.status = status.to_string();
+            entry.last_error = None;
+            true
+        }
+        "lsp.failed" => {
+            if entry.status == status {
+                return false;
+            }
+            entry.status = status.to_string();
+            true
+        }
+        _ => true,
+    }
+}
+
 fn join_error(err: JoinError) -> anyhow::Error {
     anyhow::anyhow!("runtime worker join error: {err}")
 }
@@ -1506,8 +1920,13 @@ fn join_error(err: JoinError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lsp::{LspClient, LspClientError};
+    use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
     use crate::store::{NewSession, Session, SessionStatus};
     use anyhow::anyhow;
+    use serde_json::{Value, json};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool as StdAtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn finish_prompt_err_clears_active_state_and_emits_event() {
@@ -1733,7 +2152,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        let worker = RuntimeWorker::from_session(&session);
+        let worker = RuntimeWorker::from_session(&session, None);
 
         assert_eq!(worker.model, "settings-model");
         assert_eq!(worker.provider, "settings-provider");
@@ -1760,7 +2179,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        let worker = RuntimeWorker::from_session(&session);
+        let worker = RuntimeWorker::from_session(&session, None);
 
         assert_eq!(worker.model, "settings-model");
         assert_eq!(worker.provider, "settings-provider");
@@ -1768,5 +2187,112 @@ mod tests {
             worker.compact_config.threshold_chars,
             CompactConfig::default().threshold_chars
         );
+    }
+
+    struct CountingLspClient;
+
+    impl LspClient for CountingLspClient {
+        fn request(&self, method: &str, _params: Value) -> Result<Value, LspClientError> {
+            match method {
+                "initialize" => Ok(json!({})),
+                "textDocument/diagnostic" => Ok(json!({ "items": [] })),
+                _ => Ok(json!([])),
+            }
+        }
+    }
+
+    struct CountingLspFactory {
+        create_calls: AtomicUsize,
+    }
+
+    impl CountingLspFactory {
+        fn new() -> Self {
+            Self {
+                create_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn create_calls(&self) -> usize {
+            self.create_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl LspClientFactory for CountingLspFactory {
+        fn create(
+            &self,
+            _command: &[String],
+            _workspace_root: &Path,
+        ) -> std::result::Result<Arc<dyn LspClient>, String> {
+            self.create_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Arc::new(CountingLspClient))
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_worker_reuses_lsp_manager_across_prompt_submissions() {
+        let shared_store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
+        let session = {
+            let store = shared_store.lock().unwrap();
+            Session::create(
+                &store,
+                NewSession {
+                    model: "test-model".to_string(),
+                    provider: "test".to_string(),
+                },
+            )
+            .unwrap()
+        };
+
+        let fixture = tempfile::tempdir().unwrap();
+        let file_path = fixture.path().join("sample.rs");
+        std::fs::write(&file_path, "fn main() {}\n").unwrap();
+
+        let factory = Arc::new(CountingLspFactory::new());
+        let worker = RuntimeWorker::from_session(&session, Some(factory.clone()));
+        let tool_args = json!({
+            "file_path": file_path.display().to_string(),
+            "severity": "all",
+            "extension": null,
+        });
+        let tool_call = json!({
+            "type": "tool_call",
+            "name": "lsp_diagnostics",
+            "arguments": tool_args,
+        });
+        let prompt = format!("{CONTROL_BLOCK_START}{tool_call}{CONTROL_BLOCK_END}");
+
+        let (stream_tx_one, _stream_rx_one) = mpsc::unbounded_channel();
+        let first = worker
+            .submit_prompt_stream(
+                Arc::clone(&shared_store),
+                prompt.clone(),
+                TurnCorrelation {
+                    turn_id: "turn-1".to_string(),
+                    message_id: "message-1".to_string(),
+                },
+                Arc::new(StdAtomicBool::new(false)),
+                stream_tx_one,
+            )
+            .await
+            .unwrap();
+
+        let (stream_tx_two, _stream_rx_two) = mpsc::unbounded_channel();
+        let second = worker
+            .submit_prompt_stream(
+                Arc::clone(&shared_store),
+                prompt,
+                TurnCorrelation {
+                    turn_id: "turn-2".to_string(),
+                    message_id: "message-2".to_string(),
+                },
+                Arc::new(StdAtomicBool::new(false)),
+                stream_tx_two,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(first, SubmitResult::Completed { .. }));
+        assert!(matches!(second, SubmitResult::Completed { .. }));
+        assert_eq!(factory.create_calls(), 1);
     }
 }

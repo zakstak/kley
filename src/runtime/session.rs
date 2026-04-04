@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -9,6 +10,7 @@ use super::{SessionSettingsOverrides, canonical_settings_json};
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
 use crate::events::{AgentEvent, EventEmitter};
+use crate::lsp::{builtin_server_for_extension, builtin_server_for_path, resolve_workspace_root};
 use crate::provider::{Provider, SendContext, TokenUsage, ToolCall, TurnResult, merge_token_usage};
 use crate::store::{
     AttemptLifecycleState, NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord, NewTaskEventRecord,
@@ -180,6 +182,13 @@ struct ReportStatusArgs {
     task_id: Option<String>,
     #[serde(default)]
     after_sequence: Option<i64>,
+}
+
+struct LspToolTarget {
+    server_id: String,
+    command: Vec<String>,
+    workspace_root: PathBuf,
+    last_file: Option<String>,
 }
 
 fn default_delegate_priority() -> i64 {
@@ -585,7 +594,7 @@ impl<'a> SessionRuntime<'a> {
         resume_session_id: Option<&str>,
         events: EventEmitter,
         mut compact_config: CompactConfig,
-        registry: ToolRegistry,
+        mut registry: ToolRegistry,
         instructions: String,
         hooks: RuntimeHooks,
         abort_signal: Arc<AtomicBool>,
@@ -606,6 +615,7 @@ impl<'a> SessionRuntime<'a> {
             &mut compact_config,
             &hooks,
         )?;
+        registry.bind_session_context(&session.id);
 
         let provider = create_provider(&resolved.provider);
         Ok(Self {
@@ -635,7 +645,7 @@ impl<'a> SessionRuntime<'a> {
         resume_session_id: Option<&str>,
         events: EventEmitter,
         mut compact_config: CompactConfig,
-        registry: ToolRegistry,
+        mut registry: ToolRegistry,
         instructions: String,
         hooks: RuntimeHooks,
         abort_signal: Arc<AtomicBool>,
@@ -660,6 +670,7 @@ impl<'a> SessionRuntime<'a> {
             &mut compact_config,
             &hooks,
         )?;
+        registry.bind_session_context(&session.id);
         drop(store_guard);
 
         let provider = create_provider(&resolved.provider);
@@ -740,6 +751,8 @@ impl<'a> SessionRuntime<'a> {
 
         self.with_store(|store| {
             run_immediate_transaction(store, || {
+                let _ =
+                    TaskRecord::ensure_owned_by_session(store, parent_task_id, &self.session.id)?;
                 let task = spawn_autonomous_child_task_with_policy(
                     store,
                     &self.registry,
@@ -839,6 +852,7 @@ impl<'a> SessionRuntime<'a> {
         let after_sequence = parsed.after_sequence.unwrap_or(0);
         let summary = parsed.summary.unwrap_or_default();
         self.with_store(|store| {
+            let _ = TaskRecord::ensure_owned_by_session(store, task_id, &self.session.id)?;
             let task_state = TaskRecord::current_state(store, task_id)?;
             let events = TaskEventRecord::list_for_task(store, task_id, after_sequence)?;
             let next_after_sequence = events
@@ -859,6 +873,35 @@ impl<'a> SessionRuntime<'a> {
                 .to_string(),
             ))
         })
+    }
+
+    fn detect_lsp_tool_target(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<LspToolTarget> {
+        let project_dir = std::env::current_dir().ok()?;
+        detect_lsp_tool_target(&project_dir, tool_name, args)
+    }
+
+    fn emit_lsp_detected_status(&self, target: &LspToolTarget) {
+        let detail = target
+            .last_file
+            .as_deref()
+            .map(|last_file| format!("matched {last_file} for {}", target.server_id))
+            .unwrap_or_else(|| format!("matched {}", target.server_id));
+        self.events.emit(AgentEvent::StatusReport {
+            session_id: Some(self.session.id.clone()),
+            turn_id: None,
+            status: "lsp.detected".to_string(),
+            detail,
+            turn_number: self.turn_number,
+            server_id: Some(target.server_id.clone()),
+            command: Some(target.command.clone()),
+            workspace_root: Some(target.workspace_root.display().to_string()),
+            last_file: target.last_file.clone(),
+            last_error: None,
+        });
     }
 
     pub fn loaded_turns(&self) -> usize {
@@ -1102,6 +1145,12 @@ impl<'a> SessionRuntime<'a> {
                                     &message_id,
                                     turn_number,
                                 );
+                            }
+
+                            if let Some(lsp_target) = self.detect_lsp_tool_target(&call.name, &args)
+                                && lsp_target.last_file.is_some()
+                            {
+                                self.emit_lsp_detected_status(&lsp_target);
                             }
 
                             let runtime_handled: Option<Result<String>> = match call.name.as_str() {
@@ -1384,6 +1433,66 @@ impl<'a> SessionRuntime<'a> {
             turn_number,
             result,
         })
+    }
+}
+
+fn detect_lsp_tool_target(
+    project_dir: &std::path::Path,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<LspToolTarget> {
+    let path_key = match tool_name {
+        "lsp_prepare_rename" | "lsp_rename" => "filePath",
+        "lsp_diagnostics" | "lsp_symbols" | "lsp_goto_definition" | "lsp_find_references" => {
+            "file_path"
+        }
+        _ => return None,
+    };
+
+    let raw_path = args.get(path_key)?.as_str()?.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let file_path = resolve_tool_path(project_dir, raw_path);
+    if file_path.is_file() {
+        let server = builtin_server_for_path(&file_path)?;
+        return Some(LspToolTarget {
+            server_id: server.id.to_string(),
+            command: server
+                .command
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect(),
+            workspace_root: resolve_workspace_root(&file_path, server.id),
+            last_file: Some(file_path.display().to_string()),
+        });
+    }
+
+    if tool_name == "lsp_diagnostics" && file_path.is_dir() {
+        let extension = args.get("extension")?.as_str()?;
+        let server = builtin_server_for_extension(extension)?;
+        return Some(LspToolTarget {
+            server_id: server.id.to_string(),
+            command: server
+                .command
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect(),
+            workspace_root: file_path,
+            last_file: None,
+        });
+    }
+
+    None
+}
+
+fn resolve_tool_path(project_dir: &std::path::Path, raw_path: &str) -> PathBuf {
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() {
+        path
+    } else {
+        project_dir.join(path)
     }
 }
 
