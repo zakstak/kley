@@ -10,9 +10,10 @@ use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use crate::compact::CompactConfig;
+use crate::diagnostics::web_error_code;
 use crate::runtime::{RuntimeEventEnvelope, SubmitPromptOutcome};
 use crate::runtime::{SessionSettingsOverrides, canonical_settings_json};
-use crate::store::{self, Session, TaskLifecycleState, TaskRecord};
+use crate::store::{self, Session, TaskEventReplayCursorState, TaskLifecycleState, TaskRecord};
 
 mod context_usage;
 mod errors;
@@ -24,12 +25,13 @@ mod snapshot;
 use super::protocol::{ResponseError, TaskControlResponseData, UiEvent, WebCommand, WebResponse};
 use super::state::WebAppState;
 use errors::{
-    abort_turn_error, internal_error, invalid_command_error, prompt_submit_error,
-    session_busy_error,
+    TaskControlApiError, TaskWatchApiError, abort_turn_error, internal_error,
+    invalid_command_error, invalid_task_control_session_error, invalid_task_watch_session_error,
+    prompt_submit_error, session_busy_error, task_control_error, task_watch_error,
 };
 pub use event_map::runtime_event_to_ui_event;
 use event_map::ts_now;
-use io::{send_event, send_response};
+use io::{WsIoError, send_event, send_response};
 use session::{
     LoadSessionError, SelectSessionError, attach_or_select_session, load_session_for_controller,
 };
@@ -52,6 +54,12 @@ struct TaskWatchState {
     session_id: String,
     task_id: String,
     last_sequence: i64,
+}
+
+#[derive(Debug)]
+enum SnapshotDispatchError {
+    Snapshot(anyhow::Error),
+    Transport(WsIoError),
 }
 
 pub async fn ws_handler(
@@ -85,20 +93,51 @@ async fn handle_socket(
                 .await;
                 return;
             }
-            Err(SelectSessionError::Store) => return,
+            Err(SelectSessionError::Store) => {
+                let _ = send_response(
+                    &mut socket,
+                    WebResponse::Error {
+                        request_id: "attach".to_string(),
+                        error: internal_error("failed to select or create session"),
+                    },
+                )
+                .await;
+                return;
+            }
         };
 
     let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
     let mut task_watch: Option<TaskWatchState> = None;
 
-    if send_connect_snapshot_event(&mut socket, &state, &active_session.id, &controller_id)
-        .await
-        .is_err()
+    match send_connect_snapshot_event(&mut socket, &state, &active_session.id, &controller_id).await
     {
-        state
-            .runtime_manager
-            .release_controller(&active_session.id, &controller_id);
-        return;
+        Ok(()) => {}
+        Err(SnapshotDispatchError::Snapshot(error)) => {
+            let _ = send_response(
+                &mut socket,
+                WebResponse::Error {
+                    request_id: "attach".to_string(),
+                    error: internal_error(&format!(
+                        "failed to build initial state snapshot: {error}"
+                    )),
+                },
+            )
+            .await;
+            state
+                .runtime_manager
+                .release_controller(&active_session.id, &controller_id);
+            return;
+        }
+        Err(SnapshotDispatchError::Transport(error)) => {
+            eprintln!(
+                "warning: failed to send initial state snapshot over websocket: {}",
+                error.message
+            );
+            state
+                .runtime_manager
+                .release_controller(&active_session.id, &controller_id);
+            return;
+        }
     }
 
     loop {
@@ -275,7 +314,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "turn_in_progress".to_string(),
+                                        code: web_error_code::TURN_IN_PROGRESS.to_string(),
                                         message: "cannot switch sessions while a turn is still streaming"
                                             .to_string(),
                                         details: Some(json!({
@@ -297,7 +336,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "session_not_found".to_string(),
+                                        code: web_error_code::SESSION_NOT_FOUND.to_string(),
                                         message: "session does not exist".to_string(),
                                         details: None,
                                     },
@@ -336,7 +375,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_session".to_string(),
+                                        code: web_error_code::INVALID_SESSION.to_string(),
                                         message: "settings session is not currently attached"
                                             .to_string(),
                                         details: None,
@@ -358,7 +397,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "turn_in_progress".to_string(),
+                                        code: web_error_code::TURN_IN_PROGRESS.to_string(),
                                         message: "cannot change model or provider while a turn is still streaming"
                                             .to_string(),
                                         details: Some(json!({
@@ -385,7 +424,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_provider".to_string(),
+                                        code: web_error_code::INVALID_PROVIDER.to_string(),
                                         message: "provider must be one of openai, zai, or test"
                                             .to_string(),
                                         details: Some(json!({ "provider": provider })),
@@ -406,7 +445,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_model".to_string(),
+                                        code: web_error_code::INVALID_MODEL.to_string(),
                                         message: "model must not be empty".to_string(),
                                         details: None,
                                     },
@@ -469,7 +508,7 @@ async fn handle_socket(
                                     WebResponse::Error {
                                         request_id,
                                         error: ResponseError {
-                                            code: "settings_update_failed".to_string(),
+                                        code: web_error_code::SETTINGS_UPDATE_FAILED.to_string(),
                                             message: error,
                                             details: None,
                                         },
@@ -494,7 +533,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_session".to_string(),
+                                        code: web_error_code::INVALID_SESSION.to_string(),
                                         message: "prompt session is not currently attached".to_string(),
                                         details: None,
                                     },
@@ -617,7 +656,7 @@ async fn handle_socket(
                                     WebResponse::Error {
                                         request_id,
                                         error: ResponseError {
-                                            code: "auth_start_failed".to_string(),
+                                        code: web_error_code::AUTH_START_FAILED.to_string(),
                                             message: error.to_string(),
                                             details: Some(json!({ "provider": "openai" })),
                                         },
@@ -644,7 +683,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_auth_callback".to_string(),
+                                        code: web_error_code::INVALID_AUTH_CALLBACK.to_string(),
                                         message: "paste the final redirect URL or authorization code"
                                             .to_string(),
                                         details: None,
@@ -715,7 +754,7 @@ async fn handle_socket(
                                     WebResponse::Error {
                                         request_id,
                                         error: ResponseError {
-                                            code: "auth_completion_failed".to_string(),
+                                        code: web_error_code::AUTH_COMPLETION_FAILED.to_string(),
                                             message: error.to_string(),
                                             details: Some(json!({ "provider": "openai" })),
                                         },
@@ -743,7 +782,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_provider".to_string(),
+                                        code: web_error_code::INVALID_PROVIDER.to_string(),
                                         message: "login provider must be openai or zai".to_string(),
                                         details: Some(json!({ "provider": provider })),
                                     },
@@ -763,7 +802,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "auth_flow_mismatch".to_string(),
+                                        code: web_error_code::AUTH_FLOW_MISMATCH.to_string(),
                                         message: "openai login must be completed in the browser"
                                             .to_string(),
                                         details: Some(json!({ "provider": provider })),
@@ -784,7 +823,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_api_key".to_string(),
+                                        code: web_error_code::INVALID_API_KEY.to_string(),
                                         message: "API key must not be empty".to_string(),
                                         details: None,
                                     },
@@ -834,7 +873,7 @@ async fn handle_socket(
                                     WebResponse::Error {
                                         request_id,
                                         error: ResponseError {
-                                            code: "auth_login_failed".to_string(),
+                                        code: web_error_code::AUTH_LOGIN_FAILED.to_string(),
                                             message: error.to_string(),
                                             details: None,
                                         },
@@ -859,7 +898,7 @@ async fn handle_socket(
                                 WebResponse::Error {
                                     request_id,
                                     error: ResponseError {
-                                        code: "invalid_session".to_string(),
+                                        code: web_error_code::INVALID_SESSION.to_string(),
                                         message: "abort session is not currently attached".to_string(),
                                         details: None,
                                     },
@@ -918,7 +957,7 @@ async fn handle_socket(
                                 &mut socket,
                                 WebResponse::Error {
                                     request_id,
-                                    error: invalid_task_control_session_error(),
+                                        error: invalid_task_control_session_error(),
                                 },
                             )
                             .await
@@ -950,7 +989,7 @@ async fn handle_socket(
                                     &mut socket,
                                     WebResponse::Error {
                                         request_id,
-                                        error: task_control_error("cancel", &task_id, error),
+                                        error: task_control_error(error),
                                     },
                                 )
                                 .await
@@ -971,7 +1010,7 @@ async fn handle_socket(
                                 &mut socket,
                                 WebResponse::Error {
                                     request_id,
-                                    error: invalid_task_control_session_error(),
+                                        error: invalid_task_control_session_error(),
                                 },
                             )
                             .await
@@ -1003,7 +1042,7 @@ async fn handle_socket(
                                     &mut socket,
                                     WebResponse::Error {
                                         request_id,
-                                        error: task_control_error("retry", &task_id, error),
+                                        error: task_control_error(error),
                                     },
                                 )
                                 .await
@@ -1024,7 +1063,7 @@ async fn handle_socket(
                                 &mut socket,
                                 WebResponse::Error {
                                     request_id,
-                                    error: invalid_task_control_session_error(),
+                                        error: invalid_task_control_session_error(),
                                 },
                             )
                             .await
@@ -1056,7 +1095,7 @@ async fn handle_socket(
                                     &mut socket,
                                     WebResponse::Error {
                                         request_id,
-                                        error: task_control_error("resume", &task_id, error),
+                                        error: task_control_error(error),
                                     },
                                 )
                                 .await
@@ -1078,7 +1117,7 @@ async fn handle_socket(
                                 &mut socket,
                                 WebResponse::Error {
                                     request_id,
-                                    error: invalid_task_control_session_error(),
+                                        error: invalid_task_control_session_error(),
                                 },
                             )
                             .await
@@ -1117,11 +1156,7 @@ async fn handle_socket(
                                     &mut socket,
                                     WebResponse::Error {
                                         request_id,
-                                        error: task_control_error(
-                                            "reprioritize",
-                                            &task_id,
-                                            error,
-                                        ),
+                                        error: task_control_error(error),
                                     },
                                 )
                                 .await
@@ -1143,12 +1178,7 @@ async fn handle_socket(
                                 &mut socket,
                                 WebResponse::Error {
                                     request_id,
-                                    error: ResponseError {
-                                        code: "invalid_session".to_string(),
-                                        message: "task watch session is not currently attached"
-                                            .to_string(),
-                                        details: None,
-                                    },
+                                        error: invalid_task_watch_session_error(),
                                 },
                             )
                             .await
@@ -1160,7 +1190,7 @@ async fn handle_socket(
                         }
 
                         let after_sequence = after_sequence.unwrap_or(0);
-                        match task_watch_bootstrap_data(
+                        match task_watch_bootstrap_data_for_api(
                             &state,
                             &active_session.id,
                             &request_id,
@@ -1328,89 +1358,121 @@ async fn next_task_watch_tick(task_watch: Option<&TaskWatchState>) {
     }
 }
 
-fn task_watch_error(error: anyhow::Error) -> ResponseError {
-    let message = error.to_string();
-    if message.contains("task event cursor") {
-        return ResponseError {
-            code: "invalid_task_cursor".to_string(),
-            message,
-            details: None,
-        };
-    }
-    if message.contains("task event stream not found") || message.contains("task not found") {
-        return ResponseError {
-            code: "task_not_found".to_string(),
-            message,
-            details: None,
-        };
+async fn task_watch_bootstrap_data_for_api(
+    state: &WebAppState,
+    session_id: &str,
+    request_id: &str,
+    task_id: &str,
+    after_sequence: i64,
+) -> Result<snapshot::TaskWatchBootstrapData, TaskWatchApiError> {
+    ensure_task_owned_by_session_for_watch(state, session_id, task_id).await?;
+
+    let task_id_owned = task_id.to_string();
+    let store_ref = state.store.clone();
+    let cursor_state = store::store_run(&store_ref, move |store| {
+        crate::store::TaskEventRecord::replay_cursor_state(store, &task_id_owned, after_sequence)
+    })
+    .await
+    .map_err(|error| TaskWatchApiError::Internal {
+        message: format!("failed to validate task watch cursor: {error:#}"),
+    })?;
+
+    match cursor_state {
+        TaskEventReplayCursorState::Valid => {}
+        TaskEventReplayCursorState::NegativeCursor => {
+            return Err(TaskWatchApiError::InvalidCursor {
+                message: format!("task event cursor must be >= 0, got {after_sequence}"),
+            });
+        }
+        TaskEventReplayCursorState::InvalidCursor => {
+            return Err(TaskWatchApiError::InvalidCursor {
+                message: format!(
+                    "task event cursor {after_sequence} is invalid for task {task_id}"
+                ),
+            });
+        }
+        TaskEventReplayCursorState::TaskNotFound => {
+            return Err(TaskWatchApiError::TaskNotFound {
+                message: format!("task event stream not found for task {task_id}"),
+            });
+        }
     }
 
-    ResponseError {
-        code: "task_watch_failed".to_string(),
-        message,
-        details: None,
-    }
-}
-
-fn invalid_task_control_session_error() -> ResponseError {
-    ResponseError {
-        code: "invalid_session".to_string(),
-        message: "task control session is not currently attached".to_string(),
-        details: None,
-    }
-}
-
-fn task_control_error(action: &str, task_id: &str, error: anyhow::Error) -> ResponseError {
-    let message = error.to_string();
-    let code = if message.contains("task not found") {
-        "task_not_found"
-    } else if message.contains("only allowed")
-        || message.contains("already requested")
-        || message.contains("invalid task transition")
-        || message.contains("invalid attempt transition")
-    {
-        "invalid_task_state"
-    } else {
-        "task_control_failed"
-    };
-
-    ResponseError {
-        code: code.to_string(),
-        message,
-        details: Some(json!({
-            "action": action,
-            "task_id": task_id,
-        })),
-    }
+    task_watch_bootstrap_data(state, session_id, request_id, task_id, after_sequence)
+        .await
+        .map_err(|error| TaskWatchApiError::Internal {
+            message: format!("failed to build task watch bootstrap: {error:#}"),
+        })
 }
 
 async fn ensure_task_owned_by_session(
     state: &WebAppState,
     session_id: &str,
     task_id: &str,
-) -> anyhow::Result<TaskRecord> {
+    action: &str,
+) -> Result<TaskRecord, TaskControlApiError> {
     let store_ref = state.store.clone();
     let session_id_owned = session_id.to_string();
     let task_id_owned = task_id.to_string();
     store::store_run(&store_ref, move |store| {
-        TaskRecord::get_owned_by_session(store, &task_id_owned, &session_id_owned)
+        let Some(task) = TaskRecord::find(store, &task_id_owned)? else {
+            return Ok(None);
+        };
+        if task.owner_session_id.as_deref() != Some(session_id_owned.as_str()) {
+            return Ok(None);
+        }
+        Ok(Some(task))
     })
     .await
+    .map_err(|error| TaskControlApiError::Internal {
+        action: action.to_string(),
+        task_id: task_id.to_string(),
+        message: format!("failed to load task {task_id}: {error:#}"),
+    })?
+    .ok_or_else(|| TaskControlApiError::TaskNotFound {
+        action: action.to_string(),
+        task_id: task_id.to_string(),
+        message: "task not found".to_string(),
+    })
+}
+
+async fn ensure_task_owned_by_session_for_watch(
+    state: &WebAppState,
+    session_id: &str,
+    task_id: &str,
+) -> Result<TaskRecord, TaskWatchApiError> {
+    ensure_task_owned_by_session(state, session_id, task_id, "watch")
+        .await
+        .map_err(|error| match error {
+            TaskControlApiError::TaskNotFound { .. } => TaskWatchApiError::TaskNotFound {
+                message: "task not found".to_string(),
+            },
+            TaskControlApiError::InvalidState { message, .. }
+            | TaskControlApiError::Internal { message, .. } => {
+                TaskWatchApiError::Internal { message }
+            }
+        })
 }
 
 async fn cancel_task_via_api(
     state: &WebAppState,
     session_id: &str,
     task_id: &str,
-) -> anyhow::Result<TaskControlResponseData> {
-    ensure_task_owned_by_session(state, session_id, task_id).await?;
+) -> Result<TaskControlResponseData, TaskControlApiError> {
+    let action = "cancel";
+    ensure_task_owned_by_session(state, session_id, task_id, action).await?;
     validate_cancelable_task_for_api(state, task_id).await?;
     let affected_task_ids = state
         .runtime_manager
-        .cancel_task_graph(&state.store, task_id)?;
-    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
+        .cancel_task_graph(&state.store, task_id)
+        .map_err(|error| TaskControlApiError::Internal {
+            action: action.to_string(),
+            task_id: task_id.to_string(),
+            message: format!("failed to cancel task: {error:#}"),
+        })?;
+    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id, action).await?;
     Ok(TaskControlResponseData {
-        action: "cancel".to_string(),
+        action: action.to_string(),
         session_id: session_id.to_string(),
         task_id: task_id.to_string(),
         task_state: task_state.to_string(),
@@ -1424,12 +1486,21 @@ async fn retry_task_via_api(
     state: &WebAppState,
     session_id: &str,
     task_id: &str,
-) -> anyhow::Result<TaskControlResponseData> {
-    ensure_task_owned_by_session(state, session_id, task_id).await?;
-    let new_attempt_id = state.runtime_manager.retry_task(&state.store, task_id)?;
-    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
+) -> Result<TaskControlResponseData, TaskControlApiError> {
+    let action = "retry";
+    ensure_task_owned_by_session(state, session_id, task_id, action).await?;
+    validate_task_control_state_for_api(state, task_id, action).await?;
+    let new_attempt_id = state
+        .runtime_manager
+        .retry_task(&state.store, task_id)
+        .map_err(|error| TaskControlApiError::Internal {
+            action: action.to_string(),
+            task_id: task_id.to_string(),
+            message: format!("failed to retry task: {error:#}"),
+        })?;
+    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id, action).await?;
     Ok(TaskControlResponseData {
-        action: "retry".to_string(),
+        action: action.to_string(),
         session_id: session_id.to_string(),
         task_id: task_id.to_string(),
         task_state: task_state.to_string(),
@@ -1443,12 +1514,21 @@ async fn resume_task_via_api(
     state: &WebAppState,
     session_id: &str,
     task_id: &str,
-) -> anyhow::Result<TaskControlResponseData> {
-    ensure_task_owned_by_session(state, session_id, task_id).await?;
-    let new_attempt_id = state.runtime_manager.resume_task(&state.store, task_id)?;
-    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
+) -> Result<TaskControlResponseData, TaskControlApiError> {
+    let action = "resume";
+    ensure_task_owned_by_session(state, session_id, task_id, action).await?;
+    validate_task_control_state_for_api(state, task_id, action).await?;
+    let new_attempt_id = state
+        .runtime_manager
+        .resume_task(&state.store, task_id)
+        .map_err(|error| TaskControlApiError::Internal {
+            action: action.to_string(),
+            task_id: task_id.to_string(),
+            message: format!("failed to resume task: {error:#}"),
+        })?;
+    let (_, task_state) = task_snapshot_for_control(state, session_id, task_id, action).await?;
     Ok(TaskControlResponseData {
-        action: "resume".to_string(),
+        action: action.to_string(),
         session_id: session_id.to_string(),
         task_id: task_id.to_string(),
         task_state: task_state.to_string(),
@@ -1463,14 +1543,21 @@ async fn reprioritize_task_via_api(
     session_id: &str,
     task_id: &str,
     priority: i64,
-) -> anyhow::Result<TaskControlResponseData> {
-    ensure_task_owned_by_session(state, session_id, task_id).await?;
+) -> Result<TaskControlResponseData, TaskControlApiError> {
+    let action = "reprioritize";
+    ensure_task_owned_by_session(state, session_id, task_id, action).await?;
+    validate_task_control_state_for_api(state, task_id, action).await?;
     state
         .runtime_manager
-        .reprioritize_task(&state.store, task_id, priority)?;
-    let (task, task_state) = task_snapshot_for_control(state, session_id, task_id).await?;
+        .reprioritize_task(&state.store, task_id, priority)
+        .map_err(|error| TaskControlApiError::Internal {
+            action: action.to_string(),
+            task_id: task_id.to_string(),
+            message: format!("failed to reprioritize task: {error:#}"),
+        })?;
+    let (task, task_state) = task_snapshot_for_control(state, session_id, task_id, action).await?;
     Ok(TaskControlResponseData {
-        action: "reprioritize".to_string(),
+        action: action.to_string(),
         session_id: session_id.to_string(),
         task_id: task_id.to_string(),
         task_state: task_state.to_string(),
@@ -1484,45 +1571,133 @@ async fn task_snapshot_for_control(
     state: &WebAppState,
     session_id: &str,
     task_id: &str,
-) -> anyhow::Result<(TaskRecord, TaskLifecycleState)> {
+    action: &str,
+) -> Result<(TaskRecord, TaskLifecycleState), TaskControlApiError> {
     let store_ref = state.store.clone();
     let session_id_owned = session_id.to_string();
     let task_id_owned = task_id.to_string();
     store::store_run(&store_ref, move |store| {
-        let task = TaskRecord::get_owned_by_session(store, &task_id_owned, &session_id_owned)?;
+        let Some(task) = TaskRecord::find(store, &task_id_owned)? else {
+            return Ok(None);
+        };
+        if task.owner_session_id.as_deref() != Some(session_id_owned.as_str()) {
+            return Ok(None);
+        }
         let task_state = TaskRecord::current_state(store, &task_id_owned)?;
-        Ok((task, task_state))
+        Ok(Some((task, task_state)))
     })
     .await
+    .map_err(|error| TaskControlApiError::Internal {
+        action: action.to_string(),
+        task_id: task_id.to_string(),
+        message: format!("failed to load task control snapshot: {error:#}"),
+    })?
+    .ok_or_else(|| TaskControlApiError::TaskNotFound {
+        action: action.to_string(),
+        task_id: task_id.to_string(),
+        message: "task not found".to_string(),
+    })
 }
 
 async fn validate_cancelable_task_for_api(
     state: &WebAppState,
     task_id: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), TaskControlApiError> {
     let store_ref = state.store.clone();
     let task_id_owned = task_id.to_string();
     store::store_run(&store_ref, move |store| {
         let task_state = TaskRecord::current_state(store, &task_id_owned)?;
-        if matches!(
-            task_state,
-            TaskLifecycleState::Completed | TaskLifecycleState::Cancelled
-        ) {
-            anyhow::bail!(
-                "cancel is only allowed for nonterminal tasks: task {task_id_owned} is {task_state}"
-            );
-        }
-        if task_state == TaskLifecycleState::CancelRequested {
-            anyhow::bail!("cancel is already requested for task {task_id_owned}");
-        }
-        if task_state == TaskLifecycleState::Failed {
-            anyhow::bail!(
-                "cancel is only allowed before terminal failure: task {task_id_owned} is {task_state}"
-            );
-        }
-        Ok(())
+        Ok(task_state)
     })
     .await
+    .map_err(|error| TaskControlApiError::Internal {
+        action: "cancel".to_string(),
+        task_id: task_id.to_string(),
+        message: format!("failed to validate cancel state: {error:#}"),
+    })
+    .and_then(|task_state| match task_state {
+        TaskLifecycleState::Completed | TaskLifecycleState::Cancelled => {
+            Err(TaskControlApiError::InvalidState {
+                action: "cancel".to_string(),
+                task_id: task_id.to_string(),
+                message: format!(
+                    "cancel is only allowed for nonterminal tasks: task {task_id} is {task_state}"
+                ),
+            })
+        }
+        TaskLifecycleState::CancelRequested => Err(TaskControlApiError::InvalidState {
+            action: "cancel".to_string(),
+            task_id: task_id.to_string(),
+            message: format!("cancel is already requested for task {task_id}"),
+        }),
+        TaskLifecycleState::Failed => Err(TaskControlApiError::InvalidState {
+            action: "cancel".to_string(),
+            task_id: task_id.to_string(),
+            message: format!(
+                "cancel is only allowed before terminal failure: task {task_id} is {task_state}"
+            ),
+        }),
+        _ => Ok(()),
+    })
+}
+
+async fn validate_task_control_state_for_api(
+    state: &WebAppState,
+    task_id: &str,
+    action: &str,
+) -> Result<(), TaskControlApiError> {
+    let store_ref = state.store.clone();
+    let task_id_owned = task_id.to_string();
+    let action_owned = action.to_string();
+    let task_state = store::store_run(&store_ref, move |store| {
+        let _ = TaskRecord::get(store, &task_id_owned)?;
+        TaskRecord::current_state(store, &task_id_owned)
+    })
+    .await
+    .map_err(|error| TaskControlApiError::Internal {
+        action: action.to_string(),
+        task_id: task_id.to_string(),
+        message: format!("failed to validate {action} state: {error:#}"),
+    })?;
+
+    let valid = match action_owned.as_str() {
+        "retry" => matches!(
+            task_state,
+            TaskLifecycleState::Failed | TaskLifecycleState::Retryable
+        ),
+        "resume" => matches!(
+            task_state,
+            TaskLifecycleState::Interrupted | TaskLifecycleState::Retryable
+        ),
+        "reprioritize" => matches!(
+            task_state,
+            TaskLifecycleState::Queued | TaskLifecycleState::Ready
+        ),
+        _ => true,
+    };
+
+    if valid {
+        return Ok(());
+    }
+
+    let message = match action {
+        "retry" => format!(
+            "retry is only allowed from failed or retryable tasks: task {task_id} is {task_state}"
+        ),
+        "resume" => format!(
+            "resume is only allowed from interrupted or retryable tasks: task {task_id} is {task_state}"
+        ),
+        "reprioritize" => format!(
+            "reprioritize is only allowed for queued/ready tasks: {task_id} is {task_state}"
+        ),
+        _ => format!("{action} is not allowed for task {task_id} in state {task_state}"),
+    };
+
+    Err(TaskControlApiError::InvalidState {
+        action: action.to_string(),
+        task_id: task_id.to_string(),
+        message,
+    })
 }
 
 async fn send_task_event_records(
@@ -1530,7 +1705,7 @@ async fn send_task_event_records(
     request_id: &str,
     session_id: &str,
     records: &[crate::store::TaskEventRecord],
-) -> std::result::Result<(), ()> {
+) -> Result<(), WsIoError> {
     for record in records {
         let Some(ui_event) = runtime_event_to_ui_event(
             &crate::events::AgentEvent::from_task_event_record(record),
@@ -1551,10 +1726,10 @@ async fn send_bootstrap_event(
     state: &WebAppState,
     session_id: &str,
     controller_id: &str,
-) -> std::result::Result<(), ()> {
+) -> Result<(), SnapshotDispatchError> {
     let data = snapshot_data(state, session_id, controller_id)
         .await
-        .map_err(|_| ())?;
+        .map_err(SnapshotDispatchError::Snapshot)?;
 
     send_event(
         socket,
@@ -1565,6 +1740,7 @@ async fn send_bootstrap_event(
         },
     )
     .await
+    .map_err(SnapshotDispatchError::Transport)
 }
 
 async fn send_connect_snapshot_event(
@@ -1572,10 +1748,10 @@ async fn send_connect_snapshot_event(
     state: &WebAppState,
     session_id: &str,
     controller_id: &str,
-) -> std::result::Result<(), ()> {
+) -> Result<(), SnapshotDispatchError> {
     let data = bootstrap_snapshot_data(state, session_id, controller_id)
         .await
-        .map_err(|_| ())?;
+        .map_err(SnapshotDispatchError::Snapshot)?;
 
     send_event(
         socket,
@@ -1586,6 +1762,7 @@ async fn send_connect_snapshot_event(
         },
     )
     .await
+    .map_err(SnapshotDispatchError::Transport)
 }
 
 fn is_supported_session_provider(provider: &str) -> bool {

@@ -114,10 +114,10 @@ impl Tool for ObservedUnknownTool {
     }
 
     fn execute_with_result(&self, _args: serde_json::Value) -> anyhow::Result<ToolExecutionResult> {
-        Ok(ToolExecutionResult {
-            output: self.output.clone(),
-            edit_observations: vec![self.observation.clone()],
-        })
+        Ok(ToolExecutionResult::with_edit_observations(
+            self.output.clone(),
+            vec![self.observation.clone()],
+        ))
     }
 }
 

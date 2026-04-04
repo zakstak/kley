@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::diagnostics::Diagnostic;
 use crate::tools::editing::EditObservation;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -372,6 +373,8 @@ pub enum UiEvent {
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         edit_observation: Option<EditObservation>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<Diagnostic>,
         context_usage: ContextUsage,
     },
     #[serde(rename = "turn.completed")]

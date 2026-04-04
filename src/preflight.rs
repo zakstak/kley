@@ -4,6 +4,8 @@ use std::process::Command;
 
 use anyhow::Result;
 
+use crate::diagnostics::{Diagnostic, DiagnosticSeverity};
+
 const REPO_SLUG: &str = "zakstak/kley";
 
 pub fn run(writer: &mut impl Write) -> Result<bool> {
@@ -420,9 +422,46 @@ impl KleyLauncher {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Report {
     lines: Vec<String>,
+    checks: Vec<PreflightCheck>,
     pass: usize,
     fail: usize,
     warn: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreflightCheck {
+    label: String,
+    required: bool,
+    success: bool,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl PreflightCheck {
+    fn new(label: impl Into<String>, required: bool, success: bool) -> Self {
+        let label = label.into();
+        let (code, severity) = match (required, success) {
+            (_, true) => ("preflight.check.ok", DiagnosticSeverity::Info),
+            (true, false) => ("preflight.check.failed", DiagnosticSeverity::Error),
+            (false, false) => (
+                "preflight.check.optional_missing",
+                DiagnosticSeverity::Warning,
+            ),
+        };
+
+        Self {
+            label: label.clone(),
+            required,
+            success,
+            diagnostics: vec![
+                Diagnostic::new(code, severity, label, "preflight").with_details(
+                    serde_json::json!({
+                        "required": required,
+                        "success": success,
+                    }),
+                ),
+            ],
+        }
+    }
 }
 
 impl Report {
@@ -434,24 +473,26 @@ impl Report {
         self.lines.push(String::new());
     }
 
-    fn required(&mut self, label: &str, success: bool) {
-        if success {
+    fn record_check(&mut self, check: PreflightCheck) {
+        if check.success {
             self.pass += 1;
-            self.push_line(format!("  ✓ {label}"));
-        } else {
+            self.push_line(format!("  ✓ {}", check.label));
+        } else if check.required {
             self.fail += 1;
-            self.push_line(format!("  ✗ {label}"));
+            self.push_line(format!("  ✗ {}", check.label));
+        } else {
+            self.warn += 1;
+            self.push_line(format!("  ⚠ {} (optional)", check.label));
         }
+        self.checks.push(check);
+    }
+
+    fn required(&mut self, label: &str, success: bool) {
+        self.record_check(PreflightCheck::new(label, true, success));
     }
 
     fn optional(&mut self, label: &str, success: bool) {
-        if success {
-            self.pass += 1;
-            self.push_line(format!("  ✓ {label}"));
-        } else {
-            self.warn += 1;
-            self.push_line(format!("  ⚠ {label} (optional)"));
-        }
+        self.record_check(PreflightCheck::new(label, false, success));
     }
 
     fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
@@ -506,6 +547,8 @@ impl CommandSpec {
 pub struct CommandOutput {
     pub success: bool,
     pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
 }
 
 impl CommandOutput {
@@ -513,6 +556,8 @@ impl CommandOutput {
         Self {
             success: true,
             stdout: stdout.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
         }
     }
 
@@ -542,6 +587,8 @@ impl CommandRunner for ProcessRunner {
             Ok(output) => CommandOutput {
                 success: output.status.success(),
                 stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                exit_code: output.status.code(),
             },
             Err(_) => CommandOutput::default(),
         }
@@ -553,11 +600,11 @@ pub mod preflight_test_support {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
 
-    pub use super::{
-        command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
-        LspCheckResult, LspRequirement,
-    };
     pub use super::{CommandOutput, CommandRunner, CommandSpec};
+    pub use super::{
+        LspCheckResult, LspRequirement, command_for_lsp_requirement, lsp_requirements,
+        run_required_lsp_checks_with_runner,
+    };
 
     pub struct FakeRunner {
         responses: RefCell<HashMap<String, VecDeque<CommandOutput>>>,
@@ -611,6 +658,12 @@ mod tests {
         assert_eq!(report.warn, 1);
         assert_eq!(report.fail, 0);
         assert_eq!(report.lines, vec!["  ⚠ cmake is installed (optional)"]);
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].diagnostics.len(), 1);
+        assert_eq!(
+            report.checks[0].diagnostics[0].severity,
+            DiagnosticSeverity::Warning
+        );
     }
 
     #[test]

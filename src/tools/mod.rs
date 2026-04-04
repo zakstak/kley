@@ -16,6 +16,7 @@ pub mod shell;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::diagnostics::{Diagnostic, diagnostics_from_edit_observations, has_error_diagnostics};
 use crate::tools::editing::EditObservation;
 
 pub struct DelegateTaskTool;
@@ -90,6 +91,7 @@ impl Tool for DelegateTaskTool {
 pub struct ToolExecutionResult {
     pub output: String,
     pub edit_observations: Vec<EditObservation>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl ToolExecutionResult {
@@ -97,7 +99,32 @@ impl ToolExecutionResult {
         Self {
             output: output.into(),
             edit_observations: Vec::new(),
+            diagnostics: Vec::new(),
         }
+    }
+
+    pub fn with_edit_observations(
+        output: impl Into<String>,
+        edit_observations: Vec<EditObservation>,
+    ) -> Self {
+        let diagnostics = diagnostics_from_edit_observations(&edit_observations);
+        Self {
+            output: output.into(),
+            edit_observations,
+            diagnostics,
+        }
+    }
+
+    pub fn with_diagnostics(output: impl Into<String>, diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            output: output.into(),
+            edit_observations: Vec::new(),
+            diagnostics,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        !has_error_diagnostics(&self.diagnostics)
     }
 }
 
@@ -333,5 +360,31 @@ mod tests {
         let result = ToolExecutionResult::from_output("ok");
         assert_eq!(result.output, "ok");
         assert!(result.edit_observations.is_empty());
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn tool_execution_result_with_edit_observations_derives_diagnostics() {
+        let result = ToolExecutionResult::with_edit_observations(
+            "Error: stale_reference",
+            vec![EditObservation {
+                engine: "hashline".to_string(),
+                tool_name: "hashline_edit".to_string(),
+                path: "src/lib.rs".to_string(),
+                edit_count: 1,
+                applied_count: 0,
+                stale_reference_count: 1,
+                noop_count: 0,
+                failure_kind: Some("stale_reference".to_string()),
+                duration_ms: 3,
+                artifact_path: None,
+                artifact_id: None,
+                model_output_bounded: true,
+            }],
+        );
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "tool.edit.stale_reference");
+        assert!(!result.is_success());
     }
 }

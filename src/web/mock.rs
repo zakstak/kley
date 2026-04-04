@@ -499,6 +499,7 @@ fn prompt_sequence(index: usize, request_id: &str, session_id: &str, prompt: &st
                 artifact_id: Some("mock-artifact-001".to_string()),
                 model_output_bounded: true,
             }),
+            diagnostics: Vec::new(),
             context_usage: mock_context_usage(34),
         });
     }

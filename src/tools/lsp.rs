@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use urlencoding::{decode, encode};
 
-use super::Tool;
+use super::{Tool, ToolExecutionResult};
+use crate::diagnostics::{Diagnostic, DiagnosticSeverity};
 use crate::lsp::{
     LspService, builtin_server_for_extension, builtin_server_for_path, resolve_workspace_root,
 };
@@ -66,12 +67,38 @@ impl Tool for LspDiagnosticsTool {
     }
 
     fn execute(&self, args: Value) -> Result<String> {
+        self.execute_with_result(args).map(|result| result.output)
+    }
+
+    fn execute_with_result(&self, args: Value) -> Result<ToolExecutionResult> {
         let args: DiagnosticsArgs = match serde_json::from_value(args) {
             Ok(args) => args,
-            Err(error) => return Ok(format!("Error: invalid arguments: {error}")),
+            Err(error) => {
+                return Ok(ToolExecutionResult::with_diagnostics(
+                    format!("Error: invalid arguments: {error}"),
+                    vec![
+                        Diagnostic::error(
+                            "tool.lsp.invalid_arguments",
+                            format!("invalid arguments: {error}"),
+                            "tools.lsp",
+                        )
+                        .with_operation(self.name()),
+                    ],
+                ));
+            }
         };
         if args.file_path.trim().is_empty() {
-            return Ok("Error: file_path is required".to_string());
+            return Ok(ToolExecutionResult::with_diagnostics(
+                "Error: file_path is required",
+                vec![
+                    Diagnostic::error(
+                        "tool.lsp.file_path_required",
+                        "file_path is required",
+                        "tools.lsp",
+                    )
+                    .with_operation(self.name()),
+                ],
+            ));
         }
 
         Ok(
@@ -83,11 +110,26 @@ impl Tool for LspDiagnosticsTool {
             ) {
                 Ok(context) => match request_diagnostics(self.service.as_ref(), &context) {
                     Ok(result) => {
-                        format_diagnostics_result(&context.file_path, args.severity, &result)?
+                        let diagnostics = normalize_diagnostic_entries(
+                            &context.file_path,
+                            args.severity,
+                            &result,
+                        )
+                        .into_iter()
+                        .map(lsp_result_to_shared_diagnostic)
+                        .collect();
+                        ToolExecutionResult::with_diagnostics(
+                            format_diagnostics_result(&context.file_path, args.severity, &result)?,
+                            diagnostics,
+                        )
                     }
-                    Err(error) => format!("Error: {error}"),
+                    Err(error) => lsp_error_result(
+                        "tool.lsp.request_failed",
+                        format!("Error: {error}"),
+                        error.to_string(),
+                    ),
                 },
-                Err(error) => format!("Error: {error}"),
+                Err(error) => lsp_tool_error_result(&error),
             },
         )
     }
@@ -706,6 +748,49 @@ fn format_diagnostics_result(
     }
 
     serde_json::to_string_pretty(&diagnostics).map_err(Into::into)
+}
+
+fn lsp_result_to_shared_diagnostic(result: DiagnosticResult) -> Diagnostic {
+    let severity = match result.severity.as_str() {
+        "error" => DiagnosticSeverity::Error,
+        "warning" => DiagnosticSeverity::Warning,
+        _ => DiagnosticSeverity::Info,
+    };
+    let code = result
+        .code
+        .clone()
+        .filter(|code| !code.trim().is_empty())
+        .unwrap_or_else(|| "tool.lsp.diagnostic".to_string());
+
+    Diagnostic::new(code, severity, result.message, "tools.lsp")
+        .with_operation("lsp_diagnostics")
+        .with_details(json!({
+            "path": result.path,
+            "range": result.range,
+            "source": result.source,
+            "tags": result.tags,
+        }))
+}
+
+fn lsp_error_result(code: &str, output: String, message: impl Into<String>) -> ToolExecutionResult {
+    ToolExecutionResult::with_diagnostics(
+        output,
+        vec![Diagnostic::error(code, message, "tools.lsp").with_operation("lsp_diagnostics")],
+    )
+}
+
+fn lsp_tool_error_result(error: &LspToolError) -> ToolExecutionResult {
+    let code = match error {
+        LspToolError::FileNotFound(_) => "tool.lsp.file_not_found",
+        LspToolError::UnsupportedFileType => "tool.lsp.unsupported_file_type",
+        LspToolError::DirectoryExtensionRequired => "tool.lsp.directory_extension_required",
+        LspToolError::InvalidRequest(_) => "tool.lsp.invalid_request",
+        LspToolError::InvalidPath(_) => "tool.lsp.invalid_path",
+        LspToolError::InvalidServerResponse(_) => "tool.lsp.invalid_server_response",
+        LspToolError::Server(_) => "tool.lsp.server_error",
+    };
+
+    lsp_error_result(code, format!("Error: {error}"), error.to_string())
 }
 
 fn normalize_location_entries(result: &Value) -> Vec<LocationResult> {
@@ -1819,6 +1904,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, "Error: line must be >= 1");
+    }
+
+    #[test]
+    fn diagnostics_tool_execute_with_result_returns_structured_error_diagnostic() {
+        let tool = LspDiagnosticsTool::new(
+            std::env::temp_dir(),
+            "lsp-diagnostics-structured-error",
+            Arc::new(CountingService::new()),
+        );
+
+        let result = tool
+            .execute_with_result(json!({
+                "file_path": "",
+                "severity": "all",
+                "extension": null
+            }))
+            .unwrap();
+
+        assert_eq!(result.output, "Error: file_path is required");
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "tool.lsp.file_path_required");
     }
 
     #[test]

@@ -19,6 +19,7 @@ use super::settings::{
 };
 use crate::auth::{CredentialStore, ResolvedAuth};
 use crate::compact::CompactConfig;
+use crate::diagnostics::lsp_status;
 use crate::events::{AgentEvent, event_channel};
 use crate::lsp::{LspClientFactory, LspManager, LspService, builtin_catalog};
 use crate::runtime::{RuntimeHooks, SessionRuntime, SubmitResult, TurnCorrelation};
@@ -1848,7 +1849,7 @@ fn apply_lsp_status_report(
     let is_new = !states.contains_key(&key);
     let entry = states.entry(key).or_insert_with(|| RuntimeLspServerState {
         server_id: server_id.to_string(),
-        status: "lsp.detected".to_string(),
+        status: lsp_status::DETECTED.to_string(),
         command: command.map(|parts| parts.to_vec()).unwrap_or_default(),
         workspace_root: workspace_root.to_string(),
         last_file: last_file.map(str::to_string),
@@ -1868,24 +1869,27 @@ fn apply_lsp_status_report(
     }
 
     match status {
-        "lsp.detected" => {
+        lsp_status::DETECTED => {
             if is_new {
                 return true;
             }
-            if entry.status == "lsp.detected" {
+            if entry.status == lsp_status::DETECTED {
                 return false;
             }
             if matches!(
                 entry.status.as_str(),
-                "lsp.starting" | "lsp.ready" | "lsp.failed"
+                lsp_status::STARTING | lsp_status::READY | lsp_status::FAILED
             ) {
                 return false;
             }
             entry.status = status.to_string();
             true
         }
-        "lsp.starting" => {
-            if matches!(entry.status.as_str(), "lsp.ready" | "lsp.failed") {
+        lsp_status::STARTING => {
+            if matches!(
+                entry.status.as_str(),
+                lsp_status::READY | lsp_status::FAILED
+            ) {
                 return false;
             }
             if entry.status == status {
@@ -1894,7 +1898,7 @@ fn apply_lsp_status_report(
             entry.status = status.to_string();
             true
         }
-        "lsp.ready" => {
+        lsp_status::READY => {
             if entry.status == status {
                 return false;
             }
@@ -1902,7 +1906,7 @@ fn apply_lsp_status_report(
             entry.last_error = None;
             true
         }
-        "lsp.failed" => {
+        lsp_status::FAILED => {
             if entry.status == status {
                 return false;
             }

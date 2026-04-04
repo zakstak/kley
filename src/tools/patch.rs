@@ -276,10 +276,10 @@ impl Tool for PatchTool {
 
         let outcome = PatchEditEngine.apply(&request);
         let (output, edit_observations) = finalize_outcome(self.name(), outcome);
-        Ok(ToolExecutionResult {
+        Ok(ToolExecutionResult::with_edit_observations(
             output,
             edit_observations,
-        })
+        ))
     }
 }
 

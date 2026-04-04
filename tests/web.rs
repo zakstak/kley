@@ -4078,6 +4078,7 @@ fn existing_turn_events_remain_backward_compatible() {
             tool_name: "read".to_string(),
             output_preview: "ok".to_string(),
             edit_observation: None,
+            diagnostics: vec![],
             success: true,
             context_used_chars: 196,
             context_max_chars: 512,

@@ -9,6 +9,7 @@ use super::settings::{InheritedSettingsSnapshot, spawn_autonomous_child_task_wit
 use super::{SessionSettingsOverrides, canonical_settings_json};
 use crate::auth::ResolvedAuth;
 use crate::compact::CompactConfig;
+use crate::diagnostics::{Diagnostic, lsp_status};
 use crate::events::{AgentEvent, EventEmitter};
 use crate::lsp::{builtin_server_for_extension, builtin_server_for_path, resolve_workspace_root};
 use crate::provider::{Provider, SendContext, TokenUsage, ToolCall, TurnResult, merge_token_usage};
@@ -53,6 +54,7 @@ pub enum RuntimeEvent {
         name: String,
         output_preview: String,
         edit_observation: Option<Box<EditObservation>>,
+        diagnostics: Vec<Diagnostic>,
     },
 }
 
@@ -893,7 +895,7 @@ impl<'a> SessionRuntime<'a> {
         self.events.emit(AgentEvent::StatusReport {
             session_id: Some(self.session.id.clone()),
             turn_id: None,
-            status: "lsp.detected".to_string(),
+            status: lsp_status::DETECTED.to_string(),
             detail,
             turn_number: self.turn_number,
             server_id: Some(target.server_id.clone()),
@@ -1130,10 +1132,16 @@ impl<'a> SessionRuntime<'a> {
                             None => true,
                         };
 
-                        let (output, edit_observation, success) = if !approved {
+                        let (output, edit_observation, diagnostics, success) = if !approved {
                             (
                                 "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.".to_string(),
                                 None,
+                                vec![Diagnostic::error(
+                                    "tool.approval_denied",
+                                    "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.",
+                                    "runtime.session",
+                                )
+                                .with_operation(call.name.clone())],
                                 false,
                             )
                         } else {
@@ -1165,22 +1173,58 @@ impl<'a> SessionRuntime<'a> {
 
                             if let Some(result) = runtime_handled {
                                 match result {
-                                    Ok(output) => (output, None, true),
-                                    Err(err) => (format!("Tool error: {err:#}"), None, false),
+                                    Ok(output) => (output, None, Vec::new(), true),
+                                    Err(err) => (
+                                        format!("Tool error: {err:#}"),
+                                        None,
+                                        vec![
+                                            Diagnostic::error(
+                                                "tool.runtime_handler_failed",
+                                                format!("Tool error: {err:#}"),
+                                                "runtime.session",
+                                            )
+                                            .with_operation(call.name.clone()),
+                                        ],
+                                        false,
+                                    ),
                                 }
                             } else {
                                 match self.registry.get(&call.name) {
                                     Some(tool) => match tool.execute_with_result(args) {
-                                        Ok(result) => (
-                                            result.output,
-                                            result.edit_observations.first().cloned(),
-                                            true,
+                                        Ok(result) => {
+                                            let success = result.is_success();
+                                            (
+                                                result.output,
+                                                result.edit_observations.first().cloned(),
+                                                result.diagnostics,
+                                                success,
+                                            )
+                                        }
+                                        Err(e) => (
+                                            format!("Tool error: {e:#}"),
+                                            None,
+                                            vec![
+                                                Diagnostic::error(
+                                                    "tool.execution_failed",
+                                                    format!("Tool error: {e:#}"),
+                                                    "runtime.session",
+                                                )
+                                                .with_operation(call.name.clone()),
+                                            ],
+                                            false,
                                         ),
-                                        Err(e) => (format!("Tool error: {e:#}"), None, false),
                                     },
                                     None => (
                                         format!("Error: unknown tool '{}'", call.name),
                                         None,
+                                        vec![
+                                            Diagnostic::error(
+                                                "tool.unknown",
+                                                format!("Unknown tool '{}'", call.name),
+                                                "runtime.session",
+                                            )
+                                            .with_operation(call.name.clone()),
+                                        ],
                                         false,
                                     ),
                                 }
@@ -1194,6 +1238,7 @@ impl<'a> SessionRuntime<'a> {
                             name: call.name.clone(),
                             output_preview: output_preview.clone(),
                             edit_observation: edit_observation.clone().map(Box::new),
+                            diagnostics: diagnostics.clone(),
                         });
 
                         self.with_store(|store| {
@@ -1204,6 +1249,10 @@ impl<'a> SessionRuntime<'a> {
                             if let Some(observation) = &edit_observation {
                                 content["edit_observation"] =
                                     serialize_edit_observation_best_effort(observation);
+                            }
+                            if !diagnostics.is_empty() {
+                                content["diagnostics"] =
+                                    serialize_diagnostics_best_effort(&diagnostics);
                             }
                             Turn::append(
                                 store,
@@ -1250,6 +1299,7 @@ impl<'a> SessionRuntime<'a> {
                             tool_name: call.name.clone(),
                             output_preview,
                             edit_observation: edit_observation.map(Box::new),
+                            diagnostics,
                             success,
                             context_used_chars,
                             context_max_chars,
@@ -1604,6 +1654,10 @@ fn serialize_edit_observation_best_effort(observation: &EditObservation) -> serd
             "model_output_bounded": observation.model_output_bounded,
         })
     })
+}
+
+fn serialize_diagnostics_best_effort(diagnostics: &[Diagnostic]) -> serde_json::Value {
+    serde_json::to_value(diagnostics).unwrap_or_else(|_| serde_json::json!([]))
 }
 
 /// Create a boxed provider for the given provider name.
@@ -1991,10 +2045,10 @@ mod tests {
                 artifact_id: Some("artifact-123".to_string()),
                 model_output_bounded: true,
             };
-            Ok(ToolExecutionResult {
-                output: "applied edits".to_string(),
-                edit_observations: vec![observation],
-            })
+            Ok(ToolExecutionResult::with_edit_observations(
+                "applied edits",
+                vec![observation],
+            ))
         }
     }
 
@@ -2067,14 +2121,32 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("/tmp/artifact.json")
         );
+        let diagnostics = payload
+            .get("diagnostics")
+            .and_then(|value| value.as_array())
+            .expect("diagnostics should remain in persisted turn");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].get("code").and_then(|value| value.as_str()),
+            Some("tool.edit.observation")
+        );
 
         let tool_event = receiver.drain().into_iter().find_map(|event| match event {
             AgentEvent::ToolCallCompleted {
-                edit_observation, ..
-            } => edit_observation,
+                edit_observation,
+                diagnostics,
+                ..
+            } => edit_observation.map(|observation| (observation, diagnostics)),
             _ => None,
         });
-        assert!(tool_event.is_some());
+        let Some((tool_event_observation, diagnostics)) = tool_event else {
+            panic!("tool event expected")
+        };
+        assert_eq!(
+            tool_event_observation.artifact_id.as_deref(),
+            Some("artifact-123")
+        );
+        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]

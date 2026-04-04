@@ -81,10 +81,10 @@ impl Tool for HashlineEditTool {
                     observations: vec![observation],
                 };
                 let (output, edit_observations) = finalize_outcome(self.name(), outcome);
-                return Ok(ToolExecutionResult {
+                return Ok(ToolExecutionResult::with_edit_observations(
                     output,
                     edit_observations,
-                });
+                ));
             }
         };
 
@@ -97,10 +97,10 @@ impl Tool for HashlineEditTool {
 
         let outcome = HashlineEditEngine.apply(&request.as_edit_request());
         let (output, edit_observations) = finalize_outcome(self.name(), outcome);
-        Ok(ToolExecutionResult {
+        Ok(ToolExecutionResult::with_edit_observations(
             output,
             edit_observations,
-        })
+        ))
     }
 }
 

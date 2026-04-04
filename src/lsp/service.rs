@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use serde_json::{Value, json};
 
 use super::builtin_catalog;
+use crate::diagnostics::lsp_status;
 use crate::events::{AgentEvent, EventEmitter};
 use crate::tools::lsp::path_to_file_uri;
 
@@ -239,7 +240,7 @@ impl LspManager {
 
                     self.emit_status(
                         key,
-                        "lsp.starting",
+                        lsp_status::STARTING,
                         format!(
                             "starting {} in {}",
                             command.join(" "),
@@ -259,7 +260,7 @@ impl LspManager {
                                 slot.changed.notify_all();
                                 self.emit_status(
                                     key,
-                                    "lsp.failed",
+                                    lsp_status::FAILED,
                                     failure_reason.clone(),
                                     Some(command.to_vec()),
                                     Some(failure_reason.clone()),
@@ -270,7 +271,7 @@ impl LspManager {
                             slot.changed.notify_all();
                             self.emit_status(
                                 key,
-                                "lsp.ready",
+                                lsp_status::READY,
                                 format!(
                                     "{} ready for {}",
                                     key.server_id,
@@ -286,7 +287,7 @@ impl LspManager {
                             slot.changed.notify_all();
                             self.emit_status(
                                 key,
-                                "lsp.failed",
+                                lsp_status::FAILED,
                                 reason.clone(),
                                 Some(command.to_vec()),
                                 Some(reason.clone()),
@@ -507,7 +508,7 @@ impl LspService for LspManager {
                 if self.mark_failed(&key, reason.clone()) {
                     self.emit_status(
                         &key,
-                        "lsp.failed",
+                        lsp_status::FAILED,
                         reason.clone(),
                         Some(command),
                         Some(reason.clone()),

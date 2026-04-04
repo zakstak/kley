@@ -3,13 +3,13 @@
 //! Mirrors the JS implementation in packages/ai/dist/utils/oauth/openai-codex.js.
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
-use super::{save_openai_oauth_credentials, CredentialStore, OpenAiCredentials};
+use super::{CredentialStore, OpenAiCredentials, save_openai_oauth_credentials};
 
 // ── Constants (verbatim from the JS) ────────────────────────────────────────
 

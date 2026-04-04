@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::mpsc;
 
+use crate::diagnostics::Diagnostic;
 use crate::store::TaskEventRecord;
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::editing::EditObservation;
@@ -65,6 +66,7 @@ pub enum AgentEvent {
         tool_name: String,
         output_preview: String,
         edit_observation: Option<Box<EditObservation>>,
+        diagnostics: Vec<Diagnostic>,
         success: bool,
         context_used_chars: usize,
         context_max_chars: usize,

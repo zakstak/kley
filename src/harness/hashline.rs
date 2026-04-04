@@ -10,6 +10,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::auth::{CredentialStore, ResolvedAuth};
+use crate::diagnostics::{DiagnosticSeverity, has_error_diagnostics};
 use crate::events::event_channel;
 use crate::provider::openai::OpenAiProvider;
 use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START, TestProvider};
@@ -657,6 +658,11 @@ fn classify_tool_result(
         .edit_observations
         .iter()
         .any(|observation| observation.failure_kind.as_deref() == Some("telemetry_unavailable"))
+        || result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "tool.edit.telemetry_unavailable"
+                || (diagnostic.severity == DiagnosticSeverity::Error
+                    && diagnostic.code.contains("telemetry_unavailable"))
+        })
         || result.output.contains("telemetry_unavailable")
     {
         return HarnessStatus::TelemetryFailure;
@@ -666,6 +672,7 @@ fn classify_tool_result(
         .edit_observations
         .iter()
         .any(|observation| observation.failure_kind.is_some())
+        || has_error_diagnostics(&result.diagnostics)
         || result.output.trim_start().starts_with("Error:")
     {
         return HarnessStatus::EditFailure;

@@ -730,6 +730,23 @@ impl TaskRecord {
             .context("task not found")
     }
 
+    pub fn find(store: &Store, task_id: &str) -> Result<Option<TaskRecord>> {
+        let mut stmt = store
+            .conn()
+            .prepare(
+                "SELECT task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at
+                 FROM tasks WHERE task_id = ?1",
+            )
+            .context("failed to prepare task lookup")?;
+
+        let mut rows = stmt.query([task_id]).context("failed to query task")?;
+        let maybe_row = rows.next().context("failed to read task row")?;
+        match maybe_row {
+            Some(row) => Ok(Some(Self::from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn get_owned_by_session(
         store: &Store,
         task_id: &str,
@@ -1622,9 +1639,13 @@ impl TaskEventRecord {
         Ok(events)
     }
 
-    fn validate_replay_cursor(store: &Store, task_id: &str, after_sequence: i64) -> Result<()> {
+    pub fn replay_cursor_state(
+        store: &Store,
+        task_id: &str,
+        after_sequence: i64,
+    ) -> Result<TaskEventReplayCursorState> {
         if after_sequence < 0 {
-            anyhow::bail!("task event cursor must be >= 0, got {after_sequence}");
+            return Ok(TaskEventReplayCursorState::NegativeCursor);
         }
 
         let task_exists: i64 = store
@@ -1637,11 +1658,11 @@ impl TaskEventRecord {
             .context("failed to validate task event stream")?;
 
         if task_exists == 0 {
-            anyhow::bail!("task event stream not found for task {task_id}");
+            return Ok(TaskEventReplayCursorState::TaskNotFound);
         }
 
         if after_sequence == 0 {
-            return Ok(());
+            return Ok(TaskEventReplayCursorState::Valid);
         }
 
         let cursor_matches_task: i64 = store
@@ -1654,10 +1675,25 @@ impl TaskEventRecord {
             .context("failed to validate task event cursor")?;
 
         if cursor_matches_task == 0 {
-            anyhow::bail!("task event cursor {after_sequence} is invalid for task {task_id}");
+            return Ok(TaskEventReplayCursorState::InvalidCursor);
         }
 
-        Ok(())
+        Ok(TaskEventReplayCursorState::Valid)
+    }
+
+    fn validate_replay_cursor(store: &Store, task_id: &str, after_sequence: i64) -> Result<()> {
+        match Self::replay_cursor_state(store, task_id, after_sequence)? {
+            TaskEventReplayCursorState::Valid => Ok(()),
+            TaskEventReplayCursorState::NegativeCursor => {
+                anyhow::bail!("task event cursor must be >= 0, got {after_sequence}")
+            }
+            TaskEventReplayCursorState::TaskNotFound => {
+                anyhow::bail!("task event stream not found for task {task_id}")
+            }
+            TaskEventReplayCursorState::InvalidCursor => {
+                anyhow::bail!("task event cursor {after_sequence} is invalid for task {task_id}")
+            }
+        }
     }
 
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEventRecord> {
@@ -1681,4 +1717,12 @@ impl TaskEventRecord {
                 })?,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskEventReplayCursorState {
+    Valid,
+    NegativeCursor,
+    TaskNotFound,
+    InvalidCursor,
 }
