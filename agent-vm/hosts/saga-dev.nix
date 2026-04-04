@@ -2,7 +2,13 @@
 {
   # Machine facts + lane toggle only.
   networking.hostName = "saga-dev";
-  networking.useDHCP = true;
+  networking.useDHCP = false;
+  networking.interfaces.eth0.ipv4.addresses = [ {
+    address = "10.0.0.50";
+    prefixLength = 24;
+  } ];
+  networking.defaultGateway = "10.0.0.1";
+  networking.nameservers = [ "1.1.1.1" "8.8.8.8" ];
   networking.firewall.allowedTCPPorts = [ 3000 ];
 
   services.qemuGuest.enable = true;
