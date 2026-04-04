@@ -20,10 +20,7 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
     let launcher = resolve_launcher(env);
 
     report.push_line(format!("── Running from: {} ──", env.current_dir.display()));
-    report.push_line(format!(
-        "   Environment: {}",
-        if env.in_docker { "Docker" } else { "Host" }
-    ));
+    report.push_line("   Environment: Host");
     report.push_line(format!(
         "   Git user:  {}",
         command_value_or(runner, git_config_command("user.name"), "(not set)")
@@ -105,104 +102,59 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
     report.optional(
         "gcc is installed",
         runner.run(&command("gcc").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "make is installed",
         runner.run(&command("make").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "cmake is installed",
         runner.run(&command("cmake").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "node is installed",
         runner.run(&command("node").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "npm is installed",
         runner.run(&command("npm").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "go is installed",
         runner.run(&command("go").arg("version")).success,
-        env.in_docker,
     );
     report.optional(
         "python3 is installed",
         runner.run(&command("python3").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "sqlite3 is installed",
         runner.run(&command("sqlite3").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "shellcheck is installed",
         runner.run(&command("shellcheck").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "tree is installed",
         runner.run(&command("tree").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "jq is installed",
         runner.run(&command("jq").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "fd is installed",
         runner.run(&command("fd").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "bat is installed",
         runner.run(&command("bat").arg("--version")).success,
-        env.in_docker,
     );
     report.blank_line();
 
     report.push_line("── LSPs ──");
-    report.optional(
-        "rust-analyzer",
-        runner
-            .run(&command("rust-analyzer").arg("--version"))
-            .success,
-        env.in_docker,
-    );
-    report.optional(
-        "gopls",
-        runner.run(&command("gopls").arg("version")).success,
-        env.in_docker,
-    );
-    report.optional(
-        "typescript-language-server",
-        runner
-            .run(&command("typescript-language-server").arg("--version"))
-            .success,
-        env.in_docker,
-    );
-    report.optional(
-        "bash-language-server",
-        runner
-            .run(&command("bash-language-server").arg("--version"))
-            .success,
-        env.in_docker,
-    );
-    report.optional(
-        "yaml-language-server",
-        runner
-            .run(&command("yaml-language-server").arg("--version"))
-            .success,
-        env.in_docker,
-    );
+    run_required_lsp_checks(&mut report, runner);
     report.blank_line();
 
     report.push_line("── Linters & Formatters ──");
@@ -211,29 +163,20 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
         runner
             .run(&command("golangci-lint").arg("--version"))
             .success,
-        env.in_docker,
     );
     report.optional(
         "prettier",
         runner.run(&command("prettier").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "gitleaks",
         runner.run(&command("gitleaks").arg("version")).success,
-        env.in_docker,
-    );
-    report.optional(
-        "tsgo",
-        runner.run(&command("tsgo").arg("--version")).success,
-        env.in_docker,
     );
     report.optional(
         "cargo-nextest",
         runner
             .run(&command("cargo").args(["nextest", "--version"]))
             .success,
-        env.in_docker,
     );
     report.blank_line();
 
@@ -252,6 +195,79 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
     }
 
     report
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LspRequirement {
+    pub id: &'static str,
+    pub program: &'static str,
+    pub args: &'static [&'static str],
+}
+
+const LSP_REQUIREMENTS: [LspRequirement; 6] = [
+    LspRequirement {
+        id: "rust-analyzer",
+        program: "rust-analyzer",
+        args: &["--version"],
+    },
+    LspRequirement {
+        id: "gopls",
+        program: "gopls",
+        args: &["version"],
+    },
+    LspRequirement {
+        id: "bash-language-server",
+        program: "bash-language-server",
+        args: &["--version"],
+    },
+    LspRequirement {
+        id: "nixd",
+        program: "nixd",
+        args: &["--version"],
+    },
+    LspRequirement {
+        id: "yaml-language-server",
+        program: "yaml-language-server",
+        args: &["--version"],
+    },
+    LspRequirement {
+        id: "pyright",
+        program: "pyright",
+        args: &["--version"],
+    },
+];
+
+pub struct LspCheckResult {
+    pub id: &'static str,
+    pub success: bool,
+}
+
+pub fn lsp_requirements() -> &'static [LspRequirement] {
+    &LSP_REQUIREMENTS
+}
+
+pub fn command_for_lsp_requirement(requirement: &LspRequirement) -> CommandSpec {
+    command(requirement.program).args(requirement.args.iter().copied())
+}
+
+pub fn run_required_lsp_checks_with_runner(runner: &impl CommandRunner) -> Vec<LspCheckResult> {
+    LSP_REQUIREMENTS
+        .iter()
+        .map(|requirement| {
+            let spec = command_for_lsp_requirement(requirement);
+            let success = runner.run(&spec).success;
+            LspCheckResult {
+                id: requirement.id,
+                success,
+            }
+        })
+        .collect()
+}
+
+fn run_required_lsp_checks(report: &mut Report, runner: &impl CommandRunner) {
+    for result in run_required_lsp_checks_with_runner(runner) {
+        report.required(result.id, result.success);
+    }
 }
 
 fn remote_exists(runner: &impl CommandRunner) -> bool {
@@ -373,7 +389,6 @@ fn cargo_launcher_help_command(manifest_path: &Path) -> CommandSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeEnv {
-    in_docker: bool,
     current_dir: PathBuf,
     current_exe: PathBuf,
 }
@@ -381,7 +396,6 @@ struct RuntimeEnv {
 impl RuntimeEnv {
     fn detect() -> Self {
         Self {
-            in_docker: Path::new("/.dockerenv").exists(),
             current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             current_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kley")),
         }
@@ -430,16 +444,13 @@ impl Report {
         }
     }
 
-    fn optional(&mut self, label: &str, success: bool, in_docker: bool) {
+    fn optional(&mut self, label: &str, success: bool) {
         if success {
             self.pass += 1;
             self.push_line(format!("  ✓ {label}"));
-        } else if in_docker {
-            self.fail += 1;
-            self.push_line(format!("  ✗ {label}"));
         } else {
             self.warn += 1;
-            self.push_line(format!("  ⚠ {label} (optional on host)"));
+            self.push_line(format!("  ⚠ {label} (optional)"));
         }
     }
 
@@ -452,14 +463,14 @@ impl Report {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct CommandSpec {
+pub struct CommandSpec {
     program: String,
     args: Vec<String>,
     envs: Vec<(String, String)>,
 }
 
 impl CommandSpec {
-    fn new(program: impl Into<String>) -> Self {
+    pub fn new(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
             args: Vec::new(),
@@ -467,12 +478,12 @@ impl CommandSpec {
         }
     }
 
-    fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
         self
     }
 
-    fn args<I, S>(mut self, args: I) -> Self
+    pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -481,44 +492,40 @@ impl CommandSpec {
         self
     }
 
-    fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.envs.push((key.into(), value.into()));
         self
     }
 
-    #[cfg(test)]
-    fn key(&self) -> String {
+    pub fn key(&self) -> String {
         format!("{}|{:?}|{:?}", self.program, self.args, self.envs)
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct CommandOutput {
-    success: bool,
-    stdout: String,
+pub struct CommandOutput {
+    pub success: bool,
+    pub stdout: String,
 }
 
 impl CommandOutput {
-    #[cfg(test)]
-    fn success_with_stdout(stdout: impl Into<String>) -> Self {
+    pub fn success_with_stdout(stdout: impl Into<String>) -> Self {
         Self {
             success: true,
             stdout: stdout.into(),
         }
     }
 
-    #[cfg(test)]
-    fn success() -> Self {
+    pub fn success() -> Self {
         Self::success_with_stdout("")
     }
 
-    #[cfg(test)]
-    fn failure() -> Self {
+    pub fn failure() -> Self {
         Self::default()
     }
 }
 
-trait CommandRunner {
+pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> CommandOutput;
 }
 
@@ -541,20 +548,23 @@ impl CommandRunner for ProcessRunner {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod preflight_test_support {
+
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
-    use std::fs;
-    use tempfile::tempdir;
 
-    struct FakeRunner {
+    pub use super::{
+        command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
+        LspCheckResult, LspRequirement,
+    };
+    pub use super::{CommandOutput, CommandRunner, CommandSpec};
+
+    pub struct FakeRunner {
         responses: RefCell<HashMap<String, VecDeque<CommandOutput>>>,
     }
 
     impl FakeRunner {
-        fn new(entries: Vec<(CommandSpec, CommandOutput)>) -> Self {
+        pub fn new(entries: Vec<(CommandSpec, CommandOutput)>) -> Self {
             let mut responses: HashMap<String, VecDeque<CommandOutput>> = HashMap::new();
             for (spec, output) in entries {
                 responses.entry(spec.key()).or_default().push_back(output);
@@ -575,6 +585,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("unexpected command: {}", spec.key()))
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preflight_test_support::FakeRunner;
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn select_remote_prefers_origin_without_probing_upstream() {
@@ -587,21 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn optional_checks_warn_on_host_and_fail_in_docker() {
-        let mut host_report = Report::default();
-        host_report.optional("cmake is installed", false, false);
-        assert_eq!(host_report.warn, 1);
-        assert_eq!(host_report.fail, 0);
-        assert_eq!(
-            host_report.lines,
-            vec!["  ⚠ cmake is installed (optional on host)"]
-        );
-
-        let mut docker_report = Report::default();
-        docker_report.optional("cmake is installed", false, true);
-        assert_eq!(docker_report.warn, 0);
-        assert_eq!(docker_report.fail, 1);
-        assert_eq!(docker_report.lines, vec!["  ✗ cmake is installed"]);
+    fn optional_checks_always_warn_when_missing() {
+        let mut report = Report::default();
+        report.optional("cmake is installed", false);
+        assert_eq!(report.warn, 1);
+        assert_eq!(report.fail, 0);
+        assert_eq!(report.lines, vec!["  ⚠ cmake is installed (optional)"]);
     }
 
     #[test]
@@ -613,7 +622,6 @@ mod tests {
         fs::write(repo_root.join("Cargo.toml"), "[package]\nname = 'kley'\n").unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: work_dir,
             current_exe: PathBuf::from("/usr/local/bin/kley"),
         };
@@ -635,7 +643,6 @@ mod tests {
         fs::write(repo_root.join("Cargo.toml"), "[package]\nname = 'kley'\n").unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: PathBuf::from("/tmp"),
             current_exe: exe_dir.join("kley"),
         };
@@ -651,7 +658,6 @@ mod tests {
     #[test]
     fn launcher_falls_back_to_path_binary_without_repo_manifest() {
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: PathBuf::from("/tmp"),
             current_exe: PathBuf::from("/usr/local/bin/kley"),
         };
@@ -676,7 +682,6 @@ mod tests {
         .unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: work_dir,
             current_exe: PathBuf::from("/usr/local/bin/kley"),
         };
@@ -695,7 +700,6 @@ mod tests {
         fs::write(&manifest_path, "[package]\nname = 'kley'\n").unwrap();
 
         let env = RuntimeEnv {
-            in_docker: false,
             current_dir: work_dir.clone(),
             current_exe: PathBuf::from("/tmp/kley"),
         };
@@ -776,15 +780,16 @@ mod tests {
             ),
             (command("gopls").arg("version"), CommandOutput::success()),
             (
-                command("typescript-language-server").arg("--version"),
-                CommandOutput::success(),
-            ),
-            (
                 command("bash-language-server").arg("--version"),
                 CommandOutput::success(),
             ),
+            (command("nixd").arg("--version"), CommandOutput::success()),
             (
                 command("yaml-language-server").arg("--version"),
+                CommandOutput::success(),
+            ),
+            (
+                command("pyright").arg("--version"),
                 CommandOutput::success(),
             ),
             (
@@ -796,7 +801,6 @@ mod tests {
                 CommandOutput::success(),
             ),
             (command("gitleaks").arg("version"), CommandOutput::success()),
-            (command("tsgo").arg("--version"), CommandOutput::success()),
             (
                 command("cargo").args(["nextest", "--version"]),
                 CommandOutput::success(),
@@ -813,8 +817,46 @@ mod tests {
         assert!(text.contains("   Remote:    (none reachable)"));
         assert!(text.contains("  ✗ can fetch from a remote"));
         assert!(text.contains("  ✗ kley binary works"));
-        assert!(text.contains("  ⚠ cmake is installed (optional on host)"));
+        assert!(text.contains("  ⚠ cmake is installed (optional)"));
         assert!(text.contains("  Passed: 31  Failed: 2  Warnings: 1"));
         assert!(text.contains("⚠ Fix the failing checks above before continuing."));
+    }
+
+    #[test]
+    fn preflight_requires_all_v1_lsp_servers() {
+        let runner = FakeRunner::new(
+            LSP_REQUIREMENTS
+                .iter()
+                .map(|check| (command_for_lsp_requirement(check), CommandOutput::failure()))
+                .collect(),
+        );
+
+        let mut report = Report::default();
+        run_required_lsp_checks(&mut report, &runner);
+
+        assert_eq!(report.fail, LSP_REQUIREMENTS.len());
+        assert_eq!(report.pass, 0);
+    }
+
+    #[test]
+    fn preflight_reports_each_missing_lsp_binary_by_name() {
+        let runner = FakeRunner::new(
+            LSP_REQUIREMENTS
+                .iter()
+                .map(|check| (command_for_lsp_requirement(check), CommandOutput::failure()))
+                .collect(),
+        );
+
+        let mut report = Report::default();
+        run_required_lsp_checks(&mut report, &runner);
+
+        assert_eq!(report.fail, LSP_REQUIREMENTS.len());
+        for check in &LSP_REQUIREMENTS {
+            assert!(
+                report.lines.iter().any(|line| line.contains(check.id)),
+                "missing report line for {}",
+                check.id
+            );
+        }
     }
 }

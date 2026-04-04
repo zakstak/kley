@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "kley"
 path = "src/main.rs"
 
+[[test]]
+name = "lsp-catalog-exact"
+path = "src/lsp/catalog_exact_tests.rs"
+
 [dependencies]
 anyhow = "1"
 askama = "0.12"

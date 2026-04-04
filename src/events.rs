@@ -91,8 +91,14 @@ pub enum AgentEvent {
     StatusReport {
         session_id: Option<String>,
         turn_id: Option<String>,
-        summary: String,
+        status: String,
+        detail: String,
         turn_number: usize,
+        server_id: Option<String>,
+        command: Option<Vec<String>>,
+        workspace_root: Option<String>,
+        last_file: Option<String>,
+        last_error: Option<String>,
     },
     HistoryCompacted {
         session_id: Option<String>,
@@ -228,11 +234,16 @@ impl fmt::Display for AgentEvent {
                 write!(f, "turn {turn_number} failed {error}")
             }
             AgentEvent::StatusReport {
-                summary,
+                status,
+                detail,
                 turn_number,
                 ..
             } => {
-                write!(f, "turn {turn_number} status {summary}")
+                if detail.is_empty() {
+                    write!(f, "turn {turn_number} status {status}")
+                } else {
+                    write!(f, "turn {turn_number} status {status}: {detail}")
+                }
             }
             AgentEvent::HistoryCompacted {
                 old_items,

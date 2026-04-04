@@ -6,6 +6,7 @@
 
 pub mod editing;
 pub mod hashline_edit;
+pub mod lsp;
 pub mod patch;
 pub mod read_file;
 pub mod read_skill;
@@ -129,6 +130,8 @@ pub trait Tool: Send + Sync {
     fn execute_with_result(&self, args: Value) -> Result<ToolExecutionResult> {
         self.execute(args).map(ToolExecutionResult::from_output)
     }
+
+    fn bind_session_context(&mut self, _session_id: &str) {}
 }
 
 /// Registry of available tools. Handles schema generation and dispatch.
@@ -162,6 +165,12 @@ impl ToolRegistry {
         self.tools.iter().find(|t| t.name() == name).map(|t| &**t)
     }
 
+    pub fn bind_session_context(&mut self, session_id: &str) {
+        for tool in &mut self.tools {
+            tool.bind_session_context(session_id);
+        }
+    }
+
     /// Generate the `tools` array for the OpenAI Responses API request.
     pub fn to_api_tools(&self) -> Vec<Value> {
         self.tools
@@ -182,10 +191,42 @@ impl ToolRegistry {
 /// Create a registry with all built-in tools.
 pub fn default_registry(project_dir: std::path::PathBuf) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
+    let lsp_service: std::sync::Arc<dyn crate::lsp::LspService> =
+        std::sync::Arc::new(crate::lsp::LspManager::new());
     reg.register(Box::new(shell::ShellTool::new()));
     reg.register(Box::new(read_file::ReadFileTool));
     reg.register(Box::new(patch::PatchTool));
     reg.register(Box::new(hashline_edit::HashlineEditTool));
+    reg.register(Box::new(lsp::LspDiagnosticsTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    reg.register(Box::new(lsp::LspSymbolsTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    reg.register(Box::new(lsp::LspGotoDefinitionTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    reg.register(Box::new(lsp::LspFindReferencesTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    reg.register(Box::new(lsp::LspPrepareRenameTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service.clone(),
+    )));
+    reg.register(Box::new(lsp::LspRenameTool::new(
+        project_dir.clone(),
+        "tool-registry-lsp",
+        lsp_service,
+    )));
     reg.register(Box::new(read_skill::ReadSkillTool::new(project_dir)));
     reg.register(Box::new(DelegateTaskTool));
     reg.register(Box::new(report_status::ReportStatusTool));
@@ -276,6 +317,12 @@ mod tests {
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("patch").is_some());
         assert!(reg.get("hashline_edit").is_some());
+        assert!(reg.get("lsp_diagnostics").is_some());
+        assert!(reg.get("lsp_symbols").is_some());
+        assert!(reg.get("lsp_goto_definition").is_some());
+        assert!(reg.get("lsp_find_references").is_some());
+        assert!(reg.get("lsp_prepare_rename").is_some());
+        assert!(reg.get("lsp_rename").is_some());
         assert!(reg.get("read_skill").is_some());
         assert!(reg.get("delegate_task").is_some());
         assert!(reg.get("report_status").is_some());

@@ -50,7 +50,7 @@ async function waitForHealthy(maxAttempts = 8, delayMs = 250) {
 }
 
 function runReuseMode() {
-  const timer = setInterval(() => {}, 1_000);
+    const timer = setInterval(() => {}, 1_000);
 
   const stop = () => {
     clearInterval(timer);
@@ -58,7 +58,37 @@ function runReuseMode() {
   };
 
   process.on('SIGINT', stop);
-  process.on('SIGTERM', stop);
+    process.on('SIGTERM', stop);
+}
+
+function keepProcessAlive() {
+  const timer = setInterval(() => {}, 1_000);
+  return () => clearInterval(timer);
+}
+
+function processExists(pid) {
+  if (typeof pid !== 'number') {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
+}
+
+async function waitForProcessExit(pid, maxAttempts = 50, delayMs = 100) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (!processExists(pid)) {
+      return true;
+    }
+    if (attempt < maxAttempts - 1) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+    }
+  }
+  return !processExists(pid);
 }
 
 function killChildProcessTree(child, signal) {
@@ -98,8 +128,7 @@ async function startManagedServer() {
     ['run', '--bin', 'kley', '--', 'web', '--bind', `127.0.0.1:${port}`],
     {
       cwd: repoRoot,
-      stdio: 'inherit',
-      detached: true,
+      stdio: 'ignore',
       env: {
         ...process.env,
         HOME: homeDir,
@@ -112,17 +141,41 @@ async function startManagedServer() {
   );
 
   let shuttingDown = false;
+  const stopKeepingAlive = keepProcessAlive();
 
-  const forwardSignal = (signal) => {
+  const forwardSignal = async (signal) => {
+    if (shuttingDown) {
+      return;
+    }
     shuttingDown = true;
+    stopKeepingAlive();
     killChildProcessTree(child, signal);
-    setTimeout(() => process.exit(0), 200).unref();
+
+    if (!(await waitForProcessExit(child.pid))) {
+      killChildProcessTree(child, 'SIGKILL');
+      await waitForProcessExit(child.pid, 10, 100);
+    }
+
+    process.exit(0);
   };
 
-  process.on('SIGINT', () => forwardSignal('SIGINT'));
-  process.on('SIGTERM', () => forwardSignal('SIGTERM'));
+  process.on('SIGINT', () => {
+    void forwardSignal('SIGINT');
+  });
+  process.on('SIGTERM', () => {
+    void forwardSignal('SIGTERM');
+  });
+
+  if (!(await waitForHealthy(40, 250))) {
+    stopKeepingAlive();
+    shuttingDown = true;
+    killChildProcessTree(child, 'SIGTERM');
+    await waitForProcessExit(child.pid, 20, 100);
+    throw new Error(`managed web server on 127.0.0.1:${port} failed health check`);
+  }
 
   child.on('exit', async (code, signal) => {
+    stopKeepingAlive();
     if (shuttingDown) {
       process.exit(0);
       return;

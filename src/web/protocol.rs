@@ -114,10 +114,34 @@ pub struct StateSnapshotData {
     pub session_id: String,
     pub selected_session: SelectedSession,
     pub auth: AuthStateSnapshot,
+    pub lsp: LspSnapshot,
     pub sessions: Vec<SessionSummary>,
     pub transcript: Vec<TranscriptEntry>,
     pub active_turn: Option<ActiveTurnSnapshot>,
     pub context_usage: ContextUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LspSnapshot {
+    pub supported: Vec<LspSupportedServer>,
+    pub active: Vec<LspServerState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LspSupportedServer {
+    pub server_id: String,
+    pub command: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LspServerState {
+    pub server_id: String,
+    pub status: String,
+    pub command: Vec<String>,
+    pub workspace_root: String,
+    pub last_file: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -5,10 +5,10 @@ use tokio::task;
 use tokio::time::{Duration, timeout};
 
 use super::super::protocol::{
-    ActiveTurnSnapshot, AuthStateSnapshot, SelectedSession, SessionSummary, StateSnapshotData,
-    TaskAttemptSnapshot, TaskDetailSnapshot, TaskDetailSnapshotData, TaskGraphEdgeSnapshot,
-    TaskGraphNodeSnapshot, TaskGraphSnapshot, TaskListSnapshotData, TaskWatchCursor,
-    TranscriptEntry,
+    ActiveTurnSnapshot, AuthStateSnapshot, LspServerState, LspSnapshot, LspSupportedServer,
+    SelectedSession, SessionSummary, StateSnapshotData, TaskAttemptSnapshot, TaskDetailSnapshot,
+    TaskDetailSnapshotData, TaskGraphEdgeSnapshot, TaskGraphNodeSnapshot, TaskGraphSnapshot,
+    TaskListSnapshotData, TaskWatchCursor, TranscriptEntry,
 };
 use super::super::state::WebAppState;
 use super::context_usage::{
@@ -35,6 +35,7 @@ pub(super) async fn snapshot_data(
 ) -> Result<StateSnapshotData> {
     let selected_session = load_selected_session(state, session_id).await?;
     let auth = snapshot_auth_summary(state, controller_id).await;
+    let lsp = snapshot_lsp_summary(state, session_id);
     let sessions = vec![SessionSummary {
         session_id: selected_session.session_id.clone(),
         title: selected_session.title.clone(),
@@ -84,6 +85,7 @@ pub(super) async fn snapshot_data(
         session_id: session_id.to_string(),
         selected_session,
         auth,
+        lsp,
         sessions,
         transcript,
         active_turn,
@@ -98,6 +100,7 @@ pub(super) async fn bootstrap_snapshot_data(
 ) -> Result<StateSnapshotData> {
     let selected_session = load_selected_session(state, session_id).await?;
     let auth = snapshot_auth_summary(state, controller_id).await;
+    let lsp = snapshot_lsp_summary(state, session_id);
     let sessions = vec![SessionSummary {
         session_id: selected_session.session_id.clone(),
         title: selected_session.title.clone(),
@@ -114,6 +117,7 @@ pub(super) async fn bootstrap_snapshot_data(
         session_id: session_id.to_string(),
         selected_session,
         auth,
+        lsp,
         sessions,
         transcript: Vec::new(),
         active_turn,
@@ -244,6 +248,33 @@ fn bootstrap_context_usage(
         .compact_threshold_chars(session_id)
         .unwrap_or_else(|| CompactConfig::default().threshold_chars);
     context_usage_from_chars(0, max_chars, None, None, None, None)
+}
+
+fn snapshot_lsp_summary(state: &WebAppState, session_id: &str) -> LspSnapshot {
+    let snapshot = state.runtime_manager.lsp_snapshot(session_id);
+    LspSnapshot {
+        supported: snapshot
+            .supported
+            .into_iter()
+            .map(|server| LspSupportedServer {
+                server_id: server.server_id,
+                command: server.command,
+                extensions: server.extensions,
+            })
+            .collect(),
+        active: snapshot
+            .active
+            .into_iter()
+            .map(|server| LspServerState {
+                server_id: server.server_id,
+                status: server.status,
+                command: server.command,
+                workspace_root: server.workspace_root,
+                last_file: server.last_file,
+                last_error: server.last_error,
+            })
+            .collect(),
+    }
 }
 
 fn build_task_graph_snapshot(

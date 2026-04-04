@@ -1,33 +1,77 @@
-# F4 Scope Fidelity Review
+# F4 Scope Fidelity Check — deep (agent-vm-baseline-update-lane)
 
-## Verdict: APPROVE
+## Plan and notes reviewed
 
-Reviewed `.sisyphus/plans/session-token-cost-query.md` plus the changed
-implementation surfaces in `src/store/session.rs`, `src/store/turn.rs`,
-`src/store/mod.rs`, `src/pricing/models_dev.rs`, `src/pricing/mod.rs`,
-`src/lib.rs`, `tests/store_session_usage.rs`, `tests/pricing_models_dev.rs`,
-`src/runtime/session.rs`, and `src/store/schema.rs`.
+- Active plan: `.sisyphus/plans/agent-vm-baseline-update-lane.md`
+- Notepads reviewed:
+  - `.sisyphus/notepads/agent-vm-baseline-update-lane/learnings.md`
+  - `.sisyphus/notepads/agent-vm-baseline-update-lane/issues.md`
+  - `.sisyphus/notepads/agent-vm-baseline-update-lane/decisions.md`
 
-Scope-fidelity findings:
+## Delivered VM slice reviewed (post-remediation)
 
-- **No schema drift:** `src/store/schema.rs` is unchanged and the feature
-  derives totals from existing persisted `turns` and `sessions` data only.
-- **No extra product surface:** the new session token/cost query API appears in
-  store/pricing modules and tests only. No CLI, websocket, or web UI feature
-  surface was added for this query.
-- **No forbidden pricing behavior:** `src/pricing/models_dev.rs` performs exact
-  provider+model lookup only. No fuzzy aliasing, family matching, billing cache,
-  ledger, or broader billing infrastructure was introduced.
-- **Runtime patch is justified plumbing, not scope drift:** the only out-of-area
-  change is a narrow `src/runtime/session.rs` patch that fixed the two unrelated
-  runtime tests blocking Task 6’s required full-`cargo test` gate. The user
-  explicitly approved that blocker-removal work after being informed Task 6
-  could not complete otherwise. The patch stays local to delegated-child
-  bootstrap state/event handling and does not widen the store/pricing feature
-  surface.
+Scope basis came from current working-tree delivery signals and VM guardrail
+touchpoints:
 
-Conclusion:
+- `git status --short -- agent-vm flake.nix README.md tests/vm-baseline-check.sh`
+- `git diff --stat --cached -- agent-vm flake.nix README.md tests/vm-baseline-check.sh`
+- `git diff --stat -- agent-vm flake.nix README.md tests/vm-baseline-check.sh`
 
-The delivered work stays within the session-token/cost-query plan guardrails,
-with one justified minimal runtime unblock needed to satisfy the plan’s own full
-verification requirement. APPROVE.
+Reviewed files are the VM-lane slice only:
+
+- `agent-vm/**`
+- root `flake.nix`
+- VM-lane docs/check touchpoints in `README.md` and `tests/vm-baseline-check.sh`
+
+## Guardrail checks
+
+1. **Single source of truth / no second flake source for VM lane**
+   - `fd --hidden --no-ignore-vcs --glob 'flake.nix' /home/zack/git/kley`
+     returns only `/home/zack/git/kley/flake.nix`.
+   - Root flake remains canonical and imports `./agent-vm`; VM outputs are
+     exported from root (`nixosConfigurations`, `nixosModules`).
+   - `agent-vm/README.md` explicitly states root-flake ownership and forbids
+     second flake/host-local override path.
+   - **Result: PASS**
+
+2. **No second source-of-truth drift in delivered VM scope**
+   - Promotion/host wiring stays centralized (`agent-vm/default.nix`,
+     `agent-vm/promotion-contract.nix`, shared modules).
+   - Canary/baseline lane semantics are host-lane toggles plus shared contract,
+     not duplicate host-specific module forks.
+   - **Result: PASS**
+
+3. **Re-check of prior F4 blocker (`agent-vm/hosts/saga-dev.nix`)**
+   - Current `agent-vm/hosts/saga-dev.nix` contains no private IP literals and
+     no explicit SSH key assignment.
+   - Host file now carries machine facts + lane toggle only (hostname,
+     DHCP/firewall, boot/filesystem facts, promotion lane).
+   - **Result: PASS (blocker remediated)**
+
+4. **Private IP / secret drift scan in delivered VM scope**
+   - Private RFC1918 scan across `agent-vm/**/*` found no matches.
+   - Credential marker scan across `agent-vm/**/*` (`ghp_`, private-key blocks,
+     ssh-ed25519 payloads, TOKEN/PASSWORD/SECRET/API_KEY markers) found no
+     matches.
+   - **Result: PASS**
+
+5. **Unrelated repo edits handling**
+   - Repository currently has unrelated edits under app/runtime/test/browser
+     paths (e.g. `src/**`, `playwright/**`).
+   - These are outside the reviewed VM-lane delivery slice and were not treated
+     as blockers because they do not contaminate `agent-vm` scope checks.
+   - **Result: PASS (proper boundary maintained)**
+
+## Explicit scope-gate answer
+
+- No second flake/source of truth in delivered VM lane: **CONFIRMED**
+- No private IP/secret drift remaining in delivered VM scope: **CONFIRMED**
+- Prior `saga-dev.nix` private-IP/SSH-key scope failure remediated:
+  **CONFIRMED**
+- Unrelated app/runtime edits treated as outside VM slice unless contaminating
+  scope: **CONFIRMED**
+
+## Verdict
+
+**APPROVE** — The current delivered agent-vm/update-lane slice honors plan
+guardrails for scope fidelity after blocker remediation.

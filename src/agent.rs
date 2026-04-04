@@ -6,8 +6,13 @@ use anyhow::Result;
 use crate::auth::{self, CredentialStore};
 use crate::compact::CompactConfig;
 use crate::events::EventEmitter;
-use crate::runtime::{AbortResult, RuntimeEvent, RuntimeHooks, SessionRuntime, SubmitResult};
-use crate::store::Store;
+use crate::runtime::{
+    AbortResult, RuntimeEvent, RuntimeHooks, RuntimeManager, SessionRuntime, SubmitResult,
+};
+use crate::store::SharedStore;
+
+const CHAT_SCHEDULER_OWNER_ID: &str = "runtime-manager";
+const CHAT_SCHEDULER_LEASE_TTL_SECONDS: i64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunMode {
@@ -22,7 +27,8 @@ pub enum RunMode {
 pub async fn chat_loop(
     model_override: Option<&str>,
     resume_session_id: Option<&str>,
-    store: &Store,
+    shared_store: SharedStore,
+    runtime_manager: Arc<RuntimeManager>,
     events: EventEmitter,
     run_mode: RunMode,
     compact_config: CompactConfig,
@@ -54,8 +60,8 @@ pub async fn chat_loop(
         }));
     }
 
-    let mut runtime = SessionRuntime::new_with_abort_signal(
-        store,
+    let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
+        shared_store.clone(),
         resolved,
         model_override,
         resume_session_id,
@@ -120,6 +126,15 @@ pub async fn chat_loop(
         };
 
         println!();
+
+        runtime_manager
+            .execute_scheduler_ready_graph_nodes(
+                shared_store.clone(),
+                runtime.session_id(),
+                CHAT_SCHEDULER_OWNER_ID,
+                CHAT_SCHEDULER_LEASE_TTL_SECONDS,
+            )
+            .await?;
 
         if is_autonomous {
             if turn_ok {
