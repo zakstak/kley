@@ -80,6 +80,7 @@ Optional overrides (same declarative flow):
 
 - `KLEY_REPO_ROOT=/path/to/checkout`
 - `CANARY_HOST=saga-dev2`
+- `FLAKE_HOST=saga-dev2`
 - `AGENT_USER=agent`
 
 ## Push-known-changes canary validation lane (`saga-dev2`)
@@ -89,8 +90,9 @@ promotion to `saga-dev`. The default operator path stays repo-first and reuses
 the repo-native entrypoints already documented at the root:
 
 1. Apply the local checkout to `saga-dev2`.
-2. SSH to the canary and run the kley smoke lane from a repo checkout on that
-   host.
+2. Run the kley smoke lane from the same local checkout used for the apply; the
+   validator stages that checkout to a temporary directory on the canary by
+   default.
 3. Promote `saga-dev` only if both the terminal and web smoke checks pass.
 
 The operator sequence is:
@@ -101,17 +103,26 @@ agent-vm/scripts/validate-canary-kley.sh
 ```
 
 `validate-canary-kley.sh` makes the required post-apply checks explicit so the
-promotion gate does not depend on memory:
+promotion gate does not depend on memory. By default it stages the same local
+checkout used for the apply into a temporary directory on `saga-dev2`, runs the
+smoke checks there, and removes that staged checkout on exit. Before any smoke
+check runs, it verifies that the local checkout's recorded build revision
+matches the deployed host's `/etc/kley-agent-vm-build.json` revision so apply
+and validate cannot silently drift apart.
 
-- verifies the remote checkout has repo-local entrypoints (`preflight.sh` and
-  `kley-run.sh`)
-- runs terminal smoke with `./preflight.sh` and `./kley-run.sh chat --help`
+- stages the local checkout or verifies an explicitly provided remote checkout,
+  then checks that the repo-local entrypoint `kley-run.sh` is present
+- runs terminal smoke with `./kley-run.sh chat --help`
 - runs web smoke with `./kley-run.sh web --bind 127.0.0.1:3210`
 - probes `http://127.0.0.1:3210/healthz` for `ok` and `/` for the `Kley web`
   marker before allowing promotion
 
-If the remote checkout lives somewhere other than `/home/agent/kley`, set the
-path explicitly instead of improvising:
+`./preflight.sh` remains useful for a fully bootstrapped developer box, but it
+is not part of the staged canary smoke lane because it requires git remote and
+GitHub auth state that the repo-first validation path does not provision.
+
+If you already have a trusted remote checkout and want to validate that instead
+of the staged local copy, set the path explicitly instead of improvising:
 
 ```bash
 REMOTE_KLEY_REPO_ROOT=/path/to/kley agent-vm/scripts/validate-canary-kley.sh
@@ -121,7 +132,9 @@ Optional overrides for the same canary lane:
 
 - `CANARY_HOST=saga-dev2`
 - `AGENT_USER=agent`
-- `REMOTE_KLEY_REPO_ROOT=/home/agent/kley`
+- `KLEY_REPO_ROOT=/path/to/local/kley`
+- `REMOTE_KLEY_REPO_ROOT=/path/to/existing/remote/kley`
+- `REMOTE_KLEY_STAGE_ROOT=/tmp/kley-canary-saga-dev2-12345`
 - `KLEY_WEB_BIND=127.0.0.1:3210`
 
 ## Rollback and recovery flow for failed canary updates (`saga-dev2`)
