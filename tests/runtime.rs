@@ -1495,7 +1495,7 @@ async fn child_session_bootstrap_uses_handoff_summary_not_parent_transcript() {
 }
 
 #[tokio::test]
-async fn delegated_task_links_child_session_without_forcing_attempt_running() {
+async fn delegated_task_links_child_session_after_attempt_start() {
     let store = Store::open_memory().unwrap();
 
     let parent = Session::create(

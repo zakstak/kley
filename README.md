@@ -155,6 +155,23 @@ cargo run --bin kley -- <subcommand>
 `./preflight.sh` will run `kley preflight` through Cargo or an installed `kley`
 binary, depending on what is available.
 
+## Agent VM rolling update lane
+
+The repo-owned agent VM baseline lives under `agent-vm/` and uses a single
+canary-first promotion flow: build/apply `saga-dev2` first, validate that same
+checkout, then promote `saga-dev` from the same revision and `flake.lock`.
+
+Every VM build records the exact resolved checkout revision in
+`system.configurationRevision` and `/etc/kley-agent-vm-build.json`, so a default
+`HEAD` workflow becomes an exact build record instead of a floating label. See
+[`agent-vm/README.md`](./agent-vm/README.md) for the promotion contract checks,
+the local-checkout `saga-dev2` apply sequence (`agent@saga-dev2`), and the
+post-apply kley smoke lane that must pass on canary before `saga-dev` promotion.
+The same doc also defines the failed-update recovery path:
+`agent-vm/scripts/recover-canary-after-failed-update.sh` for runtime generation
+rollback on `saga-dev2`, followed by repo source-of-truth (`flake.lock` /
+`agent-vm/**`) reversion before retrying canary apply/validation.
+
 ## Development notes
 
 - `./kley-run.sh` is the canonical runner (Cargo from repo or installed binary).

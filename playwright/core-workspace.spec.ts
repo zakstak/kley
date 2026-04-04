@@ -51,7 +51,10 @@ async function runPython(script: string, args: string[]) {
   });
 }
 
-async function seedDelegationParentTask(taskId: string) {
+async function seedDelegationParentTask(
+  taskId: string,
+  ownerSessionId: string,
+) {
   const policySnapshot = JSON.stringify({
     allow_autonomous_spawn: true,
     current_depth: 0,
@@ -68,14 +71,14 @@ async function seedDelegationParentTask(taskId: string) {
   await runPython(
     [
       "import datetime, sqlite3, sys",
-      "db_path, task_id, policy = sys.argv[1], sys.argv[2], sys.argv[3]",
+      "db_path, task_id, policy, owner_session_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]",
       "now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')",
       "conn = sqlite3.connect(db_path)",
-      "conn.execute(\"INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?)\", (task_id, 'playwright-parent-task', 10, policy, 'request_cancel_descendants', now, now))",
+      "conn.execute(\"INSERT INTO tasks (task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)\", (task_id, 'playwright-parent-task', 10, policy, 'request_cancel_descendants', owner_session_id, now, now))",
       "conn.commit()",
       "conn.close()",
     ].join("\n"),
-    [".playwright/home/.kley/kley.db", taskId, policySnapshot],
+    [".playwright/home/.kley/kley.db", taskId, policySnapshot, ownerSessionId],
   );
 }
 
@@ -633,7 +636,7 @@ test("task delegation lifecycle", async ({ page }) => {
   };
   const sessionId = snapshot.session_id;
 
-  await seedDelegationParentTask(parentTaskId);
+  await seedDelegationParentTask(parentTaskId, sessionId);
 
   await submitPrompt(
     page,
@@ -727,7 +730,7 @@ test("task watch survives reconnect", async ({ page }) => {
   };
   const sessionId = snapshot.session_id;
 
-  await seedDelegationParentTask(parentTaskId);
+  await seedDelegationParentTask(parentTaskId, sessionId);
 
   await submitPrompt(
     page,

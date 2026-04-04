@@ -294,9 +294,11 @@ impl WebAppState {
     }
 
     pub fn with_auth_service(store: SharedStore, auth_service: Arc<dyn WebAuthService>) -> Self {
+        let runtime_manager = Arc::new(RuntimeManager::new());
+        runtime_manager.bind_shared_store(Arc::clone(&store));
         Self {
             store,
-            runtime_manager: Arc::new(RuntimeManager::new()),
+            runtime_manager,
             auth_service,
             pending_openai_logins: Arc::new(Mutex::new(HashMap::new())),
         }

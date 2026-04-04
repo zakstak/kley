@@ -7,60 +7,60 @@
     <link rel="icon" type="image/svg+xml" href="/assets/bindery-icon.svg" />
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link
-      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap"
       rel="stylesheet"
     />
     <style>
       :root {
         color-scheme: dark;
-        --color-bg: #0c0a12;
-        --color-bg1: #110f19;
-        --color-bg2: #16141f;
-        --color-bg3: #1e1b2a;
-        --color-bdr: #28243a;
-        --color-bdr2: #342f4e;
-        --color-txt: #e0dced;
-        --color-txt2: #908ca5;
-        --color-txt3: #5c5878;
-        --color-purple: #8b5cf6;
-        --color-cyan: #38bdf8;
-        --color-green: #34d399;
-        --color-amber: #fbbf24;
-        --color-red: #fb7185;
-        --color-accent: var(--color-cyan);
+        --color-bg: #15141b;
+        --color-bg1: #1d1b25;
+        --color-bg2: #2d2b38;
+        --color-bg3: #38354a;
+        --color-bdr: #2d2b38;
+        --color-bdr2: #6d6a7e;
+        --color-txt: #edecee;
+        --color-txt2: #b3b1bd;
+        --color-txt3: #6d6a7e;
+        --color-purple: #a277ff;
+        --color-cyan: #40a2bf;
+        --color-green: #45a183;
+        --color-amber: #bf8e40;
+        --color-red: #b84d4d;
+        --color-accent: var(--color-purple);
         --color-alert: var(--color-red);
         --color-ok: var(--color-green);
         --radius-sm: 6px;
         --radius-md: 8px;
         --radius-pill: 999px;
-        --surface-shell: rgba(12, 10, 18, 0.86);
-        --surface-main: rgba(12, 10, 18, 0.38);
-        --surface-panel: rgba(17, 15, 25, 0.64);
-        --surface-card: rgba(22, 20, 31, 0.78);
-        --surface-muted: rgba(22, 20, 31, 0.68);
-        --surface-elevated: rgba(30, 27, 42, 0.72);
-        --surface-chrome: rgba(17, 15, 25, 0.9);
-        --surface-chrome-muted: rgba(17, 15, 25, 0.76);
-        --surface-overlay: rgba(12, 10, 18, 0.88);
-        --border-tone: rgba(52, 47, 78, 0.62);
-        --border-tone-strong: rgba(52, 47, 78, 0.78);
-        --border-tone-soft: rgba(52, 47, 78, 0.46);
-        --text-meta: #7f7a96;
-        --text-meta-strong: #b7b2cb;
+        --surface-shell: rgba(21, 20, 27, 0.86);
+        --surface-main: rgba(21, 20, 27, 0.38);
+        --surface-panel: rgba(29, 27, 37, 0.64);
+        --surface-card: rgba(45, 43, 56, 0.78);
+        --surface-muted: rgba(45, 43, 56, 0.68);
+        --surface-elevated: rgba(56, 53, 74, 0.72);
+        --surface-chrome: rgba(21, 20, 27, 0.9);
+        --surface-chrome-muted: rgba(21, 20, 27, 0.76);
+        --surface-overlay: rgba(21, 20, 27, 0.88);
+        --border-tone: rgba(109, 106, 126, 0.35);
+        --border-tone-strong: rgba(109, 106, 126, 0.5);
+        --border-tone-soft: rgba(109, 106, 126, 0.15);
+        --text-meta: #6d6a7e;
+        --text-meta-strong: #edecee;
         --text-meta-size: 10px;
-        --shadow-shell: 0 24px 60px rgba(0, 0, 0, 0.4);
+        --shadow-shell: 0 24px 60px rgba(0, 0, 0, 0.5);
       }
       body {
-        font-family: "Outfit", sans-serif;
+        font-family: "JetBrains Mono", monospace;
         background:
           radial-gradient(
             circle at 15% 0%,
-            rgba(56, 189, 248, 0.08),
+            rgba(64, 162, 191, 0.08),
             transparent 38%
           ),
           radial-gradient(
             circle at 96% 80%,
-            rgba(139, 92, 246, 0.1),
+            rgba(162, 119, 255, 0.1),
             transparent 34%
           ),
           var(--color-bg);
@@ -73,8 +73,8 @@
         pointer-events: none;
         background: linear-gradient(
           180deg,
-          rgba(12, 10, 18, 0.05),
-          rgba(12, 10, 18, 0.35)
+          rgba(21, 20, 27, 0.05),
+          rgba(21, 20, 27, 0.35)
         );
         z-index: -1;
       }
@@ -109,18 +109,17 @@
         background: transparent;
       }
       ::-webkit-scrollbar-thumb {
-        background: #312d45;
+        background: #3a3748;
         border-radius: 99px;
       }
       .top-bar {
-        height: 40px;
-        min-height: 40px;
-        border-bottom: 1px solid var(--border-tone-strong);
-        background: var(--surface-chrome);
+        height: 48px;
+        min-height: 48px;
+        background: transparent;
         display: flex;
         align-items: center;
-        gap: 8px;
-        padding: 0 12px;
+        gap: 12px;
+        padding: 0 20px;
         user-select: none;
       }
       .shell-btn {
@@ -132,7 +131,7 @@
         border-radius: var(--radius-md);
         background: var(--surface-elevated);
         color: var(--color-txt2);
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         transition:
           color 0.12s,
@@ -141,8 +140,8 @@
       }
       .shell-btn:not(:disabled):hover {
         color: var(--color-txt);
-        border-color: rgba(139, 92, 246, 0.55);
-        background: rgba(30, 27, 42, 0.86);
+        border-color: rgba(162, 119, 255, 0.55);
+        background: rgba(56, 53, 74, 0.86);
       }
       .shell-btn:disabled {
         opacity: 0.65;
@@ -156,7 +155,7 @@
         border-radius: var(--radius-md);
         background: var(--surface-elevated);
         color: var(--color-txt2);
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         transition:
           color 0.12s,
@@ -172,8 +171,8 @@
       .shell-select:not(:disabled):hover,
       .shell-input:not(:disabled):hover {
         color: var(--color-txt);
-        border-color: rgba(139, 92, 246, 0.55);
-        background: rgba(30, 27, 42, 0.86);
+        border-color: rgba(162, 119, 255, 0.55);
+        background: rgba(56, 53, 74, 0.86);
       }
       .shell-select:focus,
       .shell-input:focus {
@@ -199,7 +198,7 @@
         flex-wrap: wrap;
       }
       .control-status {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         letter-spacing: 0.06em;
         color: var(--text-meta);
@@ -215,16 +214,11 @@
       }
       .status-strip {
         display: flex;
-        align-items: stretch;
+        align-items: center;
         justify-content: space-between;
         gap: 10px;
-        padding: 8px 12px;
-        border-bottom: 1px solid var(--border-tone);
-        background: linear-gradient(
-          180deg,
-          rgba(22, 20, 31, 0.82),
-          var(--surface-chrome)
-        );
+        padding: 10px 20px;
+        background: transparent;
       }
       .status-inline {
         display: flex;
@@ -236,15 +230,15 @@
       .status-pair {
         display: flex;
         align-items: center;
-        gap: 6px;
-        padding: 5px 8px;
-        border: 1px solid var(--border-tone);
-        border-radius: var(--radius-md);
-        background: rgba(12, 10, 18, 0.5);
+        gap: 8px;
+        padding: 6px 12px;
+        border: none;
+        border-radius: 10px;
+        background: rgba(45, 43, 56, 0.4);
         min-height: 30px;
       }
       .status-inline-label {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         text-transform: uppercase;
         letter-spacing: 0.08em;
@@ -252,7 +246,7 @@
         white-space: nowrap;
       }
       .status-inline-value {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         color: var(--text-meta-strong);
         white-space: nowrap;
@@ -270,71 +264,63 @@
       .status-meter-fill {
         height: 100%;
         border-radius: 999px;
-        background: linear-gradient(90deg, #8b5cf6, #e879f9);
+        background: linear-gradient(90deg, #a277ff, #7c5cbf);
         width: 42%;
       }
       .timeline-strip {
-        border-bottom: 1px solid var(--border-tone-soft);
-        background: var(--surface-chrome-muted);
-        padding: 7px 12px 8px;
+        background: transparent;
+        padding: 10px 20px;
       }
       .timeline-bars {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 7px;
+        gap: 10px;
       }
       .timeline-bar {
-        height: 22px;
-        border: 1px solid var(--border-tone);
-        border-radius: var(--radius-sm);
-        background: linear-gradient(
-          90deg,
-          rgba(139, 92, 246, 0.17),
-          rgba(56, 189, 248, 0.11)
-        );
+        height: 20px;
+        border: none;
+        border-radius: 10px;
+        background: rgba(162, 119, 255, 0.08);
       }
       .feed-controls {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        padding: 7px 12px;
-        border-bottom: 1px solid var(--border-tone-soft);
-        background: var(--surface-chrome-muted);
+        padding: 12px 20px;
+        background: transparent;
       }
       .filter-chip {
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        padding: 3px 8px;
-        border-radius: var(--radius-pill);
-        border: 1px solid var(--border-tone);
+        padding: 4px 10px;
+        border-radius: 8px;
+        border: none;
         background: var(--surface-muted);
         color: var(--text-meta);
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
       }
       button.filter-chip {
         cursor: pointer;
         transition:
-          color 0.12s,
-          border-color 0.12s,
-          background 0.12s;
+          color 0.15s,
+          background 0.15s;
       }
       button.filter-chip:hover {
-        color: var(--text-meta-strong);
-        border-color: rgba(56, 189, 248, 0.42);
+        color: var(--color-txt);
+        background: rgba(162, 119, 255, 0.1);
       }
       button.filter-chip[aria-pressed="true"] {
-        color: var(--color-txt);
-        border-color: rgba(56, 189, 248, 0.5);
-        background: rgba(56, 189, 248, 0.14);
+        color: var(--color-purple);
+        background: rgba(162, 119, 255, 0.15);
       }
       .filter-chip[aria-disabled="true"] {
         opacity: 0.72;
       }
       .panel-title {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         text-transform: uppercase;
         letter-spacing: 0.1em;
@@ -346,23 +332,23 @@
         align-items: center;
         padding: 3px 8px;
         border-radius: var(--radius-pill);
-        border: 1px solid rgba(251, 191, 36, 0.22);
-        background: rgba(251, 191, 36, 0.06);
-        color: #b49b61;
-        font-family: "Fira Code", monospace;
+        border: 1px solid rgba(191, 142, 64, 0.22);
+        background: rgba(191, 142, 64, 0.06);
+        color: #bf8e40;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         text-transform: uppercase;
         letter-spacing: 0.08em;
       }
       .status-chip {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         letter-spacing: 0.08em;
         text-transform: uppercase;
         border-radius: var(--radius-pill);
-        border: 1px solid rgba(52, 211, 153, 0.35);
-        background: rgba(52, 211, 153, 0.12);
-        color: #6ee7b7;
+        border: 1px solid rgba(69, 161, 131, 0.35);
+        background: rgba(69, 161, 131, 0.12);
+        color: #45a183;
         padding: 4px 10px;
         display: inline-flex;
         align-items: center;
@@ -383,8 +369,8 @@
         color: #ffffff;
       }
       .abort-btn {
-        border-color: rgba(251, 113, 133, 0.6);
-        background: rgba(251, 113, 133, 0.1);
+        border-color: rgba(184, 77, 77, 0.6);
+        background: rgba(184, 77, 77, 0.1);
         color: var(--color-alert);
       }
       .composer-input,
@@ -393,7 +379,8 @@
         border-radius: var(--radius-md);
       }
       .tool-card-shell[open] {
-        border-color: rgba(56, 189, 248, 0.45);
+        background: rgba(45, 43, 56, 0.2);
+        border-color: transparent !important;
       }
       .tool-card-summary {
         list-style: none;
@@ -407,7 +394,7 @@
         display: none;
       }
       .tool-card-toggle {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: 10px;
         letter-spacing: 0.08em;
         text-transform: uppercase;
@@ -419,7 +406,7 @@
         padding-top: 12px;
       }
       .tool-card-meta {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: 11px;
         line-height: 1.5;
         color: var(--text-meta);
@@ -444,34 +431,34 @@
         border-radius: var(--radius-pill);
         background: var(--surface-muted);
         color: var(--text-meta-strong);
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: 10px;
         letter-spacing: 0.06em;
         text-transform: uppercase;
       }
       .tool-transcript-chip[data-tone="active"] {
-        border-color: rgba(56, 189, 248, 0.45);
+        border-color: rgba(64, 162, 191, 0.45);
         color: var(--color-cyan);
-        background: rgba(56, 189, 248, 0.12);
+        background: rgba(64, 162, 191, 0.12);
       }
       .tool-transcript-chip[data-tone="ok"] {
-        border-color: rgba(52, 211, 153, 0.45);
+        border-color: rgba(69, 161, 131, 0.45);
         color: var(--color-ok);
-        background: rgba(52, 211, 153, 0.12);
+        background: rgba(69, 161, 131, 0.12);
       }
       .tool-transcript-chip[data-tone="error"] {
-        border-color: rgba(251, 113, 133, 0.5);
+        border-color: rgba(184, 77, 77, 0.5);
         color: var(--color-alert);
-        background: rgba(251, 113, 133, 0.12);
+        background: rgba(184, 77, 77, 0.12);
       }
       .tool-transcript-section {
         border: 1px solid var(--border-tone);
         border-radius: var(--radius-sm);
-        background: rgba(12, 10, 18, 0.44);
+        background: rgba(21, 20, 27, 0.44);
         padding: 6px 8px;
       }
       .tool-transcript-label {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: 10px;
         text-transform: uppercase;
         letter-spacing: 0.08em;
@@ -482,35 +469,38 @@
         white-space: pre-wrap;
         word-break: break-word;
         overflow-x: auto;
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: 11px;
         line-height: 1.45;
         color: var(--text-meta-strong);
       }
       .tool-transcript-note {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: 10px;
         line-height: 1.45;
         color: var(--text-meta);
       }
       .chrome-shell {
-        border: 1px solid var(--border-tone-strong);
-        background: var(--surface-shell);
-        box-shadow: var(--shadow-shell);
+        background: transparent;
+        border: none;
+        box-shadow: none;
       }
       .shell-main {
-        background: var(--surface-main);
+        background: transparent;
+        border: none !important;
       }
       .shell-side {
-        background: var(--surface-panel);
+        background: transparent;
+        border: none !important;
       }
       .feed-sticky-head {
-        background: var(--surface-overlay);
+        background: transparent;
+        padding: 10px 20px;
       }
       .shell-card {
-        border-radius: var(--radius-md);
-        border-color: var(--border-tone-strong);
-        background: var(--surface-card);
+        border-radius: 10px;
+        border: none !important;
+        background: rgba(45, 43, 56, 0.4);
       }
       .session-btn {
         border-radius: var(--radius-md);
@@ -528,14 +518,14 @@
         color: var(--color-txt);
       }
       .meta-kicker {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         color: var(--text-meta);
       }
       .meta-note {
-        font-family: "Fira Code", monospace;
+        font-family: "JetBrains Mono", monospace;
         font-size: var(--text-meta-size);
         letter-spacing: 0.06em;
         color: var(--text-meta);
@@ -1187,7 +1177,7 @@
               "linear-gradient(90deg, #f59e0b, #eab308)";
           } else {
             dom.contextMeterFill.style.background =
-              "linear-gradient(90deg, #8b5cf6, #e879f9)";
+              "linear-gradient(90deg, #a277ff, #7c5cbf)";
           }
 
           const tokenSummary =
@@ -1442,20 +1432,20 @@
           const dot = '<span class="status-dot"></span>';
           dom.statusPill.innerHTML = `${dot}${text}`;
           if (tone === "error") {
-            dom.statusPill.style.borderColor = "rgba(251, 113, 133, 0.6)";
-            dom.statusPill.style.background = "rgba(251, 113, 133, 0.15)";
+            dom.statusPill.style.borderColor = "rgba(184, 77, 77, 0.6)";
+            dom.statusPill.style.background = "rgba(184, 77, 77, 0.15)";
             dom.statusPill.style.color = "var(--color-alert)";
             return;
           }
           if (tone === "active") {
-            dom.statusPill.style.borderColor = "rgba(56, 189, 248, 0.5)";
-            dom.statusPill.style.background = "rgba(56, 189, 248, 0.15)";
+            dom.statusPill.style.borderColor = "rgba(64, 162, 191, 0.5)";
+            dom.statusPill.style.background = "rgba(64, 162, 191, 0.15)";
             dom.statusPill.style.color = "var(--color-accent)";
             return;
           }
-          dom.statusPill.style.borderColor = "rgba(52, 211, 153, 0.35)";
-          dom.statusPill.style.background = "rgba(52, 211, 153, 0.12)";
-          dom.statusPill.style.color = "#6ee7b7";
+          dom.statusPill.style.borderColor = "rgba(69, 161, 131, 0.35)";
+          dom.statusPill.style.background = "rgba(69, 161, 131, 0.12)";
+          dom.statusPill.style.color = "#45a183";
         }
 
         function syncComposerState() {
@@ -1554,13 +1544,13 @@
 
         function borderForRole(role, kind) {
           if (kind === "function_call" || kind === "function_call_output") {
-            return "rgba(56, 189, 248, 0.45)";
+            return "rgba(64, 162, 191, 0.45)";
           }
           if (role === "user") {
-            return "rgba(251, 191, 36, 0.45)";
+            return "rgba(191, 142, 64, 0.45)";
           }
           if (role === "assistant") {
-            return "rgba(52, 211, 153, 0.45)";
+            return "rgba(69, 161, 131, 0.45)";
           }
           return "var(--color-bdr2)";
         }
@@ -1625,7 +1615,8 @@
                 ? rawObservation.engine.trim()
                 : null,
             path:
-              typeof rawObservation.path === "string" && rawObservation.path.trim()
+              typeof rawObservation.path === "string" &&
+              rawObservation.path.trim()
                 ? rawObservation.path.trim()
                 : null,
             artifactPath:
@@ -1674,7 +1665,9 @@
           const toolName =
             (typeof fallback?.toolName === "string" && fallback.toolName.trim()
               ? fallback.toolName.trim()
-              : "") || toolNameFromPayload || "unknown";
+              : "") ||
+            toolNameFromPayload ||
+            "unknown";
 
           const callId =
             (typeof fallback?.callId === "string" && fallback.callId.trim()
@@ -1700,7 +1693,8 @@
               : undefined;
 
           const rawObservation =
-            payload.edit_observation && typeof payload.edit_observation === "object"
+            payload.edit_observation &&
+            typeof payload.edit_observation === "object"
               ? payload.edit_observation
               : fallback?.editObservation &&
                   typeof fallback.editObservation === "object"
@@ -1716,7 +1710,9 @@
             role,
             kind,
             source:
-              typeof fallback?.source === "string" ? fallback.source : "snapshot",
+              typeof fallback?.source === "string"
+                ? fallback.source
+                : "snapshot",
             toolName,
             callId,
             status,
@@ -1724,7 +1720,9 @@
             outputValue,
             editObservation: normalizeEditObservation(rawObservation),
             rawContent:
-              typeof content === "string" && content.trim() ? content : "(empty)",
+              typeof content === "string" && content.trim()
+                ? content
+                : "(empty)",
             notes,
           };
         }
@@ -1766,7 +1764,12 @@
           clearChildren(body);
           body.className = "tool-transcript mt-2 text-sm app-text-1";
 
-          const normalized = normalizeToolTranscriptPayload(role, kind, content, attrs);
+          const normalized = normalizeToolTranscriptPayload(
+            role,
+            kind,
+            content,
+            attrs,
+          );
 
           const meta = document.createElement("div");
           meta.className = "tool-transcript-meta";
@@ -1837,7 +1840,9 @@
               `applied ${normalized.editObservation.appliedCount}/${normalized.editObservation.editCount} · stale ${normalized.editObservation.staleReferenceCount} · noop ${normalized.editObservation.noopCount}${normalized.editObservation.durationMs !== null ? ` · ${normalized.editObservation.durationMs}ms` : ""}`,
             ];
             if (normalized.editObservation.engine) {
-              summaryLines.unshift(`engine: ${normalized.editObservation.engine}`);
+              summaryLines.unshift(
+                `engine: ${normalized.editObservation.engine}`,
+              );
             }
             if (normalized.editObservation.path) {
               summaryLines.push(`path: ${normalized.editObservation.path}`);
@@ -2251,21 +2256,16 @@
             status: "running",
           });
 
-          const row = createTranscriptRow(
-            "tool",
-            "function_call",
-            payload,
-            {
-              turnId,
-              category: "tools",
-              toolFallback: {
-                source: "live",
-                callId: toolCallId,
-                toolName,
-                status: "running",
-              },
+          const row = createTranscriptRow("tool", "function_call", payload, {
+            turnId,
+            category: "tools",
+            toolFallback: {
+              source: "live",
+              callId: toolCallId,
+              toolName,
+              status: "running",
             },
-          );
+          });
           row.dataset.toolCallId = toolCallId;
           dom.transcriptRows.appendChild(row);
           state.toolRowsByCallId.set(toolCallId, row);

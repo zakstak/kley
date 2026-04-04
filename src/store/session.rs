@@ -746,6 +746,50 @@ impl TaskRecord {
             .context("task not found")
     }
 
+    pub fn ensure_owned_by_session(
+        store: &Store,
+        task_id: &str,
+        owner_session_id: &str,
+    ) -> Result<TaskRecord> {
+        let owner_session_id = owner_session_id.trim();
+        if owner_session_id.is_empty() {
+            anyhow::bail!("task owner_session_id must not be empty");
+        }
+
+        let task = Self::get(store, task_id)?;
+        match task.owner_session_id.as_deref() {
+            Some(existing_owner) if existing_owner == owner_session_id => Ok(task),
+            Some(existing_owner) => {
+                anyhow::bail!("task {task_id} is owned by another session: {existing_owner}")
+            }
+            None => {
+                let now = Utc::now().to_rfc3339();
+                let rows = store
+                    .conn()
+                    .execute(
+                        "UPDATE tasks
+                         SET owner_session_id = ?1, updated_at = ?2
+                         WHERE task_id = ?3 AND owner_session_id IS NULL",
+                        (owner_session_id, &now, task_id),
+                    )
+                    .context("failed to claim task ownership for session")?;
+
+                if rows == 0 {
+                    let refreshed = Self::get(store, task_id)?;
+                    if refreshed.owner_session_id.as_deref() == Some(owner_session_id) {
+                        Ok(refreshed)
+                    } else {
+                        anyhow::bail!(
+                            "task {task_id} is owned by another session after ownership claim"
+                        )
+                    }
+                } else {
+                    Self::get(store, task_id)
+                }
+            }
+        }
+    }
+
     pub fn list(store: &Store) -> Result<Vec<TaskRecord>> {
         let mut stmt = store.conn().prepare(
             "SELECT task_id, parent_task_id, title, priority, policy_snapshot, parent_close_policy, recovery_checkpoint, owner_session_id, created_at, updated_at

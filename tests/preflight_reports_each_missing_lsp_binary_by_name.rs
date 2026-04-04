@@ -1,6 +1,6 @@
 use kley::preflight_test_support::{
-    command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
-    CommandOutput, FakeRunner,
+    CommandOutput, FakeRunner, command_for_lsp_requirement, lsp_requirements,
+    run_required_lsp_checks_with_runner,
 };
 
 #[test]

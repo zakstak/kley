@@ -1,27 +1,37 @@
-VERDICT: APPROVE
+VERDICT: REJECT
 
-Final-wave task: F3 experiential QA for session token / cost query.
-Date: 2026-04-02
+Final-wave task: F3 Experiential QA for `agent-vm-baseline-update-lane`.
+Date: 2026-04-03
 
-Commands run:
-- PASS — `cargo test --test store_session_usage`
-- PASS — `cargo test --test pricing_models_dev`
-- PASS — `cargo test`
-- PASS — `git diff --exit-code -- src/store/schema.rs`
+Plan target:
+- Execute the `saga-dev2` canary workflow end-to-end: build, apply, terminal/web smoke, then rollback once.
+
+Commands executed:
+- PASS — `bash tests/vm-baseline-check.sh`
+- PASS — `git rev-parse HEAD` → `b746475d31c68726d4ba4d76042f41f3bb20008a`
+- PASS — `nix build /home/zack/git/kley#nixosConfigurations.saga-dev2.config.system.build.toplevel`
+- PASS — `nix build /home/zack/git/kley#nixosConfigurations.saga-dev.config.system.build.toplevel`
+- PASS — `nix eval --raw /home/zack/git/kley#nixosConfigurations.saga-dev2.config.system.configurationRevision` → `b746475d31c68726d4ba4d76042f41f3bb20008a-dirty`
+- PASS — `nix eval --raw /home/zack/git/kley#nixosConfigurations.saga-dev.config.system.configurationRevision` → `b746475d31c68726d4ba4d76042f41f3bb20008a-dirty`
+- FAIL — `bash agent-vm/scripts/apply-local-checkout-canary.sh`
+- FAIL — `bash agent-vm/scripts/validate-canary-kley.sh`
+- FAIL — `bash agent-vm/scripts/recover-canary-after-failed-update.sh`
 
 Observed behavior:
-- `tests/store_session_usage.rs` proves empty-session totals, null-token
-  handling, message-only aggregation, grouped effective-model slices,
-  micro-USD cost composition, unpriced-model reporting, and async `store_run`
-  access all behave as specified.
-- `tests/pricing_models_dev.rs` proves exact provider/model lookup, partial or
-  missing pricing returning `None`, and parser rejection of malformed JSON or
-  invalid shapes using offline fixture/input data only.
-- Full `cargo test` remained green after rerunning the focused suites, so the
-  feature does not regress the wider Rust test matrix.
-- `src/store/schema.rs` stayed untouched throughout verification.
+- Local repo-side regression checks passed: the developer-heavy manifest audit passed and the rollback/source-of-truth recovery markers are present in `agent-vm/README.md`.
+- The canary apply wrapper executed the real Task 6 flow far enough to build `nixosConfigurations.saga-dev2.config.system.build.toplevel` and resolve `STORE_PATH=/nix/store/sw9jp00vylvc20scr7hli507kbwjq73b-nixos-system-saga-dev2-26.05.20260401.6201e20`.
+- The first remote apply step failed exactly at SSH/DNS resolution:
+  - `ssh: Could not resolve hostname saga-dev2: Name or service not known`
+  - `error: writing to file: Broken pipe`
+- The canary smoke wrapper failed at its first required SSH step with the same blocker while verifying `/home/agent/kley` on `agent@saga-dev2`:
+  - `ssh: Could not resolve hostname saga-dev2: Name or service not known`
+- The rollback wrapper failed at its first required SSH step with the same blocker while listing system generations on `agent@saga-dev2`:
+  - `ssh: Could not resolve hostname saga-dev2: Name or service not known`
+- Because no SSH session to `saga-dev2` could be established, no remote apply, no terminal smoke, no web smoke, and no runtime rollback actually executed on the canary VM in this environment.
+
+Promotion decision:
+- Promotion to `saga-dev` is NOT justified from actual executed checks.
+- The local builds and metadata evaluation show the same checkout revision would be used for canary and baseline promotion, but the core experiential gate requires successful remote apply + smoke + rollback evidence on `saga-dev2`.
 
 Conclusion:
-- APPROVE. The command-driven QA matched the plan exactly and confirmed the
-  store-layer session token/cost query works through both focused suites and the
-  full regression suite without schema drift.
+- REJECT. This environment cannot complete the required experiential release gate because `agent@saga-dev2` is not resolvable, so the plan's required live canary execution was not achieved.

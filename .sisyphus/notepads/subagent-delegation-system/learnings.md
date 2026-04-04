@@ -195,3 +195,40 @@
   `cancel_task_graph` is intentionally idempotent and would silently accept
   terminal-task cancels instead of rejecting invalid state at the control
   surface.
+
+- F2 review finding:
+  `RuntimeManager::{execute_scheduler_ready_graph_nodes, recover_nonterminal_attempts_on_startup}`
+  currently exist as test-driven helpers only; repo search found no production
+  startup/runtime callsites, so restart recovery and DAG execution are not
+  actually wired into the shipped CLI/web flow yet.
+- F2 review finding: task ownership is inconsistent across layers —
+  `execute_delegate_task_entrypoint` trusts raw `parent_task_id`,
+  `spawn_autonomous_child_task_with_policy` preserves optional
+  `owner_session_id`, while websocket watch/control require
+  `TaskRecord::get_owned_by_session`; that leaves room for runtime-created tasks
+  that API surfaces cannot observe/control cleanly.
+
+- Follow-up fix: normalizing ownership at the store layer with
+  `TaskRecord::ensure_owned_by_session` keeps delegation/report_status aligned
+  with websocket watch/control rules without weakening cross-session access; an
+  unowned task can be claimed by the current runtime session, but a task already
+  owned by another session fails closed.
+- Follow-up fix: the shipped terminal chat path now uses a shared store plus a
+  bound `RuntimeManager` to run `recover_bound_store_on_startup()` before the
+  chat loop and `execute_scheduler_ready_graph_nodes(...)` after each completed
+  turn, so delegated DAG execution/recovery is no longer web-only wiring.
+- Task-15 harness fix: `playwright-web-server.mjs` must not launch `kley web` as
+  a detached process when Playwright is expected to clean it up; keeping the
+  child in the normal process tree and using `stdio: 'ignore'` lets the required
+  Playwright command exit cleanly without leaking `kley web --bind <port>`.
+
+- F3 rerun on 2026-04-03 confirmed the final experiential lane passes when run
+  on a fresh deterministic port (`PLAYWRIGHT_WEB_PORT=33211` in this run): the
+  combined `task delegation lifecycle|task watch survives reconnect` grep exits
+  cleanly with both specs green, and a post-run socket probe returning `111`
+  confirms no fresh-port listener remains.
+
+- F1 rerun passed once the exact Task-6 wrapper test name matched the plan and
+  the Playwright parent-task seed helper wrote `owner_session_id`; verifying on
+  a fresh `PLAYWRIGHT_WEB_PORT` also confirmed the updated harness exits cleanly
+  and leaves no listener behind.

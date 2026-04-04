@@ -578,11 +578,11 @@ pub mod preflight_test_support {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
 
-    pub use super::{
-        command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
-        LspCheckResult, LspRequirement,
-    };
     pub use super::{CommandOutput, CommandRunner, CommandSpec};
+    pub use super::{
+        LspCheckResult, LspRequirement, command_for_lsp_requirement, lsp_requirements,
+        run_required_lsp_checks_with_runner,
+    };
 
     pub struct FakeRunner {
         responses: RefCell<HashMap<String, VecDeque<CommandOutput>>>,

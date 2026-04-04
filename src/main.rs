@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use kley::agent::RunMode;
@@ -83,6 +84,7 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    Version,
     Preflight,
 }
 
@@ -139,6 +141,11 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    if version_flag_requested() {
+        println!("{}", format_version_string());
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -195,7 +202,10 @@ async fn run() -> Result<()> {
                 RunMode::Interactive
             };
 
-            let store = Store::open()?;
+            let shared_store = Arc::new(Mutex::new(Store::open()?));
+            let runtime_manager = Arc::new(RuntimeManager::new());
+            runtime_manager.bind_shared_store(Arc::clone(&shared_store));
+            runtime_manager.recover_bound_store_on_startup().await?;
             let (emitter, receiver) = event_channel();
 
             // Spawn a thread to print events as they arrive.
@@ -209,6 +219,9 @@ async fn run() -> Result<()> {
             let session_id = if let Some(id) = resume {
                 Some(id)
             } else if last {
+                let store = shared_store
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("store mutex poisoned: {error}"))?;
                 kley::store::Session::get_latest(&store)?.map(|s| s.id)
             } else {
                 None
@@ -222,7 +235,8 @@ async fn run() -> Result<()> {
             kley::agent::chat_loop(
                 model.as_deref(),
                 session_id.as_deref(),
-                &store,
+                Arc::clone(&shared_store),
+                Arc::clone(&runtime_manager),
                 emitter,
                 run_mode,
                 compact_config,
@@ -241,6 +255,9 @@ async fn run() -> Result<()> {
             kley::web::serve(config).await?;
         }
         Command::Task { command } => run_task_command(command).await?,
+        Command::Version => {
+            println!("{}", format_version_string());
+        }
         Command::Preflight => {
             if !kley::preflight::run(&mut std::io::stdout())? {
                 std::process::exit(1);
@@ -249,6 +266,32 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn version_flag_requested() -> bool {
+    let mut args = std::env::args_os();
+    let _binary = args.next();
+    match (args.next(), args.next()) {
+        (Some(flag), None) => {
+            let flag = flag.to_string_lossy();
+            flag == "--version" || flag == "-V"
+        }
+        _ => false,
+    }
+}
+
+fn format_version_string() -> String {
+    match current_system_generation(Path::new("/nix/var/nix/profiles/system")) {
+        Some(generation) => format!("kley {}+gen.{}", env!("CARGO_PKG_VERSION"), generation),
+        None => format!("kley {}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+fn current_system_generation(profile_link: &Path) -> Option<u64> {
+    let target = std::fs::read_link(profile_link).ok()?;
+    let file_name = target.file_name()?.to_str()?;
+    let trimmed = file_name.strip_prefix("system-")?.strip_suffix("-link")?;
+    trimmed.parse::<u64>().ok()
 }
 
 fn resolve_tool_approval_mode(
@@ -818,6 +861,7 @@ fn print_event(event: &AgentEvent) {
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
+    use std::path::Path;
 
     #[test]
     fn autonomous_mode_requires_prompt() {
@@ -965,5 +1009,28 @@ mod tests {
     fn preflight_subcommand_parses() {
         let cli = Cli::try_parse_from(["kley", "preflight"]).unwrap();
         assert!(matches!(cli.command, Command::Preflight));
+    }
+
+    #[test]
+    fn version_subcommand_parses() {
+        let cli = Cli::try_parse_from(["kley", "version"]).unwrap();
+        assert!(matches!(cli.command, Command::Version));
+    }
+
+    #[test]
+    fn extracts_generation_from_profile_link_target() {
+        let link_name = Path::new("/nix/var/nix/profiles/system-42-link");
+        let file_name = link_name.file_name().unwrap().to_str().unwrap();
+        let generation = file_name
+            .strip_prefix("system-")
+            .and_then(|rest| rest.strip_suffix("-link"))
+            .and_then(|value| value.parse::<u64>().ok());
+        assert_eq!(generation, Some(42));
+    }
+
+    #[test]
+    fn current_system_generation_returns_none_for_missing_link() {
+        let missing = Path::new("/tmp/kley-does-not-exist-system-link");
+        assert_eq!(current_system_generation(missing), None);
     }
 }

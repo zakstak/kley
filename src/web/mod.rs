@@ -35,6 +35,11 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .with_context(|| format!("failed to bind web server on {}", config.bind_addr))?;
 
     let state = WebAppState::for_web_mode().context("failed to initialize web state")?;
+    state
+        .runtime_manager
+        .recover_bound_store_on_startup()
+        .await
+        .context("failed to recover delegated tasks on web startup")?;
     let callback_bridge = tokio::spawn(async {
         if let Err(error) = serve_openai_callback_bridge().await {
             eprintln!("warning: OpenAI callback bridge exited: {error}");

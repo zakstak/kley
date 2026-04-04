@@ -1,171 +1,103 @@
 {
-  "active_plan": "/home/zack/git/kley/.sisyphus/plans/subagent-delegation-system.md",
-  "started_at": "2026-03-31T05:06:11.221Z",
+  "active_plan": "/home/zack/git/kley/.sisyphus/plans/initial-lsp-language-support.md",
+  "started_at": "2026-04-04T02:15:00.970Z",
   "session_ids": [
-    "ses_2bdb70970ffe6GjzRhN9T7sm2f",
-    "ses_2bdb4c550ffexxZO5wDS1rVvcU",
-    "ses_2bdb48feeffeS9lUO323AZGs62",
-    "ses_2bdb4c540ffe0u4AT7ObEZNU80",
-    "ses_2bdb276d9ffeBE3pAFLRQrujgy",
-    "ses_2bd9d17dbffeYvvvKXGeBKzmGm",
-    "ses_2bd9d1776ffehCviiO6EZiVbG6",
-    "ses_2bd9387a6ffez4YKZ1GqBzYgbn",
-    "ses_2bc7cde96ffeOMzeZ620EjSoBU",
-    "ses_2bc73dc12ffeNJJI9K06ZX7XFJ",
-    "ses_2bc680601ffeV1PU0HvOalw3of",
-    "ses_2bc239f64ffeD5unNpQaIXyc1t",
-    "ses_2bc19446effeIC4thmLz9MO4u4",
-    "ses_2ba4f768affeRrhgYv90dp9N2q",
-    "ses_2ba4b9c98ffeRhCJa0Z9hdSZGF",
-    "ses_2ba41e4b6ffepjUJGbQHycKM75",
-    "ses_2ba2b8937ffeEOSbnRgas9K5Mi",
-    "ses_2ba1e981fffecZfEwPTtqTtZm2",
-    "ses_2ba143de6ffe9DpVipFDIUI5p8",
-    "ses_2b9e8aafcffe27Ytjd9SgW7q6g",
-    "ses_2b9e8280bffeMKdn2MuD0sFCbn",
-    "ses_2b9e8accdffe1QG3xsjx74UaFR",
-    "ses_2b9e8ab05ffezBJwW00DGB0zHk",
-    "ses_2b9e8ab06ffeagjQ1pJhJPsyJo",
-    "ses_2b9e2cbcdffeMTn44a9x4pXWmB",
-    "ses_2b9d8b0d5ffefHzu4i9w7YpuM5",
-    "ses_2b9cf7014fferco8Uw9AsLQ4jF"
+    "ses_2a9ba4fedffeq5D3rvgtorxToK",
+    "ses_2a9b828aeffemdjIGs4GaWyDbL",
+    "ses_2a9b82c7fffewDo97nq0OU6h4X",
+    "ses_2a9b80426ffedxI2Fe0fS1o5xj",
+    "ses_2a9b82b80ffeoaNBjRisw41KF3",
+    "ses_2a9b829e5ffeJ6szFYRV3zLSoo",
+    "ses_2a9b3a844ffeMyumcPjQ1v51uE",
+    "ses_2a9a73e61ffe6ECCUcFA10Hr4Y",
+    "ses_2a9a73e76ffefksJYg3A3sUiGB",
+    "ses_2a99a66a5ffe46UQAyIgTHwBTm",
+    "ses_2a99a66d0ffekFl4mqmXd1tEGN",
+    "ses_2a99780b6ffemFpqF1Fb6qeQVR",
+    "ses_2a98ae23bffejL9ORZtf9CrUL2",
+    "ses_2a98b3e26ffeSqNciA6hFxt00B",
+    "ses_2a98b3e59ffei2y1h0TdMqFcwQ",
+    "ses_2a975b072ffec4fKTpwR9d0i45",
+    "ses_2a96a25f4ffe2FDvI9siubcFkh",
+    "ses_2a96a263dffeClTzLOANes6JPL",
+    "ses_2a945daa4ffelMMLtpCh3rQfbU",
+    "ses_2a945db43ffe726dmz3mj628p7",
+    "ses_2a945daf0ffeQ3J8pFezpjNv7X",
+    "ses_2a945db9fffe9e5zFUPm9mZxA6",
+    "ses_2a9228e76ffe0eQlYgJARdrogB",
+    "ses_2a9228ed6ffe55k3wPeCVy7cjF",
+    "ses_2a91ed11dffeoz4YYR1v5O0Ezg",
+    "ses_2a91491feffeyLyyoyR26RF3aZ",
+    "ses_2a9057998ffeJk5di46HHclAtU",
+    "ses_2a7bb7879ffebrSwmkbmL0bhgm",
+    "ses_2a7b0d223ffeINg0UHxZnCa6Gh",
+    "ses_2a79eb494ffeAhhQ2cykx5xQCo",
+    "ses_2a79c25dfffen724jf73dHqVuX"
   ],
-  "plan_name": "subagent-delegation-system",
+  "plan_name": "initial-lsp-language-support",
   "task_sessions": {
     "todo:1": {
       "task_key": "todo:1",
       "task_label": "1",
-      "task_title": "Add durable task domain schema",
-      "session_id": "ses_2bdb276d9ffeBE3pAFLRQrujgy",
+      "task_title": "Create the built-in LSP catalog and exact extension map",
+      "session_id": "ses_2a9b3a844ffeMyumcPjQ1v51uE",
       "agent": "Sisyphus-Junior",
       "category": "deep",
-      "updated_at": "2026-03-31T05:19:25.752Z"
+      "updated_at": "2026-04-04T02:25:17.504Z"
     },
     "todo:2": {
       "task_key": "todo:2",
       "task_label": "2",
-      "task_title": "Implement task graph repository and DAG validation",
-      "session_id": "ses_2bd9d17dbffeYvvvKXGeBKzmGm",
+      "task_title": "Implement exact workspace-root resolution rules per language family",
+      "session_id": "ses_2a9a73e76ffefksJYg3A3sUiGB",
       "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T05:38:26.631Z"
+      "category": "unspecified-high",
+      "updated_at": "2026-04-04T02:41:03.180Z"
     },
-    "todo:3": {
-      "task_key": "todo:3",
-      "task_label": "3",
-      "task_title": "Add durable task and attempt state machines",
-      "session_id": "ses_2bd9387a6ffez4YKZ1GqBzYgbn",
+    "todo:4": {
+      "task_key": "todo:4",
+      "task_label": "4",
+      "task_title": "Build a session-scoped lazy LSP manager and stdio JSON-RPC client",
+      "session_id": "ses_2a99780b6ffemFpqF1Fb6qeQVR",
       "agent": "Sisyphus-Junior",
       "category": "deep",
-      "updated_at": "2026-03-31T05:52:24.946Z"
+      "updated_at": "2026-04-04T03:01:45.074Z"
     },
     "todo:5": {
       "task_key": "todo:5",
       "task_label": "5",
-      "task_title": "Add scheduler claim and lease concurrency primitives",
-      "session_id": "ses_2bc7cde96ffeOMzeZ620EjSoBU",
+      "task_title": "Add the read-only/query LSP tool surface and register it",
+      "session_id": "ses_2a98b3e59ffei2y1h0TdMqFcwQ",
       "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T10:56:54.257Z"
-    },
-    "todo:6": {
-      "task_key": "todo:6",
-      "task_label": "6",
-      "task_title": "Implement parent↔child handoff contract and child-session bootstrap",
-      "session_id": "ses_2bc73dc12ffeNJJI9K06ZX7XFJ",
-      "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T11:09:57.043Z"
+      "category": "unspecified-high",
+      "updated_at": "2026-04-04T03:25:06.133Z"
     },
     "todo:7": {
       "task_key": "todo:7",
       "task_label": "7",
-      "task_title": "Add delegation policy inheritance and autonomous-spawn guardrails",
-      "session_id": "ses_2bc680601ffeV1PU0HvOalw3of",
+      "task_title": "Integrate the LSP subsystem into runtime tool execution",
+      "session_id": "ses_2a975b072ffec4fKTpwR9d0i45",
       "agent": "Sisyphus-Junior",
-      "category": "unspecified-high",
-      "updated_at": "2026-03-31T11:22:07.538Z"
+      "category": "deep",
+      "updated_at": "2026-04-04T03:37:41.284Z"
     },
     "todo:8": {
       "task_key": "todo:8",
       "task_label": "8",
-      "task_title": "Integrate DAG scheduler execution into RuntimeManager",
-      "session_id": "ses_2bc239f64ffeD5unNpQaIXyc1t",
-      "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T12:34:33.320Z"
-    },
-    "todo:9": {
-      "task_key": "todo:9",
-      "task_label": "9",
-      "task_title": "Implement lifecycle mutation controls",
-      "session_id": "ses_2bc19446effeIC4thmLz9MO4u4",
-      "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T12:45:38.688Z"
-    },
-    "todo:10": {
-      "task_key": "todo:10",
-      "task_label": "10",
-      "task_title": "Implement automatic restart recovery and interrupted-attempt",
-      "session_id": "ses_2ba4f768affeRrhgYv90dp9N2q",
-      "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T21:00:13.100Z"
-    },
-    "todo:11": {
-      "task_key": "todo:11",
-      "task_label": "11",
-      "task_title": "Extend task lifecycle events through runtime and UI mappings",
-      "session_id": "ses_2ba4b9c98ffeRhCJa0Z9hdSZGF",
+      "task_title": "Expose language detection and load state through snapshots and status events",
+      "session_id": "ses_2a96a263dffeClTzLOANes6JPL",
       "agent": "Sisyphus-Junior",
       "category": "unspecified-high",
-      "updated_at": "2026-03-31T21:10:46.902Z"
-    },
-    "todo:12": {
-      "task_key": "todo:12",
-      "task_label": "12",
-      "task_title": "Add task snapshots, watch APIs, and control protocol commands",
-      "session_id": "ses_2ba41e4b6ffepjUJGbQHycKM75",
-      "agent": "Sisyphus-Junior",
-      "category": "unspecified-high",
-      "updated_at": "2026-03-31T21:35:18.932Z"
-    },
-    "todo:13": {
-      "task_key": "todo:13",
-      "task_label": "13",
-      "task_title": "Add CLI task visibility and control surface",
-      "session_id": "ses_2ba2b8937ffeEOSbnRgas9K5Mi",
-      "agent": "Sisyphus-Junior",
-      "category": "unspecified-high",
-      "updated_at": "2026-03-31T21:49:02.229Z"
-    },
-    "todo:14": {
-      "task_key": "todo:14",
-      "task_label": "14",
-      "task_title": "Add guarded main-agent delegation entrypoint",
-      "session_id": "ses_2ba1e981fffecZfEwPTtqTtZm2",
-      "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T22:00:33.291Z"
-    },
-    "todo:15": {
-      "task_key": "todo:15",
-      "task_label": "15",
-      "task_title": "Add end-to-end lifecycle, reconnect, and recovery coverage",
-      "session_id": "ses_2ba143de6ffe9DpVipFDIUI5p8",
-      "agent": "Sisyphus-Junior",
-      "category": "deep",
-      "updated_at": "2026-03-31T22:19:16.279Z"
+      "updated_at": "2026-04-04T04:00:44.268Z"
     },
     "final-wave:f1": {
       "task_key": "final-wave:f1",
       "task_label": "F1",
       "task_title": "Plan Compliance Audit — oracle",
-      "session_id": "ses_2b9cf7014fferco8Uw9AsLQ4jF",
-      "agent": "oracle",
-      "category": "",
-      "updated_at": "2026-03-31T23:21:42.434Z"
+      "session_id": "ses_2a9057998ffeJk5di46HHclAtU",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-04-04T05:35:43.732Z"
     }
   }
 }
