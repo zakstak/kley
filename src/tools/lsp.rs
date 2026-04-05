@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use urlencoding::{decode, encode};
 
 use super::{Tool, ToolExecutionResult};
 use crate::diagnostics::{Diagnostic, DiagnosticSeverity};
 use crate::lsp::{
-    LspService, builtin_server_for_extension, builtin_server_for_path, resolve_workspace_root,
+    builtin_server_for_extension, builtin_server_for_path, resolve_workspace_root, LspService,
 };
 
 pub struct LspDiagnosticsTool {
@@ -76,28 +76,24 @@ impl Tool for LspDiagnosticsTool {
             Err(error) => {
                 return Ok(ToolExecutionResult::with_diagnostics(
                     format!("Error: invalid arguments: {error}"),
-                    vec![
-                        Diagnostic::error(
-                            "tool.lsp.invalid_arguments",
-                            format!("invalid arguments: {error}"),
-                            "tools.lsp",
-                        )
-                        .with_operation(self.name()),
-                    ],
+                    vec![Diagnostic::error(
+                        "tool.lsp.invalid_arguments",
+                        format!("invalid arguments: {error}"),
+                        "tools.lsp",
+                    )
+                    .with_operation(self.name())],
                 ));
             }
         };
         if args.file_path.trim().is_empty() {
             return Ok(ToolExecutionResult::with_diagnostics(
                 "Error: file_path is required",
-                vec![
-                    Diagnostic::error(
-                        "tool.lsp.file_path_required",
-                        "file_path is required",
-                        "tools.lsp",
-                    )
-                    .with_operation(self.name()),
-                ],
+                vec![Diagnostic::error(
+                    "tool.lsp.file_path_required",
+                    "file_path is required",
+                    "tools.lsp",
+                )
+                .with_operation(self.name())],
             ));
         }
 
@@ -1226,7 +1222,10 @@ impl Tool for LspRenameTool {
                             }
 
                             match request_rename(self.service.as_ref(), &context, &args) {
-                                Ok(edit) => format_apply_result(apply_workspace_edit(edit)),
+                                Ok(edit) => format_apply_result(apply_workspace_edit(
+                                    &self.project_dir,
+                                    edit,
+                                )),
                                 Err(error) => format!("Error: {error}"),
                             }
                         }
@@ -1466,7 +1465,7 @@ fn format_prepare_rename_result(result: &Value) -> String {
     "Cannot rename at this position".to_string()
 }
 
-fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
+fn apply_workspace_edit(project_dir: &Path, edit: Option<WorkspaceEdit>) -> ApplyResult {
     let Some(edit) = edit else {
         return ApplyResult {
             success: false,
@@ -1484,7 +1483,7 @@ fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
     };
 
     for (uri, edits) in edit.changes {
-        let file_path = match uri_to_path(&uri) {
+        let file_path = match uri_to_workspace_path(project_dir, &uri) {
             Ok(path) => path,
             Err(error) => {
                 result.success = false;
@@ -1510,7 +1509,8 @@ fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
     for change in edit.document_changes {
         match change {
             DocumentChange::TextDocumentEdit(change) => {
-                let file_path = match uri_to_path(&change.text_document.uri) {
+                let file_path = match uri_to_workspace_path(project_dir, &change.text_document.uri)
+                {
                     Ok(path) => path,
                     Err(error) => {
                         result.success = false;
@@ -1533,7 +1533,7 @@ fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
                 }
             }
             DocumentChange::ResourceOperation(ResourceOperation::Create { uri }) => {
-                match uri_to_path(&uri) {
+                match uri_to_workspace_path(project_dir, &uri) {
                     Ok(path) => match fs::write(&path, "") {
                         Ok(()) => result.files_modified.push(path.display().to_string()),
                         Err(error) => {
@@ -1548,7 +1548,7 @@ fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
                 }
             }
             DocumentChange::ResourceOperation(ResourceOperation::Rename { old_uri, new_uri }) => {
-                let old_path = match uri_to_path(&old_uri) {
+                let old_path = match uri_to_workspace_path(project_dir, &old_uri) {
                     Ok(path) => path,
                     Err(error) => {
                         result.success = false;
@@ -1556,7 +1556,7 @@ fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
                         continue;
                     }
                 };
-                let new_path = match uri_to_path(&new_uri) {
+                let new_path = match uri_to_workspace_path(project_dir, &new_uri) {
                     Ok(path) => path,
                     Err(error) => {
                         result.success = false;
@@ -1577,7 +1577,7 @@ fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
                 }
             }
             DocumentChange::ResourceOperation(ResourceOperation::Delete { uri }) => {
-                match uri_to_path(&uri) {
+                match uri_to_workspace_path(project_dir, &uri) {
                     Ok(path) => match fs::remove_file(&path) {
                         Ok(()) => result.files_modified.push(path.display().to_string()),
                         Err(error) => {
@@ -1595,6 +1595,55 @@ fn apply_workspace_edit(edit: Option<WorkspaceEdit>) -> ApplyResult {
     }
 
     result
+}
+
+fn uri_to_workspace_path(project_dir: &Path, uri: &str) -> Result<PathBuf, String> {
+    let path = uri_to_path(uri)?;
+    ensure_workspace_path(project_dir, &path)
+}
+
+fn ensure_workspace_path(project_dir: &Path, path: &Path) -> Result<PathBuf, String> {
+    let workspace_root = fs::canonicalize(project_dir)
+        .map_err(|error| format!("Invalid workspace root {}: {error}", project_dir.display()))?;
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    };
+
+    let verified = if candidate.exists() {
+        fs::canonicalize(&candidate)
+            .map_err(|error| format!("Invalid path {}: {error}", candidate.display()))?
+    } else {
+        let parent = candidate.parent().ok_or_else(|| {
+            format!(
+                "Path must include a parent directory: {}",
+                candidate.display()
+            )
+        })?;
+        let verified_parent = fs::canonicalize(parent)
+            .map_err(|error| format!("Invalid path {}: {error}", parent.display()))?;
+        if !verified_parent.starts_with(&workspace_root) {
+            return Err(format!(
+                "Path escapes workspace root: {}",
+                candidate.display()
+            ));
+        }
+        verified_parent.join(
+            candidate
+                .file_name()
+                .ok_or_else(|| format!("Path must include a file name: {}", candidate.display()))?,
+        )
+    };
+
+    if !verified.starts_with(&workspace_root) {
+        return Err(format!(
+            "Path escapes workspace root: {}",
+            candidate.display()
+        ));
+    }
+
+    Ok(verified)
 }
 
 fn format_apply_result(result: ApplyResult) -> String {
@@ -1951,5 +2000,35 @@ mod tests {
 
         assert_eq!(applied.unwrap(), 1);
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "a😀z\n");
+    }
+
+    #[test]
+    fn ensure_workspace_path_rejects_paths_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.rs");
+        fs::write(&outside_file, "fn outside() {}\n").unwrap();
+
+        let error = ensure_workspace_path(workspace.path(), &outside_file).unwrap_err();
+
+        assert!(error.contains("escapes workspace root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_workspace_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.rs");
+        fs::write(&outside_file, "fn outside() {}\n").unwrap();
+
+        let link_path = workspace.path().join("link.rs");
+        symlink(&outside_file, &link_path).unwrap();
+
+        let error = ensure_workspace_path(workspace.path(), &link_path).unwrap_err();
+
+        assert!(error.contains("escapes workspace root"));
     }
 }
