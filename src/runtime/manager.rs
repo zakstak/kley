@@ -27,10 +27,7 @@ use crate::store::{
     AttemptLifecycleState, NewTaskAttemptRecord, Session, SharedStore, Store, TaskAttemptRecord,
     TaskEdgeRecord, TaskLifecycleState, TaskRecord,
 };
-use crate::tools::{
-    DelegateTaskTool, ToolRegistry, hashline_edit, lsp, patch, read_file, read_skill,
-    report_status, shell,
-};
+use crate::tools::ToolRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedRuntime {
@@ -177,11 +174,15 @@ impl RuntimeWorker {
         runtime_rt: &tokio::runtime::Runtime,
         events: &crate::events::EventEmitter,
     ) -> Result<ResolvedAuth> {
-        if self.provider == "test" {
+        if self.provider == "openai"
+            && let Ok(api_key) = std::env::var("OPENAI_API_KEY")
+            && !api_key.is_empty()
+        {
             return Ok(ResolvedAuth {
-                provider: "test".to_string(),
-                api_key: "test-key".to_string(),
-                base_url: "http://unused".to_string(),
+                provider: "openai".to_string(),
+                api_key,
+                base_url: std::env::var("OPENAI_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
                 account_id: None,
             });
         }
@@ -1810,46 +1811,7 @@ fn assistant_message_context_chars(content: &str) -> usize {
 }
 
 fn runtime_registry(project_dir: PathBuf, lsp_service: Arc<dyn LspService>) -> ToolRegistry {
-    let mut registry = ToolRegistry::new();
-
-    registry.register(Box::new(shell::ShellTool::new()));
-    registry.register(Box::new(read_file::ReadFileTool));
-    registry.register(Box::new(patch::PatchTool));
-    registry.register(Box::new(hashline_edit::HashlineEditTool));
-    registry.register(Box::new(lsp::LspDiagnosticsTool::new(
-        project_dir.clone(),
-        "tool-registry-lsp",
-        lsp_service.clone(),
-    )));
-    registry.register(Box::new(lsp::LspSymbolsTool::new(
-        project_dir.clone(),
-        "tool-registry-lsp",
-        lsp_service.clone(),
-    )));
-    registry.register(Box::new(lsp::LspGotoDefinitionTool::new(
-        project_dir.clone(),
-        "tool-registry-lsp",
-        lsp_service.clone(),
-    )));
-    registry.register(Box::new(lsp::LspFindReferencesTool::new(
-        project_dir.clone(),
-        "tool-registry-lsp",
-        lsp_service.clone(),
-    )));
-    registry.register(Box::new(lsp::LspPrepareRenameTool::new(
-        project_dir.clone(),
-        "tool-registry-lsp",
-        lsp_service.clone(),
-    )));
-    registry.register(Box::new(lsp::LspRenameTool::new(
-        project_dir.clone(),
-        "tool-registry-lsp",
-        lsp_service,
-    )));
-    registry.register(Box::new(read_skill::ReadSkillTool::new(project_dir)));
-    registry.register(Box::new(DelegateTaskTool));
-    registry.register(Box::new(report_status::ReportStatusTool));
-    registry
+    crate::tools::registry_with_lsp_service(project_dir, lsp_service)
 }
 
 fn apply_lsp_status_report(
@@ -1949,12 +1911,84 @@ mod tests {
     use super::*;
     use crate::lsp::{LspClient, LspClientError};
     use crate::provider::ToolCall;
-    use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
     use crate::store::{NewSession, Session, SessionStatus};
+    use crate::test_openai::{self, ControlledResponse, TEST_MODEL};
     use anyhow::anyhow;
+    use axum::Router;
+    use axum::body::Bytes;
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
     use serde_json::{Value, json};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool as StdAtomicBool, AtomicUsize, Ordering};
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe { std::env::set_var(self.key, previous) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    struct TestServer {
+        addr: std::net::SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn spawn_app(app: Router) -> TestServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        TestServer { addr, task }
+    }
+
+    async fn controlled_openai_handler(body: Bytes) -> impl IntoResponse {
+        let payload: Value = serde_json::from_slice(&body).unwrap_or_default();
+        let prompt = payload
+            .get("input")
+            .and_then(Value::as_array)
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        let response =
+            test_openai::parse_controlled_prompt(prompt).unwrap_or(ControlledResponse::Text {
+                content: format!("Mock assistant reply: {prompt}"),
+            });
+
+        let body = match response {
+            ControlledResponse::ToolCall { name, arguments } => {
+                test_openai::tool_call_sse(&name, &arguments)
+            }
+            ControlledResponse::Text { content } => test_openai::text_sse(&content),
+        };
+
+        ([(header::CONTENT_TYPE, "text/event-stream")], body)
+    }
 
     #[test]
     fn finish_prompt_err_clears_active_state_and_emits_event() {
@@ -1962,8 +1996,8 @@ mod tests {
         let session = Session::create(
             &store,
             NewSession {
-                model: "test-model".to_string(),
-                provider: "test".to_string(),
+                model: TEST_MODEL.to_string(),
+                provider: "openai".to_string(),
             },
         )
         .expect("failed to create session");
@@ -2059,8 +2093,8 @@ mod tests {
         let session = Session::create(
             &store,
             NewSession {
-                model: "test-model".to_string(),
-                provider: "test".to_string(),
+                model: TEST_MODEL.to_string(),
+                provider: "openai".to_string(),
             },
         )
         .expect("failed to create session");
@@ -2093,8 +2127,8 @@ mod tests {
         let session = Session::create(
             &store,
             NewSession {
-                model: "test-model".to_string(),
-                provider: "test".to_string(),
+                model: TEST_MODEL.to_string(),
+                provider: "openai".to_string(),
             },
         )
         .expect("failed to create session");
@@ -2122,8 +2156,8 @@ mod tests {
         let session = Session::create(
             &store,
             NewSession {
-                model: "test-model".to_string(),
-                provider: "test".to_string(),
+                model: TEST_MODEL.to_string(),
+                provider: "openai".to_string(),
             },
         )
         .expect("failed to create session");
@@ -2147,7 +2181,7 @@ mod tests {
             AgentEvent::TurnStarted {
                 session_id: session.id.clone(),
                 turn_id: "turn-1".to_string(),
-                model: "test-model".to_string(),
+                model: TEST_MODEL.to_string(),
                 turn_number: 1,
                 context_used_chars: 100,
                 context_max_chars: 1000,
@@ -2294,12 +2328,14 @@ mod tests {
             Session::create(
                 &store,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: TEST_MODEL.to_string(),
+                    provider: "openai".to_string(),
                 },
             )
             .unwrap()
         };
+        let server =
+            spawn_app(Router::new().route("/responses", post(controlled_openai_handler))).await;
 
         let fixture = tempfile::tempdir().unwrap();
         let file_path = fixture.path().join("sample.rs");
@@ -2312,12 +2348,18 @@ mod tests {
             "severity": "all",
             "extension": null,
         });
-        let tool_call = json!({
-            "type": "tool_call",
-            "name": "lsp_diagnostics",
-            "arguments": tool_args,
+        let prompt = test_openai::controlled_response_prompt(ControlledResponse::ToolCall {
+            name: "lsp_diagnostics".to_string(),
+            arguments: tool_args,
         });
-        let prompt = format!("{CONTROL_BLOCK_START}{tool_call}{CONTROL_BLOCK_END}");
+
+        let _api_key = EnvVarGuard::set("OPENAI_API_KEY", "test-key");
+        let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", &format!("http://{}", server.addr));
+
+        let mut worker = worker;
+        worker.provider = "openai".to_string();
+        worker.model = TEST_MODEL.to_string();
+        worker.session_id = session.id.clone();
 
         let (stream_tx_one, _stream_rx_one) = mpsc::unbounded_channel();
         let first = worker
@@ -2336,6 +2378,7 @@ mod tests {
             .unwrap();
 
         let (stream_tx_two, _stream_rx_two) = mpsc::unbounded_channel();
+        let _server_auth = test_openai::auth(format!("http://{}", server.addr));
         let second = worker
             .submit_prompt_stream(
                 Arc::clone(&shared_store),

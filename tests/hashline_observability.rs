@@ -1,12 +1,17 @@
+use axum::Router;
+use axum::body::Bytes;
+use axum::http::header;
+use axum::response::IntoResponse;
+use axum::routing::post;
 use std::fs;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
-use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
 use kley::events::{AgentEvent, event_channel};
 use kley::runtime::{SessionRuntime, SubmitResult};
 use kley::store::{Store, Turn};
+use kley::test_openai::{self, ControlledResponse, TEST_MODEL};
 use kley::tools::editing::{EDIT_TOOL_SUMMARY_MAX_CHARS, EditObservation};
 use kley::tools::hashline_edit::HashlineEditTool;
 use kley::tools::patch::PatchTool;
@@ -76,13 +81,46 @@ fn read_json_artifact(result: &ToolExecutionResult) -> serde_json::Value {
     serde_json::from_str::<serde_json::Value>(&raw).unwrap()
 }
 
-fn test_auth() -> ResolvedAuth {
-    ResolvedAuth {
-        provider: "test".to_string(),
-        api_key: "test-key".to_string(),
-        base_url: "http://unused".to_string(),
-        account_id: None,
+struct TestServer {
+    addr: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.task.abort();
     }
+}
+
+async fn spawn_app(app: Router) -> TestServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    TestServer { addr, task }
+}
+
+async fn controlled_openai_sse_handler(body: Bytes) -> impl IntoResponse {
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let prompt = payload
+        .get("input")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.last())
+        .and_then(|item| item.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let body = match test_openai::parse_controlled_prompt(prompt) {
+        Some(ControlledResponse::ToolCall { name, arguments }) => {
+            test_openai::tool_call_sse(&name, &arguments)
+        }
+        Some(ControlledResponse::Text { content }) => test_openai::text_sse(&content),
+        None if prompt.to_lowercase().contains("tool") => {
+            test_openai::tool_call_sse("unknown_tool", &serde_json::json!({}))
+        }
+        None => test_openai::text_sse(&format!("Mock assistant reply: {prompt}")),
+    };
+    ([(header::CONTENT_TYPE, "text/event-stream")], body)
 }
 
 #[derive(Clone)]
@@ -338,6 +376,8 @@ fn malformed_hashline_request_still_records_observation() {
 async fn runtime_persists_edit_observation_in_function_call_output() {
     let store = Store::open_memory().unwrap();
     let (emitter, _receiver) = event_channel();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
     let mut observation = EditObservation::new("hashline", "unknown_tool", "src/lib.rs", 2, 9);
     observation.applied_count = 1;
@@ -355,8 +395,8 @@ async fn runtime_persists_edit_observation_in_function_call_output() {
 
     let mut runtime = SessionRuntime::new(
         &store,
-        test_auth(),
-        Some("test-model"),
+        test_openai::auth(format!("http://{}", server.addr)),
+        Some(TEST_MODEL),
         None,
         emitter,
         CompactConfig::default(),
@@ -402,6 +442,8 @@ async fn runtime_persists_edit_observation_in_function_call_output() {
 async fn runtime_events_include_engine_and_failure_metadata() {
     let store = Store::open_memory().unwrap();
     let (emitter, receiver) = event_channel();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
     let mut observation = EditObservation::new("hashline", "unknown_tool", "src/lib.rs", 3, 11);
     observation.applied_count = 1;
@@ -420,8 +462,8 @@ async fn runtime_events_include_engine_and_failure_metadata() {
 
     let mut runtime = SessionRuntime::new(
         &store,
-        test_auth(),
-        Some("test-model"),
+        test_openai::auth(format!("http://{}", server.addr)),
+        Some(TEST_MODEL),
         None,
         emitter,
         CompactConfig::default(),

@@ -1,34 +1,65 @@
+use axum::Router;
+use axum::body::Bytes;
+use axum::http::header;
+use axum::response::IntoResponse;
+use axum::routing::post;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
 use kley::events::event_channel;
 use kley::lsp::{LspClient, LspClientError, LspClientFactory, LspManager, TestingServerState};
-use kley::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
 use kley::runtime::{RuntimeHooks, SessionRuntime, SubmitResult};
 use kley::store::{Store, Turn};
+use kley::test_openai::{self, ControlledResponse, TEST_MODEL};
 use kley::tools::lsp::LspDiagnosticsTool;
 use kley::tools::{ToolRegistry, default_registry};
 use serde_json::{Value, json};
 
-fn test_auth() -> ResolvedAuth {
-    ResolvedAuth {
-        provider: "test".to_string(),
-        api_key: "test-key".to_string(),
-        base_url: "http://unused".to_string(),
-        account_id: None,
+struct TestServer {
+    addr: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
-fn controlled_tool_prompt(name: &str, arguments: Value) -> String {
-    let control = json!({
-        "type": "tool_call",
-        "name": name,
-        "arguments": arguments,
+async fn spawn_app(app: Router) -> TestServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
-    format!("invoke tool {CONTROL_BLOCK_START}{control}{CONTROL_BLOCK_END}")
+    TestServer { addr, task }
+}
+
+async fn controlled_openai_handler(body: Bytes) -> impl IntoResponse {
+    let payload: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let prompt = payload
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|items| items.last())
+        .and_then(|item| item.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let response =
+        test_openai::parse_controlled_prompt(prompt).unwrap_or(ControlledResponse::Text {
+            content: "No diagnostics found".to_string(),
+        });
+
+    let body = match response {
+        ControlledResponse::ToolCall { name, arguments } => {
+            test_openai::tool_call_sse(&name, &arguments)
+        }
+        ControlledResponse::Text { content } => test_openai::text_sse(&content),
+    };
+
+    ([(header::CONTENT_TYPE, "text/event-stream")], body)
 }
 
 fn function_call_outputs(store: &Store, session_id: &str) -> Vec<String> {
@@ -121,6 +152,8 @@ async fn runtime_executes_lsp_tools_via_session_manager() {
 
     let store = Store::open_memory().unwrap();
     let (events, _receiver) = event_channel();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_handler))).await;
 
     let factory = Arc::new(CountingFactory::new());
     let manager = Arc::new(LspManager::with_test_factory(factory.clone()));
@@ -133,8 +166,8 @@ async fn runtime_executes_lsp_tools_via_session_manager() {
 
     let mut runtime = SessionRuntime::new(
         &store,
-        test_auth(),
-        Some("test-model"),
+        test_openai::auth(format!("http://{}", server.addr)),
+        Some(TEST_MODEL),
         None,
         events,
         CompactConfig::default(),
@@ -147,15 +180,17 @@ async fn runtime_executes_lsp_tools_via_session_manager() {
     let args = json!({
         "file_path": file_path.display().to_string(),
         "severity": "all",
-        "extension": null,
     });
 
     let result_one = runtime
-        .submit_prompt(controlled_tool_prompt("lsp_diagnostics", args.clone()))
+        .submit_prompt(test_openai::controlled_tool_prompt(
+            "lsp_diagnostics",
+            args.clone(),
+        ))
         .await
         .unwrap();
     let result_two = runtime
-        .submit_prompt(controlled_tool_prompt("lsp_diagnostics", args))
+        .submit_prompt(test_openai::controlled_tool_prompt("lsp_diagnostics", args))
         .await
         .unwrap();
 
@@ -187,6 +222,8 @@ async fn runtime_returns_deterministic_lsp_missing_binary_error() {
 
     let store = Store::open_memory().unwrap();
     let (events, _receiver) = event_channel();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_handler))).await;
 
     let factory = Arc::new(MissingBinaryFactory::new());
     let manager = Arc::new(LspManager::with_test_factory(factory.clone()));
@@ -199,8 +236,8 @@ async fn runtime_returns_deterministic_lsp_missing_binary_error() {
 
     let mut runtime = SessionRuntime::new(
         &store,
-        test_auth(),
-        Some("test-model"),
+        test_openai::auth(format!("http://{}", server.addr)),
+        Some(TEST_MODEL),
         None,
         events,
         CompactConfig::default(),
@@ -213,15 +250,17 @@ async fn runtime_returns_deterministic_lsp_missing_binary_error() {
     let args = json!({
         "file_path": file_path.display().to_string(),
         "severity": "all",
-        "extension": null,
     });
 
     let result_one = runtime
-        .submit_prompt(controlled_tool_prompt("lsp_diagnostics", args.clone()))
+        .submit_prompt(test_openai::controlled_tool_prompt(
+            "lsp_diagnostics",
+            args.clone(),
+        ))
         .await
         .unwrap();
     let result_two = runtime
-        .submit_prompt(controlled_tool_prompt("lsp_diagnostics", args))
+        .submit_prompt(test_openai::controlled_tool_prompt("lsp_diagnostics", args))
         .await
         .unwrap();
 

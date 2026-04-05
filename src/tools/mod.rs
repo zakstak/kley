@@ -12,11 +12,16 @@ pub mod read_file;
 pub mod read_skill;
 pub mod report_status;
 pub mod shell;
+pub mod tool_call_telemetry;
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::Value;
 
 use crate::diagnostics::{Diagnostic, diagnostics_from_edit_observations, has_error_diagnostics};
+use crate::lsp::LspService;
 use crate::tools::editing::EditObservation;
 
 pub struct DelegateTaskTool;
@@ -215,11 +220,11 @@ impl ToolRegistry {
     }
 }
 
-/// Create a registry with all built-in tools.
-pub fn default_registry(project_dir: std::path::PathBuf) -> ToolRegistry {
+pub fn registry_with_lsp_service(
+    project_dir: PathBuf,
+    lsp_service: Arc<dyn LspService>,
+) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
-    let lsp_service: std::sync::Arc<dyn crate::lsp::LspService> =
-        std::sync::Arc::new(crate::lsp::LspManager::new());
     reg.register(Box::new(shell::ShellTool::new()));
     reg.register(Box::new(read_file::ReadFileTool));
     reg.register(Box::new(patch::PatchTool));
@@ -258,6 +263,12 @@ pub fn default_registry(project_dir: std::path::PathBuf) -> ToolRegistry {
     reg.register(Box::new(DelegateTaskTool));
     reg.register(Box::new(report_status::ReportStatusTool));
     reg
+}
+
+/// Create a registry with all built-in tools.
+pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
+    let lsp_service: Arc<dyn LspService> = Arc::new(crate::lsp::LspManager::new());
+    registry_with_lsp_service(project_dir, lsp_service)
 }
 
 #[cfg(test)]

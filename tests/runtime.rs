@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::Json;
@@ -16,7 +16,6 @@ use futures_util::stream;
 use kley::auth::ResolvedAuth;
 use kley::compact::{CompactConfig, HANDOFF_SUMMARY_PREFIX};
 use kley::events::{AgentEvent, Transport, event_channel};
-use kley::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
 use kley::runtime::manager::{RuntimeManager, spawn_autonomous_child_task_with_policy};
 use kley::runtime::session::{
     ChildSessionBootstrapMode, DelegatedChildBootstrapOutcome, bootstrap_delegated_child_session,
@@ -27,8 +26,89 @@ use kley::store::{
     NewTaskRecord, Session, SessionStatus, SharedStore, Store, TaskAttemptRecord, TaskEdgeRecord,
     TaskEventRecord, TaskLifecycleState, TaskRecord, Turn,
 };
+use kley::test_openai::{self, ControlledResponse, TEST_MODEL};
 use kley::tools::{Tool, ToolRegistry};
 use serde_json::Value;
+use tokio::sync::Mutex as AsyncMutex;
+
+struct TestServer {
+    addr: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+fn env_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(previous) => unsafe { std::env::set_var(self.key, previous) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn spawn_app(app: Router) -> TestServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    TestServer { addr, task }
+}
+
+async fn controlled_openai_sse_handler(body: Bytes) -> impl IntoResponse {
+    let payload: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let prompt = payload
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|items| items.last())
+        .and_then(|item| item.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let prompt_lower = prompt.to_lowercase();
+
+    let body = match test_openai::parse_controlled_prompt(prompt) {
+        Some(ControlledResponse::ToolCall { name, arguments }) => {
+            test_openai::tool_call_sse(&name, &arguments)
+        }
+        Some(ControlledResponse::Text { content }) => test_openai::text_sse(&content),
+        None if prompt_lower.contains("tool") => {
+            test_openai::tool_call_sse("unknown_tool", &serde_json::json!({}))
+        }
+        None => test_openai::text_sse(&format!("Mock assistant reply: {prompt}")),
+    };
+
+    ([(header::CONTENT_TYPE, "text/event-stream")], body)
+}
+
+fn set_openai_test_env(base_url: &str) -> (EnvVarGuard, EnvVarGuard) {
+    (
+        EnvVarGuard::set("OPENAI_API_KEY", "test-key"),
+        EnvVarGuard::set("OPENAI_BASE_URL", base_url),
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 fn delegation_policy_json(
@@ -89,20 +169,6 @@ mod runtime {
             std::thread::sleep(Duration::from_millis(200));
             Ok("slow tool result".to_string())
         }
-    }
-
-    struct TestServer {
-        addr: std::net::SocketAddr,
-        task: tokio::task::JoinHandle<()>,
-    }
-
-    async fn spawn_app(app: Router) -> TestServer {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        TestServer { addr, task }
     }
 
     async fn openai_ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -217,7 +283,7 @@ mod runtime {
         let runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
             store,
             auth,
-            Some("test-model"),
+            Some(TEST_MODEL),
             None,
             emitter,
             CompactConfig::default(),
@@ -231,24 +297,21 @@ mod runtime {
         (runtime, receiver)
     }
 
-    fn test_auth() -> ResolvedAuth {
-        ResolvedAuth {
-            provider: "test".to_string(),
-            api_key: "test-key".to_string(),
-            base_url: "http://unused".to_string(),
-            account_id: None,
-        }
+    fn test_auth(base_url: impl Into<String>) -> ResolvedAuth {
+        test_openai::auth(base_url)
     }
 
     #[tokio::test]
     async fn submit_prompt_persists_messages() {
         let store = Store::open_memory().unwrap();
         let (emitter, _receiver) = event_channel();
+        let server =
+            spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
         let mut runtime = SessionRuntime::new(
             &store,
-            test_auth(),
-            Some("test-model"),
+            test_auth(format!("http://{}", server.addr)),
+            Some(TEST_MODEL),
             None,
             emitter,
             CompactConfig::default(),
@@ -279,11 +342,13 @@ mod runtime {
     async fn abort_returns_typed_result() {
         let store = Store::open_memory().unwrap();
         let (emitter, _receiver) = event_channel();
+        let server =
+            spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
         let mut runtime = SessionRuntime::new(
             &store,
-            test_auth(),
-            Some("test-model"),
+            test_auth(format!("http://{}", server.addr)),
+            Some(TEST_MODEL),
             None,
             emitter,
             CompactConfig::default(),
@@ -331,7 +396,7 @@ mod runtime {
                 base_url: "http://127.0.0.1:9".to_string(),
                 account_id: None,
             },
-            Some("test-model"),
+            Some(TEST_MODEL),
             None,
             emitter,
             CompactConfig::default(),
@@ -474,6 +539,8 @@ mod runtime {
         let (emitter, _receiver) = event_channel();
         let abort_signal = Arc::new(AtomicBool::new(false));
         let executed = Arc::new(AtomicBool::new(false));
+        let server =
+            spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(SlowTool {
@@ -494,8 +561,8 @@ mod runtime {
 
         let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
             Arc::new(Mutex::new(store)),
-            test_auth(),
-            Some("test-model"),
+            test_auth(format!("http://{}", server.addr)),
+            Some(TEST_MODEL),
             None,
             emitter,
             CompactConfig::default(),
@@ -529,7 +596,7 @@ mod runtime {
         let session = Session::create(
             &store,
             kley::store::NewSession {
-                model: "test-model".to_string(),
+                model: TEST_MODEL.to_string(),
                 provider: "openai".to_string(),
             },
         )
@@ -538,7 +605,7 @@ mod runtime {
             &store,
             &session.id,
             &serde_json::json!({
-                "model": "test-model",
+                "model": TEST_MODEL,
                 "provider": "openai",
                 "compact_threshold": 80_000,
             })
@@ -567,7 +634,7 @@ mod runtime {
                     kind: "message".into(),
                     role: "assistant".into(),
                     content: format!("assistant-{index}-{}", "y".repeat(4_000)),
-                    model: Some("test-model".into()),
+                    model: Some(TEST_MODEL.into()),
                     tokens_in: None,
                     tokens_out: None,
                 },
@@ -584,7 +651,7 @@ mod runtime {
                 base_url: format!("http://{}", server.addr),
                 account_id: None,
             },
-            Some("test-model"),
+            Some(TEST_MODEL),
             Some(&session.id),
             emitter,
             CompactConfig {
@@ -619,6 +686,8 @@ mod runtime {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        let server =
+            spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(SlowTool {
@@ -639,8 +708,8 @@ mod runtime {
         let store = Arc::new(Mutex::new(store));
         let mut runtime = SessionRuntime::new_with_shared_store_and_abort_signal(
             store.clone(),
-            test_auth(),
-            Some("test-model"),
+            test_auth(format!("http://{}", server.addr)),
+            Some(TEST_MODEL),
             None,
             emitter,
             CompactConfig::default(),
@@ -699,16 +768,16 @@ async fn task_schema_round_trips_canonical_identity() {
     let child_session_a = Session::create(
         &store,
         NewSession {
-            model: "test-model".to_string(),
-            provider: "test".to_string(),
+            model: "gpt-5.3-codex-spark".to_string(),
+            provider: "openai".to_string(),
         },
     )
     .unwrap();
     let child_session_b = Session::create(
         &store,
         NewSession {
-            model: "test-model".to_string(),
-            provider: "test".to_string(),
+            model: "gpt-5.3-codex-spark".to_string(),
+            provider: "openai".to_string(),
         },
     )
     .unwrap();
@@ -1034,8 +1103,8 @@ async fn task_state_machine_is_durable() {
     let child_session = Session::create(
         &store,
         NewSession {
-            model: "test-model".to_string(),
-            provider: "test".to_string(),
+            model: "gpt-5.3-codex-spark".to_string(),
+            provider: "openai".to_string(),
         },
     )
     .unwrap();
@@ -1394,7 +1463,7 @@ async fn child_session_bootstrap_uses_handoff_summary_not_parent_transcript() {
         &store,
         NewSession {
             model: "parent-model".to_string(),
-            provider: "test".to_string(),
+            provider: "openai".to_string(),
         },
     )
     .unwrap();
@@ -1403,7 +1472,7 @@ async fn child_session_bootstrap_uses_handoff_summary_not_parent_transcript() {
         &parent.id,
         &serde_json::json!({
             "model": "parent-model",
-            "provider": "test",
+            "provider": "openai",
             "compact_threshold": 32123,
         })
         .to_string(),
@@ -1502,7 +1571,7 @@ async fn delegated_task_links_child_session_after_attempt_start() {
         &store,
         NewSession {
             model: "parent-model".to_string(),
-            provider: "test".to_string(),
+            provider: "openai".to_string(),
         },
     )
     .unwrap();
@@ -1603,7 +1672,7 @@ async fn delegated_task_child_session_failure_marks_attempt_interrupted() {
         &store,
         NewSession {
             model: "parent-model".to_string(),
-            provider: "test".to_string(),
+            provider: "openai".to_string(),
         },
     )
     .unwrap();
@@ -1683,8 +1752,12 @@ async fn delegated_task_child_session_failure_marks_attempt_interrupted() {
 
 #[tokio::test]
 async fn scheduler_executes_ready_graph_nodes_via_child_sessions() {
+    let _lock = env_lock().lock().await;
     let shared_store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
     let manager = RuntimeManager::new();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
+    let (_api_key, _base_url) = set_openai_test_env(&format!("http://{}", server.addr));
 
     let parent_session_id = {
         let store = shared_store.lock().unwrap();
@@ -1692,7 +1765,7 @@ async fn scheduler_executes_ready_graph_nodes_via_child_sessions() {
             &store,
             NewSession {
                 model: "parent-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap()
@@ -1734,6 +1807,28 @@ async fn scheduler_executes_ready_graph_nodes_via_child_sessions() {
             NewTaskEdgeRecord {
                 task_id: "dag-child".to_string(),
                 depends_on_task_id: "dag-root".to_string(),
+            },
+        )
+        .unwrap();
+        TaskAttemptRecord::create(
+            &store,
+            NewTaskAttemptRecord {
+                attempt_id: "attempt-dag-root-1".to_string(),
+                task_id: "dag-root".to_string(),
+                session_id: None,
+                status: AttemptLifecycleState::Queued.to_string(),
+                recovery_checkpoint: None,
+            },
+        )
+        .unwrap();
+        TaskAttemptRecord::create(
+            &store,
+            NewTaskAttemptRecord {
+                attempt_id: "attempt-dag-child-1".to_string(),
+                task_id: "dag-child".to_string(),
+                session_id: None,
+                status: AttemptLifecycleState::Queued.to_string(),
+                recovery_checkpoint: None,
             },
         )
         .unwrap();
@@ -1818,7 +1913,7 @@ async fn scheduler_does_not_run_blocked_nodes_early() {
             &store,
             NewSession {
                 model: "parent-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap()
@@ -1959,8 +2054,12 @@ async fn scheduler_does_not_run_blocked_nodes_early() {
 
 #[tokio::test]
 async fn restart_recovery_resumes_nonterminal_tasks_automatically() {
+    let _lock = env_lock().lock().await;
     let shared_store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
     let manager = RuntimeManager::new();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
+    let (_api_key, _base_url) = set_openai_test_env(&format!("http://{}", server.addr));
 
     let (parent_session_id, existing_child_session_id) = {
         let store = shared_store.lock().unwrap();
@@ -1968,7 +2067,7 @@ async fn restart_recovery_resumes_nonterminal_tasks_automatically() {
             &store,
             NewSession {
                 model: "parent-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap();
@@ -1976,7 +2075,7 @@ async fn restart_recovery_resumes_nonterminal_tasks_automatically() {
             &store,
             NewSession {
                 model: "child-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap();
@@ -2025,7 +2124,7 @@ async fn restart_recovery_resumes_nonterminal_tasks_automatically() {
                                 "artifact_ids": ["artifact-1", "artifact-2"],
                                 "inherited_settings": {
                                     "model": "parent-model",
-                                    "provider": "test",
+                                    "provider": "openai",
                                     "compact_threshold": 65536
                                 }
                             },
@@ -2168,8 +2267,12 @@ async fn restart_recovery_resumes_nonterminal_tasks_automatically() {
 
 #[tokio::test]
 async fn parent_close_requests_descendant_cancellation_before_recovery() {
+    let _lock = env_lock().lock().await;
     let shared_store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
     let manager = RuntimeManager::new();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
+    let (_api_key, _base_url) = set_openai_test_env(&format!("http://{}", server.addr));
 
     let parent_session_id = {
         let store = shared_store.lock().unwrap();
@@ -2177,7 +2280,7 @@ async fn parent_close_requests_descendant_cancellation_before_recovery() {
             &store,
             NewSession {
                 model: "parent-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap()
@@ -2318,7 +2421,7 @@ async fn parent_close_requests_descendant_cancellation_before_recovery() {
                                 "artifact_ids": ["artifact-independent"],
                                 "inherited_settings": {
                                     "model": "parent-model",
-                                    "provider": "test",
+                                    "provider": "openai",
                                     "compact_threshold": 54321
                                 }
                             },
@@ -2401,8 +2504,12 @@ async fn parent_close_requests_descendant_cancellation_before_recovery() {
 
 #[tokio::test]
 async fn recovery_bootstrap_uses_durable_inherited_settings_over_live_parent_session() {
+    let _lock = env_lock().lock().await;
     let shared_store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
     let manager = RuntimeManager::new();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
+    let (_api_key, _base_url) = set_openai_test_env(&format!("http://{}", server.addr));
 
     let parent_session_id = {
         let store = shared_store.lock().unwrap();
@@ -2410,7 +2517,7 @@ async fn recovery_bootstrap_uses_durable_inherited_settings_over_live_parent_ses
             &store,
             NewSession {
                 model: "live-parent-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap();
@@ -2419,7 +2526,7 @@ async fn recovery_bootstrap_uses_durable_inherited_settings_over_live_parent_ses
             &parent.id,
             &serde_json::json!({
                 "model": "live-parent-model",
-                "provider": "test",
+                "provider": "openai",
                 "compact_threshold": 11111,
             })
             .to_string(),
@@ -2463,7 +2570,7 @@ async fn recovery_bootstrap_uses_durable_inherited_settings_over_live_parent_ses
                                 "artifact_ids": ["artifact-durable-1"],
                                 "inherited_settings": {
                                     "model": "durable-child-model",
-                                    "provider": "test",
+                                    "provider": "openai",
                                     "compact_threshold": 22222
                                 }
                             },
@@ -2510,7 +2617,7 @@ async fn recovery_bootstrap_uses_durable_inherited_settings_over_live_parent_ses
         .expect("recovered attempt should link a child session");
     let child_session = Session::get(&store, child_session_id).unwrap();
     assert_eq!(child_session.model, "durable-child-model");
-    assert_eq!(child_session.provider, "test");
+    assert_eq!(child_session.provider, "openai");
 
     let child_settings_json = child_session
         .settings
@@ -2697,7 +2804,7 @@ async fn autonomous_spawn_respects_depth_and_budget_limits() {
                 1,
                 2,
                 25,
-                &["test"],
+                &["openai"],
                 &["parent-model"],
                 &["read_file", "report_status"],
                 "ask",
@@ -2780,7 +2887,7 @@ async fn autonomous_spawn_respects_depth_and_budget_limits() {
                 2,
                 1,
                 10,
-                &["test"],
+                &["openai"],
                 &["parent-model"],
                 &["read_file"],
                 "ask",
@@ -2822,7 +2929,7 @@ async fn child_task_cannot_widen_parent_permissions() {
                 4,
                 1,
                 40,
-                &["test"],
+                &["openai"],
                 &["parent-model"],
                 &["read_file"],
                 "ask",
@@ -2843,7 +2950,7 @@ async fn child_task_cannot_widen_parent_permissions() {
         ),
         (
             1usize,
-            serde_json::json!({ "allowed_providers": ["test", "openai"] }).to_string(),
+            serde_json::json!({ "allowed_providers": ["zai", "openai"] }).to_string(),
             "allowed_providers",
         ),
         (
@@ -2887,16 +2994,13 @@ async fn child_task_cannot_widen_parent_permissions() {
 async fn main_agent_can_delegate_task_with_handoff_and_policy_check() {
     let store = Store::open_memory().unwrap();
     let (events, _receiver) = event_channel();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
     let mut runtime = SessionRuntime::new(
         &store,
-        ResolvedAuth {
-            provider: "test".to_string(),
-            api_key: "test-key".to_string(),
-            base_url: "http://unused".to_string(),
-            account_id: None,
-        },
-        Some("test-model"),
+        test_openai::auth(format!("http://{}", server.addr)),
+        Some(TEST_MODEL),
         None,
         events,
         CompactConfig::default(),
@@ -2919,8 +3023,8 @@ async fn main_agent_can_delegate_task_with_handoff_and_policy_check() {
                 3,
                 2,
                 20,
-                &["test"],
-                &["test-model"],
+                &["openai"],
+                &[TEST_MODEL],
                 &["delegate_task", "report_status", "read_file"],
                 "ask",
                 "request_cancel_descendants",
@@ -2932,10 +3036,9 @@ async fn main_agent_can_delegate_task_with_handoff_and_policy_check() {
     )
     .unwrap();
 
-    let delegate_control = serde_json::json!({
-        "type": "tool_call",
-        "name": "delegate_task",
-        "arguments": {
+    let delegate_prompt = test_openai::controlled_tool_prompt(
+        "delegate_task",
+        serde_json::json!({
             "parent_task_id": "parent-delegation-task",
             "child_task_id": "child-delegation-task",
             "title": "delegated child",
@@ -2949,10 +3052,8 @@ async fn main_agent_can_delegate_task_with_handoff_and_policy_check() {
             })
             .to_string(),
             "after_sequence": 0
-        }
-    })
-    .to_string();
-    let delegate_prompt = format!("{CONTROL_BLOCK_START}{delegate_control}{CONTROL_BLOCK_END}");
+        }),
+    );
     runtime.submit_prompt(delegate_prompt).await.unwrap();
 
     let child = TaskRecord::get(&store, "child-delegation-task").unwrap();
@@ -2986,17 +3087,14 @@ async fn main_agent_can_delegate_task_with_handoff_and_policy_check() {
         Some("Investigate logs and return summary")
     );
 
-    let report_control = serde_json::json!({
-        "type": "tool_call",
-        "name": "report_status",
-        "arguments": {
+    let report_prompt = test_openai::controlled_tool_prompt(
+        "report_status",
+        serde_json::json!({
             "summary": "track delegated child",
             "task_id": "child-delegation-task",
             "after_sequence": 0
-        }
-    })
-    .to_string();
-    let report_prompt = format!("{CONTROL_BLOCK_START}{report_control}{CONTROL_BLOCK_END}");
+        }),
+    );
     runtime.submit_prompt(report_prompt).await.unwrap();
 
     let turns = Turn::list_for_session(&store, runtime.session_id()).unwrap();
@@ -3020,16 +3118,13 @@ async fn main_agent_can_delegate_task_with_handoff_and_policy_check() {
 async fn agent_delegation_denied_when_policy_blocks_spawn() {
     let store = Store::open_memory().unwrap();
     let (events, _receiver) = event_channel();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
     let mut runtime = SessionRuntime::new(
         &store,
-        ResolvedAuth {
-            provider: "test".to_string(),
-            api_key: "test-key".to_string(),
-            base_url: "http://unused".to_string(),
-            account_id: None,
-        },
-        Some("test-model"),
+        test_openai::auth(format!("http://{}", server.addr)),
+        Some(TEST_MODEL),
         None,
         events,
         CompactConfig::default(),
@@ -3052,8 +3147,8 @@ async fn agent_delegation_denied_when_policy_blocks_spawn() {
                 3,
                 1,
                 10,
-                &["test"],
-                &["test-model"],
+                &["openai"],
+                &[TEST_MODEL],
                 &["delegate_task", "report_status"],
                 "ask",
                 "request_cancel_descendants",
@@ -3065,17 +3160,14 @@ async fn agent_delegation_denied_when_policy_blocks_spawn() {
     )
     .unwrap();
 
-    let delegate_control = serde_json::json!({
-        "type": "tool_call",
-        "name": "delegate_task",
-        "arguments": {
+    let prompt = test_openai::controlled_tool_prompt(
+        "delegate_task",
+        serde_json::json!({
             "parent_task_id": "parent-policy-denied",
             "child_task_id": "child-policy-denied",
             "handoff_brief": "Try to delegate despite policy"
-        }
-    })
-    .to_string();
-    let prompt = format!("{CONTROL_BLOCK_START}{delegate_control}{CONTROL_BLOCK_END}");
+        }),
+    );
     runtime.submit_prompt(prompt).await.unwrap();
 
     assert!(TaskRecord::get(&store, "child-policy-denied").is_err());

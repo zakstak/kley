@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use urlencoding::{decode, encode};
 
 use super::{Tool, ToolExecutionResult};
 use crate::diagnostics::{Diagnostic, DiagnosticSeverity};
 use crate::lsp::{
-    builtin_server_for_extension, builtin_server_for_path, resolve_workspace_root, LspService,
+    LspService, builtin_server_for_extension, builtin_server_for_path, resolve_workspace_root,
 };
 
 pub struct LspDiagnosticsTool {
@@ -76,24 +76,28 @@ impl Tool for LspDiagnosticsTool {
             Err(error) => {
                 return Ok(ToolExecutionResult::with_diagnostics(
                     format!("Error: invalid arguments: {error}"),
-                    vec![Diagnostic::error(
-                        "tool.lsp.invalid_arguments",
-                        format!("invalid arguments: {error}"),
-                        "tools.lsp",
-                    )
-                    .with_operation(self.name())],
+                    vec![
+                        Diagnostic::error(
+                            "tool.lsp.invalid_arguments",
+                            format!("invalid arguments: {error}"),
+                            "tools.lsp",
+                        )
+                        .with_operation(self.name()),
+                    ],
                 ));
             }
         };
         if args.file_path.trim().is_empty() {
             return Ok(ToolExecutionResult::with_diagnostics(
                 "Error: file_path is required",
-                vec![Diagnostic::error(
-                    "tool.lsp.file_path_required",
-                    "file_path is required",
-                    "tools.lsp",
-                )
-                .with_operation(self.name())],
+                vec![
+                    Diagnostic::error(
+                        "tool.lsp.file_path_required",
+                        "file_path is required",
+                        "tools.lsp",
+                    )
+                    .with_operation(self.name()),
+                ],
             ));
         }
 

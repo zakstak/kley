@@ -41,8 +41,8 @@ pub struct SessionBuilder {
 impl SessionBuilder {
     pub fn new() -> Self {
         Self {
-            model: "test-model".into(),
-            provider: "test-provider".into(),
+            model: "gpt-5.3-codex-spark".into(),
+            provider: "openai".into(),
         }
     }
 

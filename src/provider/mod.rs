@@ -1,10 +1,9 @@
 //! Provider abstraction layer.
 //!
-//! Each LLM provider (OpenAI, ZAI, test) implements the `Provider` trait,
+//! Each LLM provider (OpenAI, ZAI) implements the `Provider` trait,
 //! which `SessionRuntime` calls to send prompts and receive responses.
 
 pub mod openai;
-pub mod test;
 pub mod zai;
 
 use std::sync::atomic::AtomicBool;
@@ -73,7 +72,7 @@ pub struct SendContext<'a> {
 ///
 /// Uses boxed futures to support dynamic dispatch (`dyn Provider`).
 pub trait Provider: Send + Sync {
-    /// Provider name (e.g. "openai", "zai", "test").
+    /// Provider name (e.g. "openai", "zai").
     fn name(&self) -> &str;
 
     /// Send a prompt to the model and return the result.

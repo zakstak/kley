@@ -41,8 +41,8 @@ use snapshot::{
     task_watch_bootstrap_data,
 };
 
-const DEFAULT_WEB_MODEL: &str = "test-model";
-const DEFAULT_WEB_PROVIDER: &str = "test";
+const DEFAULT_WEB_MODEL: &str = "gpt-5.3-codex-spark";
+const DEFAULT_WEB_PROVIDER: &str = "openai";
 const OPENAI_COMPLETION_TIMEOUT: Duration = Duration::from_secs(45);
 const RESOURCE_USAGE_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -458,7 +458,7 @@ async fn handle_socket(
                                     request_id,
                                     error: ResponseError {
                                         code: web_error_code::INVALID_PROVIDER.to_string(),
-                                        message: "provider must be one of openai, zai, or test"
+                                        message: "provider must be one of openai or zai"
                                             .to_string(),
                                         details: Some(json!({ "provider": provider })),
                                     },
@@ -1848,7 +1848,7 @@ async fn send_resource_usage_event(
 }
 
 fn is_supported_session_provider(provider: &str) -> bool {
-    matches!(provider, "openai" | "zai" | "test")
+    matches!(provider, "openai" | "zai")
 }
 
 fn compact_threshold_for_session(session: &Session) -> usize {

@@ -11,8 +11,7 @@ const unsupportedControls = [
   "#btn-session-picker",
 ];
 
-const CONTROL_BLOCK_START = "<kley-test-provider>";
-const CONTROL_BLOCK_END = "</kley-test-provider>";
+const OPENAI_CONTROL_PREFIX = "mock-openai-control:";
 
 type ProbeMatch = {
   type?: string;
@@ -61,8 +60,8 @@ async function seedDelegationParentTask(
     max_depth: 3,
     max_concurrency: 2,
     budget: 20,
-    allowed_providers: ["test"],
-    allowed_models: ["test-model"],
+    allowed_providers: ["openai"],
+    allowed_models: ["gpt-5.3-codex-spark"],
     approved_tools: ["delegate_task", "report_status", "read_file"],
     tool_approval_mode: "ask",
     parent_close_policy: "request_cancel_descendants",
@@ -321,7 +320,7 @@ function toolCallPrompt(
   name: string,
   argumentsObject: Record<string, unknown>,
 ) {
-  return `${CONTROL_BLOCK_START}${JSON.stringify({ type: "tool_call", name, arguments: argumentsObject })}${CONTROL_BLOCK_END}`;
+  return `${OPENAI_CONTROL_PREFIX}${JSON.stringify({ type: "tool_call", name, arguments: argumentsObject })}`;
 }
 
 function captureConsoleErrors(page: Page): string[] {
@@ -361,7 +360,7 @@ test("core workspace parity", async ({ page }) => {
     "status: active",
   );
   await expect(page.getByTestId("selected-session-meta")).toContainText(
-    "provider/model: test/test-model",
+    "provider/model: openai/gpt-5.3-codex-spark",
   );
   await expect(
     page.getByTestId("session-list").locator("button").first(),
@@ -381,7 +380,7 @@ test("core workspace parity", async ({ page }) => {
     "please use a tool",
   );
   await expect(page.getByTestId("transcript")).toContainText(
-    "Test assistant reply: please use a tool",
+    "Mock assistant reply: please use a tool",
   );
 
   const toolCard = page
@@ -428,7 +427,7 @@ test("core workspace parity", async ({ page }) => {
     "please use a tool",
   );
   await expect(page.getByTestId("transcript")).not.toContainText(
-    "Test assistant reply: please use a tool",
+    "Mock assistant reply: please use a tool",
   );
   await expect(
     page.getByTestId("tool-card").filter({ hasText: "unknown_tool" }),
@@ -493,7 +492,7 @@ test("unsupported controls absent", async ({ page }) => {
 test("reconnect recovery", async ({ page }) => {
   const consoleErrors = captureConsoleErrors(page);
   const prompt = "hold-open: keep streaming";
-  const finalReply = `Test assistant reply: ${prompt}`;
+  const finalReply = `Mock assistant reply: ${prompt}`;
 
   await page.goto("/");
   await waitForWorkspaceReady(page);

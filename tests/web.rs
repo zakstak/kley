@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use axum::{
     body::{Body, to_bytes},
@@ -9,15 +9,16 @@ use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use kley::events::AgentEvent;
 use kley::lsp::{LspClient, LspClientError, LspClientFactory};
-use kley::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
 use kley::store::{
     self, AttemptLifecycleState, NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord,
     NewTaskEventRecord, NewTaskRecord, NewTurn, Session, SessionStatus, SharedStore, Store,
     TaskAttemptRecord, TaskEdgeRecord, TaskEventRecord, TaskLifecycleState, TaskRecord, Turn,
 };
+use kley::test_openai;
 use kley::web::state::{MockWebAuthService, WebAppState, WebAuthService};
 use kley::web::ws::runtime_event_to_ui_event;
 use serde_json::Value;
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::util::ServiceExt;
@@ -27,13 +28,35 @@ mod web {
 
     const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 
+    fn env_lock() -> &'static AsyncMutex<()> {
+        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| AsyncMutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe { std::env::set_var(self.key, previous) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
     fn controlled_tool_prompt(name: &str, arguments: Value) -> String {
-        let control = serde_json::json!({
-            "type": "tool_call",
-            "name": name,
-            "arguments": arguments,
-        });
-        format!("invoke tool {CONTROL_BLOCK_START}{control}{CONTROL_BLOCK_END}")
+        test_openai::controlled_tool_prompt(name, arguments)
     }
 
     struct ReadyDiagnosticsClient;
@@ -84,12 +107,66 @@ mod web {
     struct TestServer {
         addr: std::net::SocketAddr,
         task: tokio::task::JoinHandle<()>,
+        openai_task: tokio::task::JoinHandle<()>,
+        _api_key: EnvVarGuard,
+        _base_url: EnvVarGuard,
+        _env_lock: MutexGuard<'static, ()>,
     }
 
     impl Drop for TestServer {
         fn drop(&mut self) {
             self.task.abort();
+            self.openai_task.abort();
         }
+    }
+
+    async fn spawn_openai_mock_server()
+    -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let app = axum::Router::new().route("/responses", axum::routing::post(openai_sse_handler));
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((addr, task))
+    }
+
+    async fn openai_sse_handler(body: axum::body::Bytes) -> impl axum::response::IntoResponse {
+        let payload: Value = serde_json::from_slice(&body).unwrap_or_default();
+        let prompt = payload
+            .get("input")
+            .and_then(Value::as_array)
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let prompt_lower = prompt.to_lowercase();
+
+        let body = match test_openai::parse_controlled_prompt(prompt) {
+            Some(test_openai::ControlledResponse::ToolCall { name, arguments }) => {
+                test_openai::tool_call_sse(&name, &arguments)
+            }
+            Some(test_openai::ControlledResponse::Text { content }) => test_openai::text_sse(&content),
+            None if prompt_lower.contains("tool") => {
+                test_openai::tool_call_sse("unknown_tool", &serde_json::json!({}))
+            }
+            None if prompt_lower.contains("hold-open") || prompt_lower.contains("abortable") => {
+                concat!(
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"slow \"}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"stream \"}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"reply\"}\n\n",
+                    "event: response.completed\n",
+                    "data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":13,\"output_tokens\":5,\"total_tokens\":18}}\n\n"
+                )
+                .to_string()
+            }
+            None => test_openai::text_sse(&format!("Mock assistant reply: {prompt}")),
+        };
+
+        ([(header::CONTENT_TYPE, "text/event-stream")], body)
     }
 
     async fn spawn_server() -> TestServer {
@@ -99,6 +176,10 @@ mod web {
     }
 
     async fn spawn_server_with_state(state: WebAppState) -> anyhow::Result<TestServer> {
+        let env_guard = env_lock().lock().await;
+        let (openai_addr, openai_task) = spawn_openai_mock_server().await?;
+        let api_key = EnvVarGuard::set("OPENAI_API_KEY", "test-key");
+        let base_url = EnvVarGuard::set("OPENAI_BASE_URL", &format!("http://{openai_addr}"));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let app = kley::web::router::app_with_state(state);
@@ -107,16 +188,23 @@ mod web {
             let _ = axum::serve(listener, app).await;
         });
 
-        Ok(TestServer { addr, task })
+        Ok(TestServer {
+            addr,
+            task,
+            openai_task,
+            _api_key: api_key,
+            _base_url: base_url,
+            _env_lock: env_guard,
+        })
     }
 
     fn test_state() -> WebAppState {
-        let store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
+        let store: SharedStore = Arc::new(StdMutex::new(Store::open_memory().unwrap()));
         WebAppState::new(store)
     }
 
     fn test_state_with_auth_service(auth_service: Arc<dyn WebAuthService>) -> WebAppState {
-        let store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
+        let store: SharedStore = Arc::new(StdMutex::new(Store::open_memory().unwrap()));
         WebAppState::with_auth_service(store, auth_service)
     }
 
@@ -131,14 +219,14 @@ mod web {
             let session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
             Session::update_title(s, &session.id, &title)?;
             Ok(session)
@@ -373,14 +461,14 @@ mod web {
             let session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
             Session::update_title(s, &session.id, "Bootstrap Session")?;
             Turn::append(
@@ -402,7 +490,7 @@ mod web {
                     kind: "message".to_string(),
                     role: "assistant".to_string(),
                     content: "Persisted bootstrap reply".to_string(),
-                    model: Some("test-model".to_string()),
+                    model: Some("gpt-5.3-codex-spark".to_string()),
                     tokens_in: None,
                     tokens_out: None,
                 },
@@ -446,8 +534,8 @@ mod web {
         assert_eq!(frame["resource_usage"]["disk"]["percent_used"], 25);
         assert!(frame["selected_session"]["created_at"].as_str().is_some());
         assert!(frame["selected_session"]["updated_at"].as_str().is_some());
-        assert_eq!(frame["selected_session"]["provider"], "test");
-        assert_eq!(frame["selected_session"]["model"], "test-model");
+        assert_eq!(frame["selected_session"]["provider"], "openai");
+        assert_eq!(frame["selected_session"]["model"], "gpt-5.3-codex-spark");
         assert!(
             frame["sessions"]
                 .as_array()
@@ -468,21 +556,29 @@ mod web {
             let first = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &first.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &first.id, "Requested Session")?;
 
             let second = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &second.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &second.id, "Newest Session")?;
 
             Ok((first, second))
@@ -532,8 +628,8 @@ mod web {
             Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )
         })
@@ -559,8 +655,8 @@ mod web {
         .expect("settings should be backfilled");
 
         let settings: Value = serde_json::from_str(&stored_settings).unwrap();
-        assert_eq!(settings["model"], "test-model");
-        assert_eq!(settings["provider"], "test");
+        assert_eq!(settings["model"], "gpt-5.3-codex-spark");
+        assert_eq!(settings["provider"], "openai");
         assert_eq!(
             settings["compact_threshold"],
             serde_json::json!(kley::compact::CompactConfig::default().threshold_chars)
@@ -575,8 +671,8 @@ mod web {
             Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )
         })
@@ -592,8 +688,11 @@ mod web {
 
         let bootstrap = recv_json(&mut socket).await;
         assert_eq!(bootstrap["type"], "state.snapshot");
-        assert_eq!(bootstrap["selected_session"]["provider"], "test");
-        assert_eq!(bootstrap["selected_session"]["model"], "test-model");
+        assert_eq!(bootstrap["selected_session"]["provider"], "openai");
+        assert_eq!(
+            bootstrap["selected_session"]["model"],
+            "gpt-5.3-codex-spark"
+        );
 
         socket
             .send(Message::Text(format!(
@@ -776,21 +875,29 @@ mod web {
             let first = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &first.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &first.id, "Available Session")?;
 
             let second = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &second.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &second.id, "Busy Session")?;
 
             Ok((first, second))
@@ -822,21 +929,29 @@ mod web {
             let first = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &first.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &first.id, "Available Session")?;
 
             let second = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &second.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &second.id, "Busy Requested Session")?;
 
             Ok((first, second))
@@ -881,20 +996,28 @@ mod web {
             let first = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &first.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
 
             let second = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &second.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
 
             Ok((first, second))
         })
@@ -936,14 +1059,14 @@ mod web {
             let requested = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &requested.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
             Session::update_title(s, &requested.id, "Requested Older Session")?;
             Ok(requested)
@@ -956,14 +1079,14 @@ mod web {
                 let session = Session::create(
                     s,
                     NewSession {
-                        model: "test-model".to_string(),
-                        provider: "test".to_string(),
+                        model: "gpt-5.3-codex-spark".to_string(),
+                        provider: "openai".to_string(),
                     },
                 )?;
                 Session::update_settings(
                     s,
                     &session.id,
-                    r#"{"model":"test-model","provider":"test"}"#,
+                    r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
                 )?;
                 Session::update_title(s, &session.id, &format!("Recent Session {index}"))?;
                 Ok(())
@@ -1004,11 +1127,15 @@ mod web {
             let first = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &first.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &first.id, "First Session")?;
             Turn::append(
                 s,
@@ -1017,7 +1144,7 @@ mod web {
                     kind: "message".to_string(),
                     role: "assistant".to_string(),
                     content: "First session transcript".to_string(),
-                    model: Some("test-model".to_string()),
+                    model: Some("gpt-5.3-codex-spark".to_string()),
                     tokens_in: None,
                     tokens_out: None,
                 },
@@ -1026,11 +1153,15 @@ mod web {
             let second = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &second.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &second.id, "Second Session")?;
             Turn::append(
                 s,
@@ -1039,7 +1170,7 @@ mod web {
                     kind: "message".to_string(),
                     role: "assistant".to_string(),
                     content: "Second session transcript".to_string(),
-                    model: Some("test-model".to_string()),
+                    model: Some("gpt-5.3-codex-spark".to_string()),
                     tokens_in: None,
                     tokens_out: None,
                 },
@@ -1101,11 +1232,15 @@ mod web {
             let first = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &first.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &first.id, "Streaming Session")?;
             Ok(first)
         })
@@ -1116,11 +1251,15 @@ mod web {
             let second = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &second.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &second.id, "Other Session")?;
             Ok(second)
         })
@@ -1261,6 +1400,8 @@ mod web {
             vec![
                 "turn.started",
                 "message.started",
+                "transport.selected",
+                "transport.fallback",
                 "message.delta",
                 "message.completed",
                 "turn.completed",
@@ -1507,11 +1648,15 @@ mod web {
             let first = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &first.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &first.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &first.id, "First Session")?;
             Turn::append(
                 s,
@@ -1520,7 +1665,7 @@ mod web {
                     kind: "message".to_string(),
                     role: "assistant".to_string(),
                     content: "First session transcript".to_string(),
-                    model: Some("test-model".to_string()),
+                    model: Some("gpt-5.3-codex-spark".to_string()),
                     tokens_in: None,
                     tokens_out: None,
                 },
@@ -1529,11 +1674,15 @@ mod web {
             let second = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
-            Session::update_settings(s, &second.id, r#"{"model":"test-model","provider":"test"}"#)?;
+            Session::update_settings(
+                s,
+                &second.id,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
+            )?;
             Session::update_title(s, &second.id, "Second Session")?;
             Turn::append(
                 s,
@@ -1542,7 +1691,7 @@ mod web {
                     kind: "message".to_string(),
                     role: "assistant".to_string(),
                     content: "Second session transcript".to_string(),
-                    model: Some("test-model".to_string()),
+                    model: Some("gpt-5.3-codex-spark".to_string()),
                     tokens_in: None,
                     tokens_out: None,
                 },
@@ -1717,14 +1866,14 @@ mod web {
             let session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
             Turn::append(
                 s,
@@ -1733,7 +1882,7 @@ mod web {
                     kind: "message".to_string(),
                     role: "assistant".to_string(),
                     content: "Persisted history message".to_string(),
-                    model: Some("test-model".to_string()),
+                    model: Some("gpt-5.3-codex-spark".to_string()),
                     tokens_in: None,
                     tokens_out: None,
                 },
@@ -1800,8 +1949,8 @@ mod web {
             Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )
         })
@@ -2067,28 +2216,28 @@ mod web {
             let parent_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &parent_session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
 
             let child_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             let unrelated_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             let child_session_id = child_session.id.clone();
@@ -2377,28 +2526,28 @@ mod web {
             let parent_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &parent_session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
 
             let child_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             let unrelated_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             let child_session_id = child_session.id.clone();
@@ -2700,14 +2849,14 @@ mod web {
             let session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
             TaskRecord::create(
                 s,
@@ -2778,21 +2927,21 @@ mod web {
             let attached_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &attached_session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
 
             let foreign_session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             let foreign_session_id = foreign_session.id.clone();
@@ -3071,14 +3220,14 @@ mod web {
             let session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
 
             TaskRecord::create(
@@ -3435,14 +3584,14 @@ mod web {
             let session = Session::create(
                 s,
                 NewSession {
-                    model: "test-model".to_string(),
-                    provider: "test".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "openai".to_string(),
                 },
             )?;
             Session::update_settings(
                 s,
                 &session.id,
-                r#"{"model":"test-model","provider":"test"}"#,
+                r#"{"model":"gpt-5.3-codex-spark","provider":"openai"}"#,
             )?;
 
             TaskRecord::create(
@@ -4135,7 +4284,7 @@ fn existing_turn_events_remain_backward_compatible() {
         AgentEvent::TurnStarted {
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
-            model: "test-model".to_string(),
+            model: "gpt-5.3-codex-spark".to_string(),
             turn_number: 1,
             context_used_chars: 128,
             context_max_chars: 512,
@@ -4181,7 +4330,7 @@ fn existing_turn_events_remain_backward_compatible() {
         AgentEvent::TurnCompleted {
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
-            model: "test-model".to_string(),
+            model: "gpt-5.3-codex-spark".to_string(),
             turn_number: 1,
             message_id: message_id.to_string(),
             context_used_chars: 256,
@@ -4193,7 +4342,7 @@ fn existing_turn_events_remain_backward_compatible() {
         AgentEvent::TurnFailed {
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
-            model: "test-model".to_string(),
+            model: "gpt-5.3-codex-spark".to_string(),
             turn_number: 1,
             error: "aborted".to_string(),
         },

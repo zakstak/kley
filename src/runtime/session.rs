@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use uuid::Uuid;
@@ -21,6 +22,10 @@ use crate::store::{
 use crate::text::truncate_with_ascii_ellipsis;
 use crate::tools::ToolRegistry;
 use crate::tools::editing::EditObservation;
+use crate::tools::tool_call_telemetry::{
+    ToolCallExecutionKind, ToolCallFailureKind, ToolCallMetricRecord,
+    persist_metric as persist_tool_call_metric,
+};
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
 const DEFAULT_ZAI_MODEL: &str = "glm-4.7";
@@ -67,6 +72,30 @@ pub struct RuntimeHooks {
     pub on_output_delta: Option<DeltaHook>,
     pub on_event: Option<EventHook>,
     pub on_tool_approval: Option<ToolApprovalHook>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallContext {
+    session_id: String,
+    turn_id: String,
+    message_id: String,
+    tool_call_id: String,
+    tool_name: String,
+    arguments: String,
+    provider: String,
+    model: String,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallOutcome {
+    output: String,
+    output_preview: String,
+    edit_observation: Option<EditObservation>,
+    diagnostics: Vec<Diagnostic>,
+    success: bool,
+    execution_kind: ToolCallExecutionKind,
+    failure_kind: Option<ToolCallFailureKind>,
+    duration_ms: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,6 +751,221 @@ impl<'a> SessionRuntime<'a> {
         &self.session.id
     }
 
+    fn tool_call_context(
+        &self,
+        turn_id: &str,
+        message_id: &str,
+        call: &ToolCall,
+    ) -> ToolCallContext {
+        ToolCallContext {
+            session_id: self.session.id.clone(),
+            turn_id: turn_id.to_string(),
+            message_id: message_id.to_string(),
+            tool_call_id: call.call_id.clone(),
+            tool_name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            provider: self.resolved.provider.clone(),
+            model: self.model.clone(),
+        }
+    }
+
+    fn approval_denied_tool_call(&self, call: &ToolCall) -> ToolCallOutcome {
+        let output =
+            "Tool execution denied by user. Re-run with --tool-approval auto to allow execution."
+                .to_string();
+        let diagnostics = vec![Diagnostic::error(
+            "tool.approval_denied",
+            "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.",
+            "runtime.session",
+        )
+        .with_operation(call.name.clone())];
+        ToolCallOutcome {
+            output_preview: tool_output_preview(&output, None),
+            output,
+            edit_observation: None,
+            diagnostics,
+            success: false,
+            execution_kind: ToolCallExecutionKind::ApprovalDenied,
+            failure_kind: Some(ToolCallFailureKind::ApprovalDenied),
+            duration_ms: 0,
+        }
+    }
+
+    fn execute_approved_tool_call(&self, call: &ToolCall) -> ToolCallOutcome {
+        let started_at = Instant::now();
+        let finish =
+            |output: String,
+             edit_observation: Option<EditObservation>,
+             diagnostics: Vec<Diagnostic>,
+             success: bool,
+             execution_kind: ToolCallExecutionKind,
+             failure_kind: Option<ToolCallFailureKind>| ToolCallOutcome {
+                output_preview: tool_output_preview(&output, edit_observation.as_ref()),
+                output,
+                edit_observation,
+                diagnostics,
+                success,
+                execution_kind,
+                failure_kind,
+                duration_ms: started_at.elapsed().as_millis(),
+            };
+
+        let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
+            Ok(args) => args,
+            Err(err) => {
+                return finish(
+                    format!("Tool error: invalid JSON arguments: {err}"),
+                    None,
+                    vec![
+                        Diagnostic::error(
+                            "tool.arguments_invalid",
+                            format!(
+                                "Tool arguments for '{}' were not valid JSON: {err}",
+                                call.name
+                            ),
+                            "runtime.session",
+                        )
+                        .with_operation(call.name.clone()),
+                    ],
+                    false,
+                    ToolCallExecutionKind::InvalidArguments,
+                    Some(ToolCallFailureKind::InvalidArguments),
+                );
+            }
+        };
+
+        if let Some(lsp_target) = self.detect_lsp_tool_target(&call.name, &args)
+            && lsp_target.last_file.is_some()
+        {
+            self.emit_lsp_detected_status(&lsp_target);
+        }
+
+        let runtime_handled: Option<Result<String>> = match call.name.as_str() {
+            "delegate_task" => Some(self.execute_delegate_task_entrypoint(&args)),
+            "report_status" => match self.maybe_execute_task_status_report(&args) {
+                Ok(output) => output.map(Ok),
+                Err(err) => Some(Err(err)),
+            },
+            _ => None,
+        };
+
+        if let Some(result) = runtime_handled {
+            return match result {
+                Ok(output) => finish(
+                    output,
+                    None,
+                    Vec::new(),
+                    true,
+                    ToolCallExecutionKind::RuntimeEntrypoint,
+                    None,
+                ),
+                Err(err) => finish(
+                    format!("Tool error: {err:#}"),
+                    None,
+                    vec![
+                        Diagnostic::error(
+                            "tool.runtime_handler_failed",
+                            format!("Tool error: {err:#}"),
+                            "runtime.session",
+                        )
+                        .with_operation(call.name.clone()),
+                    ],
+                    false,
+                    ToolCallExecutionKind::RuntimeEntrypoint,
+                    Some(ToolCallFailureKind::RuntimeHandlerFailed),
+                ),
+            };
+        }
+
+        match self.registry.get(&call.name) {
+            Some(tool) => match tool.execute_with_result(args) {
+                Ok(result) => {
+                    let success = result.is_success();
+                    finish(
+                        result.output,
+                        result.edit_observations.first().cloned(),
+                        result.diagnostics,
+                        success,
+                        ToolCallExecutionKind::RegistryTool,
+                        (!success).then_some(ToolCallFailureKind::ToolReportedError),
+                    )
+                }
+                Err(err) => finish(
+                    format!("Tool error: {err:#}"),
+                    None,
+                    vec![
+                        Diagnostic::error(
+                            "tool.execution_failed",
+                            format!("Tool error: {err:#}"),
+                            "runtime.session",
+                        )
+                        .with_operation(call.name.clone()),
+                    ],
+                    false,
+                    ToolCallExecutionKind::RegistryTool,
+                    Some(ToolCallFailureKind::ExecutionFailed),
+                ),
+            },
+            None => finish(
+                format!("Error: unknown tool '{}'", call.name),
+                None,
+                vec![
+                    Diagnostic::error(
+                        "tool.unknown",
+                        format!("Unknown tool '{}'", call.name),
+                        "runtime.session",
+                    )
+                    .with_operation(call.name.clone()),
+                ],
+                false,
+                ToolCallExecutionKind::UnknownTool,
+                Some(ToolCallFailureKind::UnknownTool),
+            ),
+        }
+    }
+
+    fn persist_tool_call_metric(&self, context: &ToolCallContext, outcome: &ToolCallOutcome) {
+        let diagnostic_codes = outcome
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.clone())
+            .collect();
+        let edit_failure_kind = outcome
+            .edit_observation
+            .as_ref()
+            .and_then(|observation| observation.failure_kind.clone());
+        let edit_artifact_id = outcome
+            .edit_observation
+            .as_ref()
+            .and_then(|observation| observation.artifact_id.clone());
+        let edit_artifact_path = outcome
+            .edit_observation
+            .as_ref()
+            .and_then(|observation| observation.artifact_path.clone());
+
+        let record = ToolCallMetricRecord {
+            session_id: context.session_id.clone(),
+            turn_id: context.turn_id.clone(),
+            message_id: context.message_id.clone(),
+            tool_call_id: context.tool_call_id.clone(),
+            provider: context.provider.clone(),
+            model: context.model.clone(),
+            tool_name: context.tool_name.clone(),
+            arguments_preview: truncate(&context.arguments, 512),
+            output_preview: truncate(&outcome.output_preview, 512),
+            execution_kind: outcome.execution_kind,
+            success: outcome.success,
+            duration_ms: outcome.duration_ms,
+            failure_kind: outcome.failure_kind,
+            diagnostic_codes,
+            edit_failure_kind,
+            edit_artifact_id,
+            edit_artifact_path,
+        };
+
+        let _ = persist_tool_call_metric(&record);
+    }
+
     fn execute_delegate_task_entrypoint(&self, args: &serde_json::Value) -> Result<String> {
         let parsed: DelegateTaskArgs =
             serde_json::from_value(args.clone()).context("invalid delegate_task arguments")?;
@@ -1127,112 +1371,33 @@ impl<'a> SessionRuntime<'a> {
                             Ok(())
                         })?;
 
+                        let tool_call_context = self.tool_call_context(&turn_id, &message_id, call);
                         let approved = match &self.hooks.on_tool_approval {
                             Some(approve) => approve(call),
                             None => true,
                         };
 
-                        let (output, edit_observation, diagnostics, success) = if !approved {
-                            (
-                                "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.".to_string(),
-                                None,
-                                vec![Diagnostic::error(
-                                    "tool.approval_denied",
-                                    "Tool execution denied by user. Re-run with --tool-approval auto to allow execution.",
-                                    "runtime.session",
-                                )
-                                .with_operation(call.name.clone())],
-                                false,
-                            )
+                        if approved && self.abort_signal.load(Ordering::Relaxed) {
+                            return self.finish_aborted_submit(&turn_id, &message_id, turn_number);
+                        }
+
+                        let outcome = if approved {
+                            self.execute_approved_tool_call(call)
                         } else {
-                            let args: serde_json::Value =
-                                serde_json::from_str(&call.arguments).unwrap_or_default();
-                            if self.abort_signal.load(Ordering::Relaxed) {
-                                return self.finish_aborted_submit(
-                                    &turn_id,
-                                    &message_id,
-                                    turn_number,
-                                );
-                            }
-
-                            if let Some(lsp_target) = self.detect_lsp_tool_target(&call.name, &args)
-                                && lsp_target.last_file.is_some()
-                            {
-                                self.emit_lsp_detected_status(&lsp_target);
-                            }
-
-                            let runtime_handled: Option<Result<String>> = match call.name.as_str() {
-                                "delegate_task" => {
-                                    Some(self.execute_delegate_task_entrypoint(&args))
-                                }
-                                "report_status" => {
-                                    self.maybe_execute_task_status_report(&args)?.map(Ok)
-                                }
-                                _ => None,
-                            };
-
-                            if let Some(result) = runtime_handled {
-                                match result {
-                                    Ok(output) => (output, None, Vec::new(), true),
-                                    Err(err) => (
-                                        format!("Tool error: {err:#}"),
-                                        None,
-                                        vec![
-                                            Diagnostic::error(
-                                                "tool.runtime_handler_failed",
-                                                format!("Tool error: {err:#}"),
-                                                "runtime.session",
-                                            )
-                                            .with_operation(call.name.clone()),
-                                        ],
-                                        false,
-                                    ),
-                                }
-                            } else {
-                                match self.registry.get(&call.name) {
-                                    Some(tool) => match tool.execute_with_result(args) {
-                                        Ok(result) => {
-                                            let success = result.is_success();
-                                            (
-                                                result.output,
-                                                result.edit_observations.first().cloned(),
-                                                result.diagnostics,
-                                                success,
-                                            )
-                                        }
-                                        Err(e) => (
-                                            format!("Tool error: {e:#}"),
-                                            None,
-                                            vec![
-                                                Diagnostic::error(
-                                                    "tool.execution_failed",
-                                                    format!("Tool error: {e:#}"),
-                                                    "runtime.session",
-                                                )
-                                                .with_operation(call.name.clone()),
-                                            ],
-                                            false,
-                                        ),
-                                    },
-                                    None => (
-                                        format!("Error: unknown tool '{}'", call.name),
-                                        None,
-                                        vec![
-                                            Diagnostic::error(
-                                                "tool.unknown",
-                                                format!("Unknown tool '{}'", call.name),
-                                                "runtime.session",
-                                            )
-                                            .with_operation(call.name.clone()),
-                                        ],
-                                        false,
-                                    ),
-                                }
-                            }
+                            self.approval_denied_tool_call(call)
                         };
 
-                        let output_preview =
-                            tool_output_preview(&output, edit_observation.as_ref());
+                        let ToolCallOutcome {
+                            output,
+                            output_preview,
+                            edit_observation,
+                            diagnostics,
+                            success,
+                            ..
+                        } = outcome.clone();
+
+                        self.persist_tool_call_metric(&tool_call_context, &outcome);
+
                         self.emit_runtime_event(RuntimeEvent::ToolCallCompleted {
                             call_id: call.call_id.clone(),
                             name: call.name.clone(),
@@ -1665,7 +1830,6 @@ fn create_provider(provider_name: &str) -> Box<dyn Provider> {
     match provider_name {
         "openai" => Box::new(crate::provider::openai::OpenAiProvider::new()),
         "zai" => Box::new(crate::provider::zai::ZaiProvider::new()),
-        "test" => Box::new(crate::provider::test::TestProvider::new()),
         _ => Box::new(crate::provider::openai::OpenAiProvider::new()),
     }
 }
@@ -1890,7 +2054,7 @@ fn estimated_request_chars(
             let tools = request_budget.registry.to_api_tools();
             crate::compact::estimate_request_chars(history, request_budget.instructions, &tools)
         }
-        "zai" | "test" => crate::compact::estimate_history_chars(history),
+        "zai" => crate::compact::estimate_history_chars(history),
         _ => {
             let tools = request_budget.registry.to_api_tools();
             crate::compact::estimate_request_chars(history, request_budget.instructions, &tools)
@@ -1997,14 +2161,102 @@ pub use crate::provider::zai::process_zai_sse_line;
 mod tests {
     use super::truncate;
     use super::*;
-    use crate::auth::ResolvedAuth;
     use crate::compact::CompactConfig;
     use crate::events::event_channel;
-    use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
     use crate::store::{NewTaskRecord, Session, Store, TaskRecord, Turn};
+    use crate::test_openai::{self, ControlledResponse, TEST_MODEL};
     use crate::tools::editing::EditObservation;
+    use crate::tools::tool_call_telemetry::{
+        TOOL_CALL_METRICS_JSONL_FILE, with_metrics_root_override_async,
+    };
     use crate::tools::{Tool, ToolExecutionResult, ToolRegistry};
+    use axum::Router;
+    use axum::body::Bytes;
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
     use serde_json::{Value, json};
+    use std::fs;
+
+    struct TestServer {
+        addr: std::net::SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn spawn_app(app: Router) -> TestServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        TestServer { addr, task }
+    }
+
+    async fn controlled_openai_handler(body: Bytes) -> impl IntoResponse {
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let prompt = payload
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+
+        let response =
+            test_openai::parse_controlled_prompt(prompt).unwrap_or(ControlledResponse::Text {
+                content: format!("Mock assistant reply: {prompt}"),
+            });
+
+        let body = match response {
+            ControlledResponse::ToolCall { name, arguments } => {
+                test_openai::tool_call_sse(&name, &arguments)
+            }
+            ControlledResponse::Text { content } => test_openai::text_sse(&content),
+        };
+
+        ([(header::CONTENT_TYPE, "text/event-stream")], body)
+    }
+
+    fn malformed_tool_call_sse(name: &str, arguments: &str) -> String {
+        format!(
+            concat!(
+                "event: response.output_item.added\n",
+                "data: {{\"type\":\"response.output_item.added\",\"item\":{{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"{name}\"}}}}\n\n",
+                "event: response.function_call_arguments.delta\n",
+                "data: {{\"type\":\"response.function_call_arguments.delta\",\"delta\":{arguments}}}\n\n",
+                "event: response.function_call_arguments.done\n",
+                "data: {{\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call-1\",\"name\":\"{name}\"}}\n\n",
+                "event: response.completed\n",
+                "data: {{\"type\":\"response.completed\",\"usage\":{{\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18}}}}\n\n"
+            ),
+            name = name,
+            arguments = serde_json::to_string(arguments).unwrap_or_else(|_| "\"{}\"".to_string()),
+        )
+    }
+
+    async fn malformed_tool_arguments_handler(body: Bytes) -> impl IntoResponse {
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let prompt = payload
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+
+        let body = if prompt == "trigger malformed tool args" {
+            malformed_tool_call_sse("edit_tool", "{not-json")
+        } else {
+            test_openai::text_sse("tool failure recorded")
+        };
+        ([(header::CONTENT_TYPE, "text/event-stream")], body)
+    }
 
     struct ObservedTool;
 
@@ -2052,23 +2304,28 @@ mod tests {
         }
     }
 
+    fn read_tool_call_metrics(metrics_root: &std::path::Path) -> Vec<Value> {
+        let contents = fs::read_to_string(metrics_root.join(TOOL_CALL_METRICS_JSONL_FILE)).unwrap();
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     #[tokio::test]
     async fn model_history_excludes_edit_metadata() {
         let store = Store::open_memory().unwrap();
         let (emitter, receiver) = event_channel();
+        let server =
+            spawn_app(Router::new().route("/responses", post(controlled_openai_handler))).await;
 
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(ObservedTool));
 
         let mut runtime = SessionRuntime::new(
             &store,
-            ResolvedAuth {
-                provider: "test".to_string(),
-                api_key: "test-key".to_string(),
-                base_url: "http://unused".to_string(),
-                account_id: None,
-            },
-            Some("test-model"),
+            test_openai::auth(format!("http://{}", server.addr)),
+            Some(TEST_MODEL),
             None,
             emitter,
             CompactConfig::default(),
@@ -2078,11 +2335,8 @@ mod tests {
         )
         .unwrap();
 
-        let control_block = format!(
-            "{CONTROL_BLOCK_START}{{\"type\":\"tool_call\",\"name\":\"edit_tool\",\"arguments\":{{}}}}{CONTROL_BLOCK_END}"
-        );
         runtime
-            .submit_prompt(format!("run the edit tool {control_block}"))
+            .submit_prompt(test_openai::controlled_tool_prompt("edit_tool", json!({})))
             .await
             .unwrap();
 
@@ -2149,6 +2403,110 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn tool_call_telemetry_records_successful_tool_execution() {
+        let store = Store::open_memory().unwrap();
+        let (emitter, _receiver) = event_channel();
+        let server =
+            spawn_app(Router::new().route("/responses", post(controlled_openai_handler))).await;
+        let metrics_root = tempfile::tempdir().unwrap();
+        let metrics = with_metrics_root_override_async(metrics_root.path(), async {
+            let mut registry = ToolRegistry::new();
+            registry.register(Box::new(ObservedTool));
+
+            let mut runtime = SessionRuntime::new(
+                &store,
+                test_openai::auth(format!("http://{}", server.addr)),
+                Some(TEST_MODEL),
+                None,
+                emitter,
+                CompactConfig::default(),
+                registry,
+                "system".to_string(),
+                RuntimeHooks::default(),
+            )
+            .unwrap();
+
+            runtime
+                .submit_prompt(test_openai::controlled_tool_prompt("edit_tool", json!({})))
+                .await
+                .unwrap();
+
+            read_tool_call_metrics(metrics_root.path())
+        })
+        .await;
+
+        assert_eq!(metrics.len(), 1);
+        let record = &metrics[0];
+        assert_eq!(record["event"], "tool.call.completed");
+        assert_eq!(record["provider"], "openai");
+        assert_eq!(record["model"], TEST_MODEL);
+        assert_eq!(record["tool_name"], "edit_tool");
+        assert_eq!(record["execution_kind"], "registry_tool");
+        assert_eq!(record["success"], true);
+        assert_eq!(record["diagnostic_codes"][0], "tool.edit.observation");
+        assert_eq!(record["edit_artifact_id"], "artifact-123");
+        assert_eq!(record["edit_artifact_path"], "/tmp/artifact.json");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tool_call_telemetry_records_invalid_arguments_failures() {
+        let store = Store::open_memory().unwrap();
+        let (emitter, receiver) = event_channel();
+        let server =
+            spawn_app(Router::new().route("/responses", post(malformed_tool_arguments_handler)))
+                .await;
+        let metrics_root = tempfile::tempdir().unwrap();
+        let metrics = with_metrics_root_override_async(metrics_root.path(), async {
+            let mut registry = ToolRegistry::new();
+            registry.register(Box::new(ObservedTool));
+
+            let mut runtime = SessionRuntime::new(
+                &store,
+                test_openai::auth(format!("http://{}", server.addr)),
+                Some(TEST_MODEL),
+                None,
+                emitter,
+                CompactConfig::default(),
+                registry,
+                "system".to_string(),
+                RuntimeHooks::default(),
+            )
+            .unwrap();
+
+            runtime
+                .submit_prompt("trigger malformed tool args".to_string())
+                .await
+                .unwrap();
+
+            read_tool_call_metrics(metrics_root.path())
+        })
+        .await;
+
+        assert_eq!(metrics.len(), 1);
+        let record = &metrics[0];
+        assert_eq!(record["tool_name"], "edit_tool");
+        assert_eq!(record["execution_kind"], "invalid_arguments");
+        assert_eq!(record["failure_kind"], "invalid_arguments");
+        assert_eq!(record["success"], false);
+        assert_eq!(record["diagnostic_codes"][0], "tool.arguments_invalid");
+        assert_eq!(record["arguments_preview"], "{not-json");
+
+        let tool_event = receiver.drain().into_iter().find_map(|event| match event {
+            AgentEvent::ToolCallCompleted {
+                diagnostics,
+                success,
+                ..
+            } => Some((diagnostics, success)),
+            _ => None,
+        });
+        let Some((diagnostics, success)) = tool_event else {
+            panic!("tool completion event expected")
+        };
+        assert!(!success);
+        assert_eq!(diagnostics[0].code, "tool.arguments_invalid");
+    }
+
     #[test]
     fn truncate_preserves_utf8_boundaries() {
         let input = "🦀 test";
@@ -2167,8 +2525,8 @@ mod tests {
         let session = Session::create(
             &store,
             NewSession {
-                model: "test-model".to_string(),
-                provider: "test".to_string(),
+                model: TEST_MODEL.to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap();
@@ -2176,8 +2534,8 @@ mod tests {
             &store,
             &session.id,
             &serde_json::json!({
-                "model": "test-model",
-                "provider": "test",
+                "model": TEST_MODEL,
+                "provider": "openai",
                 "compact_threshold": 12345,
             })
             .to_string(),
@@ -2187,12 +2545,7 @@ mod tests {
         let (events, _rx) = event_channel();
         let runtime = SessionRuntime::new(
             &store,
-            ResolvedAuth {
-                provider: "test".to_string(),
-                api_key: "test-key".to_string(),
-                base_url: "http://unused".to_string(),
-                account_id: None,
-            },
+            test_openai::auth("http://127.0.0.1:1"),
             None,
             Some(&session.id),
             events,
@@ -2212,7 +2565,7 @@ mod tests {
         let mut session = Session {
             id: "s1".to_string(),
             model: "m".to_string(),
-            provider: "test".to_string(),
+            provider: "openai".to_string(),
             title: None,
             status: SessionStatus::Active,
             policy: None,
