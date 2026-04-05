@@ -7,6 +7,20 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
+      pkgsFor = system: import nixpkgs { inherit system; };
+      packageFor = system:
+        let
+          pkgs = pkgsFor system;
+        in
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "kley";
+          version = "0.1.0";
+          src = pkgs.lib.cleanSource ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "--bin" "kley" ];
+          doCheck = false;
+          meta.mainProgram = "kley";
+        };
       resolveFlakeSource = flake: {
         exactRevision =
           if flake ? rev then flake.rev
@@ -24,13 +38,19 @@
       };
       agentVm = import ./agent-vm {
         inherit nixpkgs sourceResolution;
+        kleyPackage = packageFor "x86_64-linux";
       };
       # Hostname strings kept explicit for saga deploy preflight grep checks:
       # "saga-dev" "saga-dev2"
     in {
+      packages = forAllSystems (system: {
+        default = packageFor system;
+        kley = packageFor system;
+      });
+
       devShells = forAllSystems (system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = pkgsFor system;
         in {
           default = pkgs.mkShell {
             packages = with pkgs; [
