@@ -1,5 +1,6 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
 use crate::lsp::builtin_catalog;
@@ -12,6 +13,13 @@ use super::protocol::{
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(handle_socket)
+}
+
+pub async fn ws_handler_with_headers(ws: WebSocketUpgrade, headers: HeaderMap) -> Response {
+    if let Err(message) = super::ws::validate_websocket_origin(&headers) {
+        return (axum::http::StatusCode::FORBIDDEN, message).into_response();
+    }
     ws.on_upgrade(handle_socket)
 }
 

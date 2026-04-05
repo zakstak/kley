@@ -2,7 +2,8 @@ use std::future::pending;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -68,8 +69,35 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<WsConnectQuery>,
     State(state): State<WebAppState>,
+    headers: HeaderMap,
 ) -> Response {
+    if let Err(message) = validate_websocket_origin(&headers) {
+        return (StatusCode::FORBIDDEN, message).into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state, query.session_id))
+}
+
+pub(crate) fn validate_websocket_origin(headers: &HeaderMap) -> Result<(), &'static str> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let Some(origin) = origin.to_str().ok() else {
+        return Err("invalid websocket origin");
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err("missing websocket host");
+    };
+
+    let allowed_http = format!("http://{host}");
+    let allowed_https = format!("https://{host}");
+    if origin == allowed_http || origin == allowed_https {
+        return Ok(());
+    }
+
+    Err("forbidden websocket origin")
 }
 
 async fn handle_socket(
