@@ -14,7 +14,7 @@ use super::session::{
     ChildSessionBootstrapMode, DelegatedChildBootstrapOutcome, bootstrap_delegated_child_session,
 };
 use super::settings::{
-    InheritedSettingsSnapshot,
+    DelegationPolicySnapshot, InheritedSettingsSnapshot,
     spawn_autonomous_child_task_with_policy as spawn_autonomous_child_task_with_policy_impl,
 };
 use crate::auth::{CredentialStore, ResolvedAuth};
@@ -63,6 +63,7 @@ pub struct RuntimeEventEnvelope {
 struct PromptExecutionIdentifiers<'a> {
     request_id: &'a str,
     session_id: &'a str,
+    hooks: RuntimeHooks,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +209,7 @@ impl RuntimeWorker {
         correlation: TurnCorrelation,
         abort_signal: Arc<AtomicBool>,
         stream_tx: mpsc::UnboundedSender<AgentEvent>,
+        hooks: RuntimeHooks,
     ) -> Result<SubmitResult> {
         let worker = self.clone();
         tokio::task::spawn_blocking(move || -> Result<SubmitResult> {
@@ -240,7 +242,7 @@ impl RuntimeWorker {
                     worker.compact_config.clone(),
                     registry,
                     worker.instructions.clone(),
-                    RuntimeHooks::default(),
+                    hooks,
                     abort_signal,
                     None,
                 )?;
@@ -261,6 +263,14 @@ impl RuntimeWorker {
         })
         .await
         .map_err(join_error)?
+    }
+}
+
+fn build_task_runtime_hooks(policy: &DelegationPolicySnapshot) -> RuntimeHooks {
+    let policy = policy.clone();
+    RuntimeHooks {
+        on_tool_approval: Some(Arc::new(move |call| policy.allows_tool_call(&call.name))),
+        ..RuntimeHooks::default()
     }
 }
 
@@ -484,7 +494,14 @@ impl RuntimeManager {
 
         let worker_task = tokio::spawn(async move {
             worker
-                .submit_prompt_stream(shared_store, prompt, correlation, abort_signal, stream_tx)
+                .submit_prompt_stream(
+                    shared_store,
+                    prompt,
+                    correlation,
+                    abort_signal,
+                    stream_tx,
+                    identifiers.hooks,
+                )
                 .await
         });
 
@@ -836,6 +853,7 @@ impl RuntimeManager {
                     PromptExecutionIdentifiers {
                         request_id: &request_id,
                         session_id: &child_session.id,
+                        hooks: build_task_runtime_hooks(&candidate.delegation_policy),
                     },
                 )
                 .await;
@@ -1000,6 +1018,7 @@ impl RuntimeManager {
                     PromptExecutionIdentifiers {
                         request_id: &request_id,
                         session_id: &session_id_owned,
+                        hooks: RuntimeHooks::default(),
                     },
                 )
                 .await;
@@ -1235,6 +1254,7 @@ struct SchedulerCandidate {
     task_id: String,
     attempt_id: String,
     owner_session_id: String,
+    delegation_policy: DelegationPolicySnapshot,
     handoff_summary: String,
     handoff_artifact_ids: Vec<String>,
     recovery_child_session_id: Option<String>,
@@ -1352,6 +1372,7 @@ impl RuntimeManager {
         owner_session_id: &str,
     ) -> Result<Option<SchedulerCandidate>> {
         let store = lock_shared_store(shared_store)?;
+        let registry = crate::tools::default_registry(std::env::current_dir().unwrap_or_default());
         let mut tasks = TaskRecord::list(&store)?;
         tasks.retain(|task| task.owner_session_id.as_deref() == Some(owner_session_id));
         tasks.sort_by(|left, right| {
@@ -1460,11 +1481,13 @@ impl RuntimeManager {
             let task_owner_session_id = task.owner_session_id.clone().context(
                 "scheduler candidate is missing owner_session_id after owner-scoped filtering",
             )?;
+            let delegation_policy = DelegationPolicySnapshot::from_task(&task, &registry)?;
 
             return Ok(Some(SchedulerCandidate {
                 owner_session_id: task_owner_session_id,
                 task_id: task.task_id,
                 attempt_id: runnable_attempt.attempt_id,
+                delegation_policy,
                 handoff_summary: summary,
                 handoff_artifact_ids: recovery_bootstrap
                     .as_ref()
@@ -1925,6 +1948,7 @@ fn join_error(err: JoinError) -> anyhow::Error {
 mod tests {
     use super::*;
     use crate::lsp::{LspClient, LspClientError};
+    use crate::provider::ToolCall;
     use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START};
     use crate::store::{NewSession, Session, SessionStatus};
     use anyhow::anyhow;
@@ -1997,6 +2021,36 @@ mod tests {
             }
             _ => panic!("unexpected event type"),
         }
+    }
+
+    #[test]
+    fn task_runtime_hooks_enforce_delegation_tool_policy() {
+        let policy = DelegationPolicySnapshot {
+            allow_autonomous_spawn: true,
+            current_depth: 1,
+            max_depth: 2,
+            max_concurrency: 1,
+            budget: 1,
+            allowed_providers: vec!["test".to_string()],
+            allowed_models: vec!["test-model".to_string()],
+            approved_tools: vec!["read_file".to_string()],
+            tool_approval_mode: super::super::settings::DelegationToolApprovalMode::Auto,
+            parent_close_policy: "request_cancel_descendants".to_string(),
+        };
+
+        let hooks = build_task_runtime_hooks(&policy);
+        let approval = hooks.on_tool_approval.expect("approval hook should exist");
+
+        assert!(approval(&ToolCall {
+            call_id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+        }));
+        assert!(!approval(&ToolCall {
+            call_id: "call-2".to_string(),
+            name: "shell".to_string(),
+            arguments: "{}".to_string(),
+        }));
     }
 
     #[test]
@@ -2276,6 +2330,7 @@ mod tests {
                 },
                 Arc::new(StdAtomicBool::new(false)),
                 stream_tx_one,
+                RuntimeHooks::default(),
             )
             .await
             .unwrap();
@@ -2291,6 +2346,7 @@ mod tests {
                 },
                 Arc::new(StdAtomicBool::new(false)),
                 stream_tx_two,
+                RuntimeHooks::default(),
             )
             .await
             .unwrap();
