@@ -318,10 +318,6 @@ fn command(program: impl Into<String>) -> CommandSpec {
 }
 
 fn resolve_launcher(env: &RuntimeEnv) -> KleyLauncher {
-    if let Some(manifest_path) = find_repo_manifest(&env.current_dir) {
-        return KleyLauncher::Cargo { manifest_path };
-    }
-
     if let Some(manifest_path) = find_repo_manifest(&env.current_exe) {
         return KleyLauncher::Cargo { manifest_path };
     }
@@ -600,11 +596,11 @@ pub mod preflight_test_support {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
 
-    pub use super::{CommandOutput, CommandRunner, CommandSpec};
     pub use super::{
-        LspCheckResult, LspRequirement, command_for_lsp_requirement, lsp_requirements,
-        run_required_lsp_checks_with_runner,
+        command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
+        LspCheckResult, LspRequirement,
     };
+    pub use super::{CommandOutput, CommandRunner, CommandSpec};
 
     pub struct FakeRunner {
         responses: RefCell<HashMap<String, VecDeque<CommandOutput>>>,
@@ -667,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_uses_repo_manifest_from_current_dir() {
+    fn launcher_ignores_repo_manifest_from_current_dir() {
         let temp = tempdir().unwrap();
         let repo_root = temp.path();
         let work_dir = repo_root.join("nested/worktree");
@@ -679,12 +675,7 @@ mod tests {
             current_exe: PathBuf::from("/usr/local/bin/kley"),
         };
 
-        assert_eq!(
-            resolve_launcher(&env),
-            KleyLauncher::Cargo {
-                manifest_path: repo_root.join("Cargo.toml")
-            }
-        );
+        assert_eq!(resolve_launcher(&env), KleyLauncher::PathBinary);
     }
 
     #[test]
