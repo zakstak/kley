@@ -6,9 +6,9 @@ use crate::lsp::builtin_catalog;
 use crate::tools::editing::EditObservation;
 
 use super::protocol::{
-    AuthStateSnapshot, ContextUsage, LspSnapshot, LspSupportedServer, PROTOCOL_VERSION,
-    ResponseError, SelectedSession, SessionSummary, StateSnapshotData, TranscriptEntry, UiEvent,
-    WebCommand, WebResponse,
+    APP_VERSION, AuthStateSnapshot, CapacityUsage, ContextUsage, LspSnapshot, LspSupportedServer,
+    PROTOCOL_VERSION, PercentUsage, ResourceUsage, ResponseError, SelectedSession, SessionSummary,
+    StateSnapshotData, TranscriptEntry, UiEvent, WebCommand, WebResponse,
 };
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> Response {
@@ -129,7 +129,7 @@ async fn handle_socket(mut socket: WebSocket) {
                     return;
                 }
             }
-            WebCommand::AuthOpenAiStart { request_id } => {
+            WebCommand::AuthOpenAiStart { request_id, .. } => {
                 auth.pending_openai_login = true;
                 let data = json!({
                     "started": true,
@@ -359,6 +359,7 @@ fn bootstrap_event(auth: &AuthStateSnapshot) -> UiEvent {
 fn snapshot_data(auth: &AuthStateSnapshot) -> StateSnapshotData {
     StateSnapshotData {
         protocol_version: PROTOCOL_VERSION,
+        running_version: APP_VERSION.to_string(),
         session_id: "sess-mock-001".to_string(),
         selected_session: SelectedSession {
             session_id: "sess-mock-001".to_string(),
@@ -400,6 +401,19 @@ fn snapshot_data(auth: &AuthStateSnapshot) -> StateSnapshotData {
             output_tokens: None,
             total_tokens: None,
             breakdown: None,
+        },
+        resource_usage: ResourceUsage {
+            ram: CapacityUsage {
+                used_bytes: 3 * 1024 * 1024 * 1024,
+                total_bytes: 8 * 1024 * 1024 * 1024,
+                percent_used: 38,
+            },
+            cpu: PercentUsage { percent_used: 27 },
+            disk: CapacityUsage {
+                used_bytes: 128 * 1024 * 1024 * 1024,
+                total_bytes: 512 * 1024 * 1024 * 1024,
+                percent_used: 25,
+            },
         },
     }
 }

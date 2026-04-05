@@ -3,15 +3,6 @@ use axum::response::Html;
 use serde::Deserialize;
 use serde_json::json;
 
-fn callback_input_url(code: &str, state: &str) -> String {
-    let mut url = reqwest::Url::parse("http://localhost:1455/auth/callback")
-        .expect("callback URL should be valid");
-    url.query_pairs_mut()
-        .append_pair("code", code)
-        .append_pair("state", state);
-    url.to_string()
-}
-
 #[derive(Debug, Deserialize)]
 pub struct OpenAiCallbackQuery {
     pub code: Option<String>,
@@ -28,13 +19,10 @@ pub async fn openai_callback(Query(query): Query<OpenAiCallbackQuery>) -> Html<S
             "error_description": query.error_description,
         })
     } else {
-        let callback_input = match (query.code, query.state) {
-            (Some(code), Some(state)) => callback_input_url(&code, &state),
-            _ => String::new(),
-        };
+        let has_callback_input = matches!((&query.code, &query.state), (Some(_), Some(_)));
         json!({
             "type": "kley.openai.callback",
-            "callback_input": callback_input,
+            "callback_input": if has_callback_input { "window.location.href" } else { "" },
         })
     };
 
@@ -56,8 +44,14 @@ pub async fn openai_callback(Query(query): Query<OpenAiCallbackQuery>) -> Html<S
   <script>
     (function () {{
       const payload = {payload_json};
+      if (payload.callback_input === "window.location.href") {{
+        payload.callback_input = window.location.href;
+      }}
       if (window.opener && !window.opener.closed) {{
-        window.opener.postMessage(payload, "*");
+        const targetOrigin = window.location.port === "1455"
+          ? "*"
+          : window.location.origin;
+        window.opener.postMessage(payload, targetOrigin);
         setTimeout(() => window.close(), 150);
         return;
       }}
@@ -97,17 +91,20 @@ mod tests {
 
         assert!(html.contains("window.opener.postMessage"));
         assert!(html.contains("kley.openai.callback"));
-        assert!(html.contains("code-123"));
-        assert!(html.contains("state-abc"));
+        assert!(html.contains(r#""callback_input":"window.location.href""#));
     }
 
-    #[test]
-    fn callback_input_url_encodes_reserved_characters() {
-        let encoded = callback_input_url("a+b&c=d", "state/with?symbols=#");
-        assert!(encoded.contains("code=a%2Bb%26c%3Dd"), "{encoded}");
-        assert!(
-            encoded.contains("state=state%2Fwith%3Fsymbols%3D%23"),
-            "{encoded}"
-        );
+    #[tokio::test]
+    async fn callback_page_uses_window_location_for_callback_input() {
+        let html = openai_callback(Query(OpenAiCallbackQuery {
+            code: Some("code-123".into()),
+            state: Some("state-abc".into()),
+            error: None,
+            error_description: None,
+        }))
+        .await
+        .0;
+
+        assert!(html.contains("window.location.href"));
     }
 }

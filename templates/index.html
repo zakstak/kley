@@ -595,6 +595,15 @@
               >
             </div>
             <div class="status-pair">
+              <span class="status-inline-label">version</span>
+              <span
+                id="running-version-label"
+                data-testid="running-version"
+                class="status-inline-value"
+                >0.0.0</span
+              >
+            </div>
+            <div class="status-pair">
               <span class="status-inline-label">context</span>
               <div class="status-meter">
                 <div id="context-meter-fill" class="status-meter-fill"></div>
@@ -606,6 +615,33 @@
                 id="context-types-label"
                 class="status-inline-value app-text-3"
                 >types pending</span
+              >
+            </div>
+            <div class="status-pair">
+              <span class="status-inline-label">ram</span>
+              <span
+                id="ram-usage-label"
+                data-testid="ram-usage"
+                class="status-inline-value"
+                >0% · 0 B/0 B</span
+              >
+            </div>
+            <div class="status-pair">
+              <span class="status-inline-label">cpu</span>
+              <span
+                id="cpu-usage-label"
+                data-testid="cpu-usage"
+                class="status-inline-value"
+                >0% active</span
+              >
+            </div>
+            <div class="status-pair">
+              <span class="status-inline-label">disk</span>
+              <span
+                id="disk-usage-label"
+                data-testid="disk-usage"
+                class="status-inline-value"
+                >0% · 0 B/0 B</span
               >
             </div>
             <div class="status-pair">
@@ -885,6 +921,7 @@
           protocolVersionLabel: document.getElementById(
             "protocol-version-label",
           ),
+          runningVersionLabel: document.getElementById("running-version-label"),
           statusPill: document.getElementById("status-pill"),
           sessionList: document.getElementById("session-list"),
           transcriptRows: document.getElementById("transcript-rows"),
@@ -916,6 +953,9 @@
           contextMeterFill: document.getElementById("context-meter-fill"),
           contextUsageLabel: document.getElementById("context-usage-label"),
           contextTypesLabel: document.getElementById("context-types-label"),
+          ramUsageLabel: document.getElementById("ram-usage-label"),
+          cpuUsageLabel: document.getElementById("cpu-usage-label"),
+          diskUsageLabel: document.getElementById("disk-usage-label"),
           selectedSessionMeta: document.getElementById("selected-session-meta"),
           selectedSessionStatus: document.getElementById(
             "selected-session-status",
@@ -936,6 +976,7 @@
 
         if (
           !dom.protocolVersionLabel ||
+          !dom.runningVersionLabel ||
           !dom.statusPill ||
           !dom.sessionList ||
           !dom.transcriptRows ||
@@ -961,6 +1002,9 @@
           !dom.contextMeterFill ||
           !dom.contextUsageLabel ||
           !dom.contextTypesLabel ||
+          !dom.ramUsageLabel ||
+          !dom.cpuUsageLabel ||
+          !dom.diskUsageLabel ||
           !dom.selectedSessionMeta ||
           !dom.selectedSessionStatus ||
           !dom.selectedSessionProviderModel ||
@@ -1037,6 +1081,21 @@
             totalTokens: null,
           },
           contextBreakdown: null,
+          resourceUsage: {
+            ram: {
+              usedBytes: 0,
+              totalBytes: 0,
+              percentUsed: 0,
+            },
+            cpu: {
+              percentUsed: 0,
+            },
+            disk: {
+              usedBytes: 0,
+              totalBytes: 0,
+              percentUsed: 0,
+            },
+          },
         };
 
         const OPENAI_CALLBACK_MESSAGE_TYPE = "kley.openai.callback";
@@ -1164,6 +1223,82 @@
           };
         }
 
+        function normalizeCapacityUsage(raw, fallback) {
+          const totalBytes = Math.max(
+            0,
+            Number.isFinite(raw?.total_bytes)
+              ? Number(raw.total_bytes)
+              : fallback.totalBytes,
+          );
+          const usedBytes = Math.max(
+            0,
+            Number.isFinite(raw?.used_bytes)
+              ? Number(raw.used_bytes)
+              : fallback.usedBytes,
+          );
+          const computedPercent =
+            totalBytes > 0
+              ? Math.min(
+                  100,
+                  Math.round(
+                    (Math.min(usedBytes, totalBytes) * 100) / totalBytes,
+                  ),
+                )
+              : 0;
+          const framePercent = Number.isFinite(raw?.percent_used)
+            ? Number(raw.percent_used)
+            : computedPercent;
+
+          return {
+            usedBytes,
+            totalBytes,
+            percentUsed: Math.min(100, Math.max(0, framePercent)),
+          };
+        }
+
+        function normalizePercentUsage(raw, fallback) {
+          const framePercent = Number.isFinite(raw?.percent_used)
+            ? Number(raw.percent_used)
+            : fallback.percentUsed;
+          return {
+            percentUsed: Math.min(100, Math.max(0, framePercent)),
+          };
+        }
+
+        function normalizeResourceUsage(raw) {
+          if (!raw || typeof raw !== "object") {
+            return {
+              ram: { ...state.resourceUsage.ram },
+              cpu: { ...state.resourceUsage.cpu },
+              disk: { ...state.resourceUsage.disk },
+            };
+          }
+
+          return {
+            ram: normalizeCapacityUsage(raw.ram, state.resourceUsage.ram),
+            cpu: normalizePercentUsage(raw.cpu, state.resourceUsage.cpu),
+            disk: normalizeCapacityUsage(raw.disk, state.resourceUsage.disk),
+          };
+        }
+
+        function formatByteCount(bytes) {
+          if (!Number.isFinite(bytes) || Number(bytes) <= 0) {
+            return "0 B";
+          }
+
+          const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+          let value = Number(bytes);
+          let unitIndex = 0;
+          while (value >= 1024 && unitIndex < units.length - 1) {
+            value /= 1024;
+            unitIndex += 1;
+          }
+
+          const maximumFractionDigits =
+            unitIndex === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+          return `${value.toLocaleString(undefined, { maximumFractionDigits })} ${units[unitIndex]}`;
+        }
+
         function renderContextUsage(rawUsage) {
           const usage = normalizeContextUsage(rawUsage);
           state.contextUsage = usage;
@@ -1241,6 +1376,23 @@
             .join(" · ");
 
           dom.contextTypesLabel.textContent = `types: ${summary}`;
+        }
+
+        function renderRunningVersion(version) {
+          const resolved =
+            typeof version === "string" && version.trim()
+              ? version.trim()
+              : "unknown";
+          dom.runningVersionLabel.textContent = resolved;
+        }
+
+        function renderResourceUsage(rawUsage) {
+          const usage = normalizeResourceUsage(rawUsage);
+          state.resourceUsage = usage;
+
+          dom.ramUsageLabel.textContent = `${usage.ram.percentUsed}% · ${formatByteCount(usage.ram.usedBytes)}/${formatByteCount(usage.ram.totalBytes)}`;
+          dom.cpuUsageLabel.textContent = `${usage.cpu.percentUsed}% active`;
+          dom.diskUsageLabel.textContent = `${usage.disk.percentUsed}% · ${formatByteCount(usage.disk.usedBytes)}/${formatByteCount(usage.disk.totalBytes)}`;
         }
 
         function hasProvider(provider) {
@@ -2391,7 +2543,9 @@
           hydrateSessionSettings(frame.selected_session || null);
           updateSelectedSessionMetadata(frame.selected_session || null);
           hydrateAuthState(frame.auth);
+          renderRunningVersion(frame.running_version);
           renderContextUsage(frame.context_usage);
+          renderResourceUsage(frame.resource_usage);
 
           renderSessionList();
           renderTranscriptFromSnapshot(frame.transcript, frame.active_turn);
@@ -2593,6 +2747,12 @@
           switch (frame.type) {
             case "state.snapshot":
               hydrateFromSnapshot(frame);
+              return;
+            case "resource_usage.updated":
+              if (!isActiveSession(frame.session_id)) {
+                return;
+              }
+              renderResourceUsage(frame.resource_usage);
               return;
             case "turn.started":
               if (!isActiveSession(frame.session_id)) {
@@ -2889,6 +3049,7 @@
           const sent = sendCommand({
             type: "auth.openai.start",
             request_id: requestId,
+            redirect_origin: window.location.origin,
           });
 
           if (!sent) {
@@ -2948,7 +3109,10 @@
             return;
           }
 
-          if (!OPENAI_CALLBACK_ORIGINS.has(event.origin)) {
+          if (
+            event.origin !== window.location.origin &&
+            !OPENAI_CALLBACK_ORIGINS.has(event.origin)
+          ) {
             return;
           }
 
@@ -3205,6 +3369,7 @@
         renderToolCards();
         updateSelectedSessionMetadata(null);
         renderContextUsage(state.contextUsage);
+        renderResourceUsage(state.resourceUsage);
         renderTranscriptFilterChips();
         syncComposerState();
         syncWorkspaceControls();

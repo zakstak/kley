@@ -1,5 +1,9 @@
 use std::collections::HashMap;
+use std::ffi::CString;
+use std::fs;
 use std::future::Future;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,12 +19,15 @@ use crate::store::{SharedStore, Store};
 #[cfg(feature = "testing")]
 use crate::auth::OpenAiCredentials;
 
-use super::protocol::AuthStateSnapshot;
+use super::protocol::{AuthStateSnapshot, CapacityUsage, PercentUsage, ResourceUsage};
 
 const PENDING_OPENAI_LOGIN_TTL: Duration = Duration::from_secs(600);
+const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(120);
 #[cfg(feature = "testing")]
 const OPENAI_AUTH_MODE_ENV: &str = "KLEY_WEB_OPENAI_AUTH_MODE";
 const WEB_AUTH_AUTO_RESET_ENV: &str = "KLEY_WEB_AUTH_AUTO_RESET";
+#[cfg(feature = "testing")]
+const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 
 type WebAuthFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -29,15 +36,17 @@ pub struct PendingOpenAiLogin {
     pub authorize_url: String,
     pub verifier: String,
     pub state: String,
+    pub redirect_uri: String,
     started_at: Instant,
 }
 
 impl PendingOpenAiLogin {
-    fn new(authorize_url: String, verifier: String, state: String) -> Self {
+    fn new(authorize_url: String, verifier: String, state: String, redirect_uri: String) -> Self {
         Self {
             authorize_url,
             verifier,
             state,
+            redirect_uri,
             started_at: Instant::now(),
         }
     }
@@ -49,7 +58,7 @@ impl PendingOpenAiLogin {
 
 pub trait WebAuthService: Send + Sync {
     fn summary(&self, pending_openai_login: bool) -> AuthStateSnapshot;
-    fn start_openai_login(&self) -> Result<PendingOpenAiLogin>;
+    fn start_openai_login(&self, redirect_uri: &str) -> Result<PendingOpenAiLogin>;
     fn complete_openai_login<'a>(
         &'a self,
         pending: &'a PendingOpenAiLogin,
@@ -58,7 +67,22 @@ pub trait WebAuthService: Send + Sync {
     fn login_zai(&self, api_key: &str) -> Result<()>;
 }
 
+pub trait WebResourceUsageService: Send + Sync {
+    fn summary(&self) -> ResourceUsage;
+}
+
 struct LiveWebAuthService;
+
+struct LiveWebResourceUsageService {
+    disk_path: PathBuf,
+    cpu_sample: Mutex<Option<CpuTimesSample>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuTimesSample {
+    total: u64,
+    active: u64,
+}
 
 impl LiveWebAuthService {
     fn credential_store(&self) -> Result<CredentialStore> {
@@ -83,6 +107,59 @@ impl LiveWebAuthService {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+impl Default for LiveWebResourceUsageService {
+    fn default() -> Self {
+        Self {
+            disk_path: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            cpu_sample: Mutex::new(read_cpu_times_sample().ok()),
+        }
+    }
+}
+
+impl LiveWebResourceUsageService {
+    fn snapshot(&self) -> Result<ResourceUsage> {
+        Ok(ResourceUsage {
+            ram: read_memory_usage()?,
+            cpu: PercentUsage {
+                percent_used: self.cpu_percent()?,
+            },
+            disk: read_disk_usage(&self.disk_path)?,
+        })
+    }
+
+    fn cpu_percent(&self) -> Result<u8> {
+        let mut previous = self.cpu_sample.lock().unwrap();
+        let prior_sample = match *previous {
+            Some(sample) => sample,
+            None => {
+                let sample = read_cpu_times_sample()?;
+                *previous = Some(sample);
+                std::thread::sleep(CPU_SAMPLE_WINDOW);
+                sample
+            }
+        };
+        let current_sample = read_cpu_times_sample()?;
+        *previous = Some(current_sample);
+
+        let total_delta = current_sample.total.saturating_sub(prior_sample.total);
+        if total_delta == 0 {
+            return Ok(0);
+        }
+
+        let active_delta = current_sample
+            .active
+            .saturating_sub(prior_sample.active)
+            .min(total_delta);
+        Ok(percent_from_ratio(active_delta, total_delta))
+    }
+}
+
+impl WebResourceUsageService for LiveWebResourceUsageService {
+    fn summary(&self) -> ResourceUsage {
+        self.snapshot().unwrap_or_default()
     }
 }
 
@@ -122,12 +199,13 @@ impl WebAuthService for LiveWebAuthService {
         }
     }
 
-    fn start_openai_login(&self) -> Result<PendingOpenAiLogin> {
-        let flow = auth::openai::start_login_flow()?;
+    fn start_openai_login(&self, redirect_uri: &str) -> Result<PendingOpenAiLogin> {
+        let flow = auth::openai::start_login_flow_with_redirect_uri(redirect_uri)?;
         Ok(PendingOpenAiLogin::new(
             flow.authorize_url,
             flow.verifier,
             flow.state,
+            flow.redirect_uri,
         ))
     }
 
@@ -137,9 +215,13 @@ impl WebAuthService for LiveWebAuthService {
         callback_input: &'a str,
     ) -> WebAuthFuture<'a> {
         Box::pin(async move {
-            let credentials =
-                auth::openai::finish_login_flow(callback_input, &pending.verifier, &pending.state)
-                    .await?;
+            let credentials = auth::openai::finish_login_flow_with_redirect_uri(
+                callback_input,
+                &pending.verifier,
+                &pending.state,
+                &pending.redirect_uri,
+            )
+            .await?;
             let store = self.credential_store()?;
             save_openai_oauth_credentials(&store, credentials)
         })
@@ -188,12 +270,13 @@ impl WebAuthService for MockWebAuthService {
         auth_summary_from_credentials(&credentials, pending_openai_login)
     }
 
-    fn start_openai_login(&self) -> Result<PendingOpenAiLogin> {
-        let flow = auth::openai::start_login_flow()?;
+    fn start_openai_login(&self, redirect_uri: &str) -> Result<PendingOpenAiLogin> {
+        let flow = auth::openai::start_login_flow_with_redirect_uri(redirect_uri)?;
         Ok(PendingOpenAiLogin::new(
             "data:text/html,%3Ctitle%3EKley%20OpenAI%20Auth%3C/title%3E%3Cp%3EMock%20OpenAI%20auth%20started.%3C/p%3E".into(),
             flow.verifier,
             flow.state,
+            flow.redirect_uri,
         ))
     }
 
@@ -242,6 +325,27 @@ impl WebAuthService for MockWebAuthService {
     }
 }
 
+#[cfg(feature = "testing")]
+pub struct MockWebResourceUsageService {
+    snapshot: Mutex<ResourceUsage>,
+}
+
+#[cfg(feature = "testing")]
+impl Default for MockWebResourceUsageService {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(default_mock_resource_usage()),
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+impl WebResourceUsageService for MockWebResourceUsageService {
+    fn summary(&self) -> ResourceUsage {
+        self.snapshot.lock().unwrap().clone()
+    }
+}
+
 fn auth_summary_from_credentials(
     credentials: &Credentials,
     pending_openai_login: bool,
@@ -268,6 +372,116 @@ fn auth_summary_from_credentials(
     }
 }
 
+fn read_memory_usage() -> Result<CapacityUsage> {
+    let meminfo = fs::read_to_string("/proc/meminfo").context("failed to read /proc/meminfo")?;
+    let mut total_kib = None;
+    let mut available_kib = None;
+
+    for line in meminfo.lines() {
+        if let Some(value) = line.strip_prefix("MemTotal:") {
+            total_kib = parse_meminfo_kib(value);
+        }
+        if let Some(value) = line.strip_prefix("MemAvailable:") {
+            available_kib = parse_meminfo_kib(value);
+        }
+    }
+
+    let total_bytes = total_kib.context("missing MemTotal in /proc/meminfo")? * 1024;
+    let available_bytes = available_kib.context("missing MemAvailable in /proc/meminfo")? * 1024;
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+
+    Ok(CapacityUsage {
+        used_bytes,
+        total_bytes,
+        percent_used: percent_from_ratio(used_bytes, total_bytes),
+    })
+}
+
+fn parse_meminfo_kib(value: &str) -> Option<u64> {
+    value.split_whitespace().next()?.parse().ok()
+}
+
+fn read_disk_usage(path: &Path) -> Result<CapacityUsage> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .context("disk usage path contains an interior null byte")?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    let status = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to read filesystem usage");
+    }
+    let stats = unsafe { stats.assume_init() };
+    let block_size = if stats.f_frsize > 0 {
+        stats.f_frsize
+    } else {
+        stats.f_bsize
+    };
+    let total_bytes = stats.f_blocks.saturating_mul(block_size);
+    let available_bytes = stats.f_bavail.saturating_mul(block_size);
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+
+    Ok(CapacityUsage {
+        used_bytes,
+        total_bytes,
+        percent_used: percent_from_ratio(used_bytes, total_bytes),
+    })
+}
+
+fn read_cpu_times_sample() -> Result<CpuTimesSample> {
+    let stat = fs::read_to_string("/proc/stat").context("failed to read /proc/stat")?;
+    let cpu_line = stat.lines().next().context("missing aggregate cpu line")?;
+    let mut parts = cpu_line.split_whitespace();
+    let label = parts.next().context("missing cpu label")?;
+    if label != "cpu" {
+        anyhow::bail!("unexpected aggregate cpu label: {label}");
+    }
+
+    let values = parts
+        .take(8)
+        .map(|value| value.parse::<u64>().context("invalid cpu counter"))
+        .collect::<Result<Vec<_>>>()?;
+    if values.len() < 8 {
+        anyhow::bail!("aggregate cpu line missing counters");
+    }
+
+    let active = values[0]
+        .saturating_add(values[1])
+        .saturating_add(values[2])
+        .saturating_add(values[5])
+        .saturating_add(values[6])
+        .saturating_add(values[7]);
+    let idle = values[3].saturating_add(values[4]);
+
+    Ok(CpuTimesSample {
+        total: active.saturating_add(idle),
+        active,
+    })
+}
+
+fn percent_from_ratio(used: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+
+    ((used.saturating_mul(100).saturating_add(total / 2)) / total).min(100) as u8
+}
+
+#[cfg(feature = "testing")]
+fn default_mock_resource_usage() -> ResourceUsage {
+    ResourceUsage {
+        ram: CapacityUsage {
+            used_bytes: 3 * GIB_BYTES,
+            total_bytes: 8 * GIB_BYTES,
+            percent_used: 38,
+        },
+        cpu: PercentUsage { percent_used: 27 },
+        disk: CapacityUsage {
+            used_bytes: 128 * GIB_BYTES,
+            total_bytes: 512 * GIB_BYTES,
+            percent_used: 25,
+        },
+    }
+}
+
 fn default_auth_service() -> Arc<dyn WebAuthService> {
     #[cfg(feature = "testing")]
     if matches!(
@@ -280,26 +494,50 @@ fn default_auth_service() -> Arc<dyn WebAuthService> {
     Arc::new(LiveWebAuthService)
 }
 
+fn default_resource_usage_service() -> Arc<dyn WebResourceUsageService> {
+    #[cfg(feature = "testing")]
+    {
+        return Arc::new(MockWebResourceUsageService::default());
+    }
+
+    #[allow(unreachable_code)]
+    Arc::new(LiveWebResourceUsageService::default())
+}
+
 #[derive(Clone)]
 pub struct WebAppState {
     pub store: SharedStore,
     pub runtime_manager: Arc<RuntimeManager>,
     auth_service: Arc<dyn WebAuthService>,
+    resource_usage_service: Arc<dyn WebResourceUsageService>,
     pending_openai_logins: Arc<Mutex<HashMap<String, PendingOpenAiLogin>>>,
 }
 
 impl WebAppState {
     pub fn new(store: SharedStore) -> Self {
-        Self::with_auth_service(store, default_auth_service())
+        Self::with_services(
+            store,
+            default_auth_service(),
+            default_resource_usage_service(),
+        )
     }
 
     pub fn with_auth_service(store: SharedStore, auth_service: Arc<dyn WebAuthService>) -> Self {
+        Self::with_services(store, auth_service, default_resource_usage_service())
+    }
+
+    pub fn with_services(
+        store: SharedStore,
+        auth_service: Arc<dyn WebAuthService>,
+        resource_usage_service: Arc<dyn WebResourceUsageService>,
+    ) -> Self {
         let runtime_manager = Arc::new(RuntimeManager::new());
         runtime_manager.bind_shared_store(Arc::clone(&store));
         Self {
             store,
             runtime_manager,
             auth_service,
+            resource_usage_service,
             pending_openai_logins: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -317,12 +555,16 @@ impl WebAppState {
         self.auth_service.summary(pending_openai_login)
     }
 
+    pub fn resource_usage_summary(&self) -> ResourceUsage {
+        self.resource_usage_service.summary()
+    }
+
     pub(crate) fn pending_openai_login(&self, controller_id: &str) -> bool {
         self.has_pending_openai_login(controller_id)
     }
 
-    pub fn start_openai_login(&self, controller_id: &str) -> Result<String> {
-        let pending = self.auth_service.start_openai_login()?;
+    pub fn start_openai_login(&self, controller_id: &str, redirect_uri: &str) -> Result<String> {
+        let pending = self.auth_service.start_openai_login(redirect_uri)?;
         let authorize_url = pending.authorize_url.clone();
 
         let mut logins = self.pending_openai_logins.lock().unwrap();

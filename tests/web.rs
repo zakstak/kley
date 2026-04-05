@@ -24,6 +24,8 @@ use tower::util::ServiceExt;
 mod web {
     use super::*;
 
+    const GIB_BYTES: u64 = 1024 * 1024 * 1024;
+
     fn controlled_tool_prompt(name: &str, arguments: Value) -> String {
         let control = serde_json::json!({
             "type": "tool_call",
@@ -269,6 +271,10 @@ mod web {
             "data-testid=\"filter-chip-all\"",
             "data-testid=\"filter-chip-messages\"",
             "data-testid=\"filter-chip-tools\"",
+            "data-testid=\"running-version\"",
+            "data-testid=\"ram-usage\"",
+            "data-testid=\"cpu-usage\"",
+            "data-testid=\"disk-usage\"",
         ] {
             assert!(html.contains(marker), "missing marker: {marker}");
         }
@@ -372,6 +378,7 @@ mod web {
         let frame = recv_json(&mut socket).await;
         assert_eq!(frame["type"], "state.snapshot");
         assert_eq!(frame["protocol_version"], 1);
+        assert_eq!(frame["running_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(frame["session_id"], seeded_session.id);
         assert!(frame["event_id"].as_str().unwrap().starts_with("evt-"));
         assert!(frame["sessions"].as_array().is_some());
@@ -380,6 +387,19 @@ mod web {
         assert_eq!(frame["selected_session"]["title"], "Bootstrap Session");
         assert_eq!(frame["selected_session"]["status"], "active");
         assert!(frame["auth"].is_object());
+        assert_eq!(frame["resource_usage"]["ram"]["used_bytes"], 3 * GIB_BYTES);
+        assert_eq!(frame["resource_usage"]["ram"]["total_bytes"], 8 * GIB_BYTES);
+        assert_eq!(frame["resource_usage"]["ram"]["percent_used"], 38);
+        assert_eq!(frame["resource_usage"]["cpu"]["percent_used"], 27);
+        assert_eq!(
+            frame["resource_usage"]["disk"]["used_bytes"],
+            128 * GIB_BYTES
+        );
+        assert_eq!(
+            frame["resource_usage"]["disk"]["total_bytes"],
+            512 * GIB_BYTES
+        );
+        assert_eq!(frame["resource_usage"]["disk"]["percent_used"], 25);
         assert!(frame["selected_session"]["created_at"].as_str().is_some());
         assert!(frame["selected_session"]["updated_at"].as_str().is_some());
         assert_eq!(frame["selected_session"]["provider"], "test");
@@ -435,6 +455,29 @@ mod web {
         assert_eq!(frame["session_id"], first_session.id);
         assert_eq!(frame["selected_session"]["title"], "Requested Session");
         assert_ne!(frame["session_id"], second_session.id);
+    }
+
+    #[tokio::test]
+    async fn ws_emits_periodic_server_resource_usage_updates() {
+        let server = spawn_server().await;
+        let mut socket = connect_ws(server.addr).await;
+
+        let bootstrap = recv_json(&mut socket).await;
+        assert_eq!(bootstrap["type"], "state.snapshot");
+
+        let update = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            recv_until_type(&mut socket, "resource_usage.updated"),
+        )
+        .await
+        .expect("resource usage update should arrive");
+
+        assert_eq!(update["session_id"], bootstrap["session_id"]);
+        assert_eq!(update["resource_usage"]["ram"]["percent_used"], 38);
+        assert_eq!(update["resource_usage"]["cpu"]["percent_used"], 27);
+        assert_eq!(update["resource_usage"]["disk"]["percent_used"], 25);
+        assert!(update["event_id"].as_str().unwrap().starts_with("evt-"));
+        assert!(update["ts"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -583,7 +626,7 @@ mod web {
 
         socket
             .send(Message::Text(
-                r#"{"type":"auth.openai.start","request_id":"req-openai-start"}"#.to_string(),
+                r#"{"type":"auth.openai.start","request_id":"req-openai-start","redirect_origin":"http://127.0.0.1:3210"}"#.to_string(),
             ))
             .await
             .unwrap();
@@ -594,6 +637,10 @@ mod web {
         assert_eq!(ack["data"]["provider"], "openai");
         assert_eq!(ack["data"]["started"], true);
         assert!(ack["data"]["authorize_url"].as_str().is_some());
+        assert_eq!(
+            ack["data"]["redirect_uri"],
+            "http://127.0.0.1:3210/auth/callback"
+        );
 
         let pending_snapshot = recv_json(&mut socket).await;
         assert_eq!(pending_snapshot["type"], "state.snapshot");
@@ -1130,6 +1177,7 @@ mod web {
         assert_eq!(ok["type"], "response.ok");
         assert_eq!(ok["request_id"], "req-ok-1");
         assert_eq!(ok["data"]["protocol_version"], 1);
+        assert_eq!(ok["data"]["running_version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]
@@ -1184,6 +1232,9 @@ mod web {
         let bootstrap = recv_json(&mut socket).await;
         assert_eq!(bootstrap["type"], "state.snapshot");
         assert_eq!(bootstrap["session_id"], "sess-mock-001");
+        assert_eq!(bootstrap["resource_usage"]["ram"]["percent_used"], 38);
+        assert_eq!(bootstrap["resource_usage"]["cpu"]["percent_used"], 27);
+        assert_eq!(bootstrap["resource_usage"]["disk"]["percent_used"], 25);
 
         socket
             .send(Message::Text(

@@ -5,10 +5,11 @@ use tokio::task;
 use tokio::time::{Duration, timeout};
 
 use super::super::protocol::{
-    ActiveTurnSnapshot, AuthStateSnapshot, LspServerState, LspSnapshot, LspSupportedServer,
-    SelectedSession, SessionSummary, StateSnapshotData, TaskAttemptSnapshot, TaskDetailSnapshot,
-    TaskDetailSnapshotData, TaskGraphEdgeSnapshot, TaskGraphNodeSnapshot, TaskGraphSnapshot,
-    TaskListSnapshotData, TaskWatchCursor, TranscriptEntry,
+    APP_VERSION, ActiveTurnSnapshot, AuthStateSnapshot, LspServerState, LspSnapshot,
+    LspSupportedServer, ResourceUsage, SelectedSession, SessionSummary, StateSnapshotData,
+    TaskAttemptSnapshot, TaskDetailSnapshot, TaskDetailSnapshotData, TaskGraphEdgeSnapshot,
+    TaskGraphNodeSnapshot, TaskGraphSnapshot, TaskListSnapshotData, TaskWatchCursor,
+    TranscriptEntry,
 };
 use super::super::state::WebAppState;
 use super::context_usage::{
@@ -21,6 +22,7 @@ use crate::store::{
 };
 
 const SNAPSHOT_AUTH_TIMEOUT: Duration = Duration::from_millis(250);
+const SNAPSHOT_RESOURCE_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub(super) struct TaskWatchBootstrapData {
     pub list_snapshot: TaskListSnapshotData,
@@ -80,8 +82,10 @@ pub(super) async fn snapshot_data(
             .unwrap_or_else(|| CompactConfig::default().threshold_chars);
         estimate_persisted_context_usage(&turns, compact_threshold, system_prompt_chars)
     };
+    let resource_usage = snapshot_resource_usage_summary(state).await;
     Ok(StateSnapshotData {
         protocol_version: super::super::protocol::PROTOCOL_VERSION,
+        running_version: APP_VERSION.to_string(),
         session_id: session_id.to_string(),
         selected_session,
         auth,
@@ -90,6 +94,7 @@ pub(super) async fn snapshot_data(
         transcript,
         active_turn,
         context_usage,
+        resource_usage,
     })
 }
 
@@ -111,9 +116,11 @@ pub(super) async fn bootstrap_snapshot_data(
         .active_turn(session_id)
         .map(active_turn_snapshot);
     let context_usage = bootstrap_context_usage(state, session_id);
+    let resource_usage = snapshot_resource_usage_summary(state).await;
 
     Ok(StateSnapshotData {
         protocol_version: super::super::protocol::PROTOCOL_VERSION,
+        running_version: APP_VERSION.to_string(),
         session_id: session_id.to_string(),
         selected_session,
         auth,
@@ -122,6 +129,7 @@ pub(super) async fn bootstrap_snapshot_data(
         transcript: Vec::new(),
         active_turn,
         context_usage,
+        resource_usage,
     })
 }
 
@@ -423,6 +431,20 @@ async fn snapshot_auth_summary(state: &WebAppState, controller_id: &str) -> Auth
     match timeout(
         SNAPSHOT_AUTH_TIMEOUT,
         task::spawn_blocking(move || state.auth_summary(&controller_id)),
+    )
+    .await
+    {
+        Ok(Ok(summary)) => summary,
+        Ok(Err(_)) | Err(_) => fallback,
+    }
+}
+
+pub(super) async fn snapshot_resource_usage_summary(state: &WebAppState) -> ResourceUsage {
+    let fallback = ResourceUsage::default();
+    let state = state.clone();
+    match timeout(
+        SNAPSHOT_RESOURCE_TIMEOUT,
+        task::spawn_blocking(move || state.resource_usage_summary()),
     )
     .await
     {

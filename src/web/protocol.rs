@@ -5,6 +5,7 @@ use crate::diagnostics::Diagnostic;
 use crate::tools::editing::EditObservation;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
@@ -32,7 +33,11 @@ pub enum WebCommand {
         prompt: String,
     },
     #[serde(rename = "auth.openai.start")]
-    AuthOpenAiStart { request_id: String },
+    AuthOpenAiStart {
+        request_id: String,
+        #[serde(default)]
+        redirect_origin: Option<String>,
+    },
     #[serde(rename = "auth.openai.complete")]
     AuthOpenAiComplete {
         request_id: String,
@@ -112,6 +117,7 @@ pub struct ResponseError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StateSnapshotData {
     pub protocol_version: u32,
+    pub running_version: String,
     pub session_id: String,
     pub selected_session: SelectedSession,
     pub auth: AuthStateSnapshot,
@@ -120,6 +126,7 @@ pub struct StateSnapshotData {
     pub transcript: Vec<TranscriptEntry>,
     pub active_turn: Option<ActiveTurnSnapshot>,
     pub context_usage: ContextUsage,
+    pub resource_usage: ResourceUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,6 +298,25 @@ pub struct ContextUsageBucket {
     pub tokens_estimate: Option<usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ResourceUsage {
+    pub ram: CapacityUsage,
+    pub cpu: PercentUsage,
+    pub disk: CapacityUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CapacityUsage {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub percent_used: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PercentUsage {
+    pub percent_used: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SelectedSession {
     pub session_id: String,
@@ -312,6 +338,13 @@ pub enum UiEvent {
         ts: String,
         #[serde(flatten)]
         data: StateSnapshotData,
+    },
+    #[serde(rename = "resource_usage.updated")]
+    ResourceUsageUpdated {
+        event_id: String,
+        ts: String,
+        session_id: String,
+        resource_usage: ResourceUsage,
     },
     #[serde(rename = "turn.started")]
     TurnStarted {
@@ -487,7 +520,7 @@ impl WebCommand {
             | WebCommand::SessionLoad { request_id, .. }
             | WebCommand::SessionSettingsUpdate { request_id, .. }
             | WebCommand::PromptSubmit { request_id, .. }
-            | WebCommand::AuthOpenAiStart { request_id }
+            | WebCommand::AuthOpenAiStart { request_id, .. }
             | WebCommand::AuthOpenAiComplete { request_id, .. }
             | WebCommand::AuthLogin { request_id, .. }
             | WebCommand::TurnAbort { request_id, .. }

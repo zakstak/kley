@@ -51,14 +51,15 @@ pub struct OpenAiLoginFlow {
     pub authorize_url: String,
     pub verifier: String,
     pub state: String,
+    pub redirect_uri: String,
 }
 
-fn build_authorize_url(challenge: &str, state: &str) -> Result<String> {
+fn build_authorize_url(challenge: &str, state: &str, redirect_uri: &str) -> Result<String> {
     let mut url = reqwest::Url::parse(AUTHORIZE_URL).context("invalid authorize URL constant")?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", CLIENT_ID)
-        .append_pair("redirect_uri", REDIRECT_URI)
+        .append_pair("redirect_uri", redirect_uri)
         .append_pair("scope", SCOPE)
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
@@ -70,13 +71,18 @@ fn build_authorize_url(challenge: &str, state: &str) -> Result<String> {
 }
 
 pub fn start_login_flow() -> Result<OpenAiLoginFlow> {
+    start_login_flow_with_redirect_uri(REDIRECT_URI)
+}
+
+pub fn start_login_flow_with_redirect_uri(redirect_uri: &str) -> Result<OpenAiLoginFlow> {
     let (verifier, challenge) = generate_pkce();
     let state = generate_state();
-    let authorize_url = build_authorize_url(&challenge, &state)?;
+    let authorize_url = build_authorize_url(&challenge, &state, redirect_uri)?;
     Ok(OpenAiLoginFlow {
         authorize_url,
         verifier,
         state,
+        redirect_uri: redirect_uri.to_string(),
     })
 }
 
@@ -91,7 +97,11 @@ struct TokenResponse {
     id_token: Option<String>,
 }
 
-async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> {
+async fn exchange_code(
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OpenAiCredentials> {
     let client = reqwest::Client::new();
     let resp = client
         .post(TOKEN_URL)
@@ -101,7 +111,7 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OpenAiCredentials> 
             ("client_id", CLIENT_ID),
             ("code", code),
             ("code_verifier", verifier),
-            ("redirect_uri", REDIRECT_URI),
+            ("redirect_uri", redirect_uri),
         ])
         .send()
         .await
@@ -186,8 +196,18 @@ pub async fn finish_login_flow(
     verifier: &str,
     expected_state: &str,
 ) -> Result<OpenAiCredentials> {
+    finish_login_flow_with_redirect_uri(callback_input, verifier, expected_state, REDIRECT_URI)
+        .await
+}
+
+pub async fn finish_login_flow_with_redirect_uri(
+    callback_input: &str,
+    verifier: &str,
+    expected_state: &str,
+    redirect_uri: &str,
+) -> Result<OpenAiCredentials> {
     let code = extract_code_from_callback_input(callback_input, expected_state)?;
-    exchange_code(&code, verifier).await
+    exchange_code(&code, verifier, redirect_uri).await
 }
 
 /// Refresh an OpenAI token using the refresh_token grant.
@@ -465,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_build_authorize_url() {
-        let Ok(url) = build_authorize_url("test_challenge", "test_state") else {
+        let Ok(url) = build_authorize_url("test_challenge", "test_state", REDIRECT_URI) else {
             panic!("failed to build authorize URL for test input");
         };
         assert!(url.starts_with(AUTHORIZE_URL));
@@ -484,6 +504,18 @@ mod tests {
         assert!(flow.authorize_url.contains("redirect_uri="));
         assert_eq!(flow.verifier.len(), 43);
         assert_eq!(flow.state.len(), 32);
+        assert_eq!(flow.redirect_uri, REDIRECT_URI);
+    }
+
+    #[test]
+    fn test_start_login_flow_with_redirect_uri_uses_custom_callback() {
+        let flow =
+            start_login_flow_with_redirect_uri("http://127.0.0.1:3210/auth/callback").unwrap();
+        assert!(
+            flow.authorize_url
+                .contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A3210%2Fauth%2Fcallback")
+        );
+        assert_eq!(flow.redirect_uri, "http://127.0.0.1:3210/auth/callback");
     }
 
     #[test]

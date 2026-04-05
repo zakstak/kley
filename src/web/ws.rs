@@ -6,7 +6,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, MissedTickBehavior, timeout};
 use uuid::Uuid;
 
 use crate::compact::CompactConfig;
@@ -36,12 +36,14 @@ use session::{
     LoadSessionError, SelectSessionError, attach_or_select_session, load_session_for_controller,
 };
 use snapshot::{
-    bootstrap_snapshot_data, snapshot_data, task_event_records, task_watch_bootstrap_data,
+    bootstrap_snapshot_data, snapshot_data, snapshot_resource_usage_summary, task_event_records,
+    task_watch_bootstrap_data,
 };
 
 const DEFAULT_WEB_MODEL: &str = "test-model";
 const DEFAULT_WEB_PROVIDER: &str = "test";
 const OPENAI_COMPLETION_TIMEOUT: Duration = Duration::from_secs(45);
+const RESOURCE_USAGE_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default, Deserialize)]
 pub struct WsConnectQuery {
@@ -108,6 +110,9 @@ async fn handle_socket(
 
     let mut runtime_events = state.runtime_manager.subscribe(&active_session.id);
     let mut task_watch: Option<TaskWatchState> = None;
+    let mut resource_usage_tick = tokio::time::interval(RESOURCE_USAGE_UPDATE_INTERVAL);
+    resource_usage_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    resource_usage_tick.tick().await;
 
     match send_connect_snapshot_event(&mut socket, &state, &active_session.id, &controller_id).await
     {
@@ -618,8 +623,18 @@ async fn handle_socket(
                             }
                         }
                     }
-                    WebCommand::AuthOpenAiStart { request_id } => {
-                        match state.start_openai_login(&controller_id) {
+                    WebCommand::AuthOpenAiStart {
+                        request_id,
+                        redirect_origin,
+                    } => {
+                        let redirect_uri = redirect_origin
+                            .as_deref()
+                            .and_then(build_web_openai_redirect_uri)
+                            .unwrap_or_else(|| {
+                                "http://localhost:1455/auth/callback".to_string()
+                            });
+
+                        match state.start_openai_login(&controller_id, &redirect_uri) {
                             Ok(authorize_url) => {
                                 if send_response(
                                     &mut socket,
@@ -629,6 +644,7 @@ async fn handle_socket(
                                             "started": true,
                                             "provider": "openai",
                                             "authorize_url": authorize_url,
+                                            "redirect_uri": redirect_uri,
                                         }),
                                     },
                                 )
@@ -1327,6 +1343,14 @@ async fn handle_socket(
                     }
                 }
             }
+            _ = resource_usage_tick.tick() => {
+                if send_resource_usage_event(&mut socket, &state, &active_session.id)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
         }
     }
 
@@ -1334,6 +1358,18 @@ async fn handle_socket(
     state
         .runtime_manager
         .release_controller(&active_session.id, &controller_id);
+}
+
+fn build_web_openai_redirect_uri(origin: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(origin).ok()?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return None,
+    }
+    url.set_path("/auth/callback");
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
 async fn next_runtime_event(
@@ -1763,6 +1799,24 @@ async fn send_connect_snapshot_event(
     )
     .await
     .map_err(SnapshotDispatchError::Transport)
+}
+
+async fn send_resource_usage_event(
+    socket: &mut WebSocket,
+    state: &WebAppState,
+    session_id: &str,
+) -> Result<(), WsIoError> {
+    let resource_usage = snapshot_resource_usage_summary(state).await;
+    send_event(
+        socket,
+        UiEvent::ResourceUsageUpdated {
+            event_id: format!("evt-{}", Uuid::new_v4()),
+            ts: ts_now(),
+            session_id: session_id.to_string(),
+            resource_usage,
+        },
+    )
+    .await
 }
 
 fn is_supported_session_provider(provider: &str) -> bool {
