@@ -13,7 +13,6 @@ use crate::auth::{CredentialStore, ResolvedAuth};
 use crate::diagnostics::{DiagnosticSeverity, has_error_diagnostics};
 use crate::events::event_channel;
 use crate::provider::openai::OpenAiProvider;
-use crate::provider::test::{CONTROL_BLOCK_END, CONTROL_BLOCK_START, TestProvider};
 use crate::provider::zai::ZaiProvider;
 use crate::provider::{Provider, SendContext, TokenUsage, TurnResult};
 use crate::runtime::SessionRuntime;
@@ -181,7 +180,8 @@ impl ScenarioCases {
 #[serde(deny_unknown_fields)]
 struct ScenarioCase {
     prompt: String,
-    offline_provider_result: OfflineProviderResult,
+    #[serde(rename = "offline_provider_result")]
+    _offline_provider_result: OfflineProviderResult,
     #[serde(default)]
     expected_files: Vec<ExpectedFile>,
     #[serde(default)]
@@ -191,8 +191,14 @@ struct ScenarioCase {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OfflineProviderResult {
-    ToolCall { arguments: Value },
-    Text { content: String },
+    ToolCall {
+        #[serde(rename = "arguments")]
+        _arguments: Value,
+    },
+    Text {
+        #[serde(rename = "content")]
+        _content: String,
+    },
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -262,9 +268,6 @@ pub fn default_provider() -> &'static str {
 }
 
 pub fn default_model(provider: &str) -> String {
-    if provider == "test" {
-        return "test-model".to_string();
-    }
     SessionRuntime::default_model(provider)
 }
 
@@ -368,7 +371,7 @@ async fn run_scenario(
     let workspace = TempWorkspace::new(&loaded.scenario.name)?;
     materialize_workspace(&workspace.path, &loaded.scenario.workspace)?;
 
-    let prompt = build_prompt(&loaded.scenario, case, config.engine, &config.provider)?;
+    let prompt = build_prompt(&loaded.scenario, case, config.engine)?;
     let prompt_path = scenario_output_dir.join("prompt.txt");
     fs::write(&prompt_path, &prompt)
         .with_context(|| format!("failed to write {}", prompt_path.display()))?;
@@ -783,7 +786,6 @@ fn build_prompt(
     scenario: &HashlineHarnessScenario,
     case: &ScenarioCase,
     engine: HarnessEngine,
-    provider: &str,
 ) -> Result<String> {
     let mut prompt = String::new();
     prompt.push_str(&format!("Scenario: {}\n", scenario.name));
@@ -796,26 +798,6 @@ fn build_prompt(
 
     for file in &scenario.workspace.files {
         prompt.push_str(&format!("\n--- {} ---\n{}\n", file.path, file.content));
-    }
-
-    if provider == "test" {
-        let control = match &case.offline_provider_result {
-            OfflineProviderResult::ToolCall { arguments } => serde_json::json!({
-                "type": "tool_call",
-                "name": engine.tool_name(),
-                "arguments": arguments,
-            }),
-            OfflineProviderResult::Text { content } => serde_json::json!({
-                "type": "text",
-                "content": content,
-            }),
-        };
-        prompt.push_str("\n\n");
-        prompt.push_str(CONTROL_BLOCK_START);
-        prompt.push('\n');
-        prompt.push_str(&serde_json::to_string_pretty(&control)?);
-        prompt.push('\n');
-        prompt.push_str(CONTROL_BLOCK_END);
     }
 
     Ok(prompt)
@@ -834,17 +816,20 @@ fn create_provider(provider: &str) -> Result<Box<dyn Provider>> {
     match provider {
         "openai" => Ok(Box::new(OpenAiProvider::new())),
         "zai" => Ok(Box::new(ZaiProvider::new())),
-        "test" => Ok(Box::new(TestProvider::new())),
         other => bail!("unsupported provider: {other}"),
     }
 }
 
 async fn resolve_auth(provider: &str) -> Result<ResolvedAuth> {
-    if provider == "test" {
+    if provider == "openai"
+        && let Ok(api_key) = std::env::var("OPENAI_API_KEY")
+        && !api_key.is_empty()
+    {
         return Ok(ResolvedAuth {
-            provider: "test".to_string(),
-            api_key: "test-key".to_string(),
-            base_url: "http://unused".to_string(),
+            provider: "openai".to_string(),
+            api_key,
+            base_url: std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             account_id: None,
         });
     }

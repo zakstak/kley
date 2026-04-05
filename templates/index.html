@@ -1030,12 +1030,9 @@
         const providerModelOptions = Object.freeze({
           openai: ["gpt-5.3-codex-spark", "gpt-5", "gpt-4.1"],
           zai: ["glm-4.7"],
-          test: ["test-model"],
         });
         const providerOptions = Object.keys(providerModelOptions);
-        const loginProviderOptions = providerOptions.filter(
-          (provider) => provider !== "test",
-        );
+        const loginProviderOptions = providerOptions;
         const defaultProvider = providerOptions[0] || "openai";
         const defaultModel = providerModelOptions[defaultProvider]?.[0] || "";
 

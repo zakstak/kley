@@ -2,8 +2,12 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
 
+use axum::Router;
+use axum::body::Bytes;
+use axum::http::header;
+use axum::response::IntoResponse;
+use axum::routing::post;
 use chrono::{Duration, Utc};
-use kley::auth::ResolvedAuth;
 use kley::compact::CompactConfig;
 use kley::events::event_channel;
 use kley::runtime::{RuntimeHooks, SessionRuntime};
@@ -11,6 +15,7 @@ use kley::store::{
     NewSession, NewTaskAttemptRecord, NewTaskEdgeRecord, NewTaskEventRecord, NewTaskRecord,
     Session, SessionStatus, Store, TaskAttemptRecord, TaskLifecycleState, TaskRecord, Turn,
 };
+use kley::test_openai::{self, ControlledResponse, TEST_MODEL};
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -41,6 +46,45 @@ impl Drop for EnvVarGuard {
 
 struct SeededGraph {
     child_session_id: String,
+}
+
+struct TestServer {
+    addr: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn spawn_app(app: Router) -> TestServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    TestServer { addr, task }
+}
+
+async fn controlled_openai_sse_handler(body: Bytes) -> impl IntoResponse {
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let prompt = payload
+        .get("input")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.last())
+        .and_then(|item| item.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let body = match test_openai::parse_controlled_prompt(prompt) {
+        Some(ControlledResponse::ToolCall { name, arguments }) => {
+            test_openai::tool_call_sse(&name, &arguments)
+        }
+        Some(ControlledResponse::Text { content }) => test_openai::text_sse(&content),
+        None => test_openai::text_sse(&format!("Mock assistant reply: {prompt}")),
+    };
+    ([(header::CONTENT_TYPE, "text/event-stream")], body)
 }
 
 fn manifest_dir() -> &'static Path {
@@ -87,8 +131,8 @@ fn seed_task_graph(home_dir: &Path) -> SeededGraph {
         let root_session = Session::create(
             store,
             NewSession {
-                model: "test-model".to_string(),
-                provider: "test".to_string(),
+                model: "gpt-5.3-codex-spark".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap();
@@ -96,7 +140,7 @@ fn seed_task_graph(home_dir: &Path) -> SeededGraph {
             store,
             NewSession {
                 model: "child-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap();
@@ -104,7 +148,7 @@ fn seed_task_graph(home_dir: &Path) -> SeededGraph {
             store,
             NewSession {
                 model: "other-model".to_string(),
-                provider: "test".to_string(),
+                provider: "openai".to_string(),
             },
         )
         .unwrap();
@@ -448,24 +492,17 @@ fn seed_control_tasks(home_dir: &Path) {
     });
 }
 
-fn test_auth() -> ResolvedAuth {
-    ResolvedAuth {
-        provider: "test".to_string(),
-        api_key: "test-key".to_string(),
-        base_url: "http://unused".to_string(),
-        account_id: None,
-    }
-}
-
 #[tokio::test]
 async fn existing_interactive_flow_still_persists_turns() {
     let store = Store::open_memory().unwrap();
     let (emitter, _receiver) = event_channel();
+    let server =
+        spawn_app(Router::new().route("/responses", post(controlled_openai_sse_handler))).await;
 
     let mut runtime = SessionRuntime::new(
         &store,
-        test_auth(),
-        Some("test-model"),
+        test_openai::auth(format!("http://{}", server.addr)),
+        Some(TEST_MODEL),
         None,
         emitter,
         CompactConfig::default(),

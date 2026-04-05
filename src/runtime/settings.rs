@@ -490,23 +490,23 @@ mod tests {
 
     #[test]
     fn canonical_settings_json_includes_compact_threshold() {
-        let settings_json = canonical_settings_json("test-model", "test", 0);
+        let settings_json = canonical_settings_json("gpt-5.3-codex-spark", "openai", 0);
         let settings = SessionSettingsOverrides::from_json(&settings_json).unwrap();
 
-        assert_eq!(settings.model.as_deref(), Some("test-model"));
-        assert_eq!(settings.provider.as_deref(), Some("test"));
+        assert_eq!(settings.model.as_deref(), Some("gpt-5.3-codex-spark"));
+        assert_eq!(settings.provider.as_deref(), Some("openai"));
         assert_eq!(settings.compact_threshold, Some(1));
     }
 
     #[test]
     fn settings_overrides_ignore_invalid_threshold_and_preserve_partial_fields() {
         let settings = SessionSettingsOverrides::from_json(
-            r#"{"model":"test-model","provider":"test","compact_threshold":"nope"}"#,
+            r#"{"model":"gpt-5.3-codex-spark","provider":"openai","compact_threshold":"nope"}"#,
         )
         .unwrap();
 
-        assert_eq!(settings.model.as_deref(), Some("test-model"));
-        assert_eq!(settings.provider.as_deref(), Some("test"));
+        assert_eq!(settings.model.as_deref(), Some("gpt-5.3-codex-spark"));
+        assert_eq!(settings.provider.as_deref(), Some("openai"));
         assert_eq!(settings.compact_threshold, None);
     }
 
@@ -524,7 +524,7 @@ mod tests {
                 "max_depth": 2,
                 "max_concurrency": 1,
                 "budget": 5,
-                "allowed_providers": ["test", " test "],
+                "allowed_providers": ["openai", " openai "],
                 "allowed_models": ["model-a", "model-a"],
                 "approved_tools": ["read_file", " read_file "],
                 "tool_approval_mode": "ask",
@@ -539,7 +539,7 @@ mod tests {
         };
 
         let snapshot = DelegationPolicySnapshot::from_task(&task, &registry).unwrap();
-        assert_eq!(snapshot.allowed_providers, vec!["test".to_string()]);
+        assert_eq!(snapshot.allowed_providers, vec!["openai".to_string()]);
         assert_eq!(snapshot.allowed_models, vec!["model-a".to_string()]);
         assert_eq!(snapshot.approved_tools, vec!["read_file".to_string()]);
     }

@@ -414,7 +414,14 @@ mod tests {
             account_id: None,
         };
 
-        let _ = maybe_compact(&auth, "test-model", &mut history, &config, &emitter).await;
+        let _ = maybe_compact(
+            &auth,
+            "gpt-5.3-codex-spark",
+            &mut history,
+            &config,
+            &emitter,
+        )
+        .await;
 
         let first = &history[0];
         let content = first.get("content").and_then(|c| c.as_str()).unwrap_or("");
@@ -454,7 +461,14 @@ mod tests {
             account_id: None,
         };
 
-        let _ = maybe_compact(&auth, "test-model", &mut history, &config, &emitter).await;
+        let _ = maybe_compact(
+            &auth,
+            "gpt-5.3-codex-spark",
+            &mut history,
+            &config,
+            &emitter,
+        )
+        .await;
 
         // Should have keep_recent items + 1 summary message = 11
         assert_eq!(history.len(), 11);
@@ -488,12 +502,19 @@ mod tests {
         let (emitter, _receiver) = crate::events::event_channel();
         let auth = ResolvedAuth {
             provider: "openai".into(),
-            api_key: "test".into(),
+            api_key: "test-key".into(),
             base_url: "http://localhost:1".into(),
             account_id: None,
         };
 
-        let _ = maybe_compact(&auth, "test-model", &mut history, &config, &emitter).await;
+        let _ = maybe_compact(
+            &auth,
+            "gpt-5.3-codex-spark",
+            &mut history,
+            &config,
+            &emitter,
+        )
+        .await;
 
         // Should remain unchanged
         assert_eq!(history.len(), 1);

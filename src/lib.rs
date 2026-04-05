@@ -17,6 +17,7 @@ pub mod provider;
 pub mod runtime;
 pub mod skills;
 pub mod store;
+pub mod test_openai;
 mod text;
 pub mod tools;
 pub mod web;

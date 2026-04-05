@@ -3,8 +3,8 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -16,6 +16,33 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const EDIT_ARTIFACT_DIR_ENV: &str = "KLEY_EDIT_ARTIFACT_DIR";
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(previous) => unsafe { std::env::set_var(self.key, previous) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
 
 struct TestServer {
     addr: SocketAddr,
@@ -79,11 +106,15 @@ fn json_string<'a>(value: &'a Value, key: &str) -> &'a str {
 }
 
 fn run_hashline_harness(output_dir: &Path, scenario_dir: &Path) -> Output {
+    let openai_api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    let openai_base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
     Command::new(env!("CARGO_BIN_EXE_hashline-harness"))
+        .env("OPENAI_API_KEY", openai_api_key)
+        .env("OPENAI_BASE_URL", openai_base_url)
         .arg("--provider")
-        .arg("test")
+        .arg("openai")
         .arg("--model")
-        .arg("test-model")
+        .arg("gpt-5.3-codex-spark")
         .arg("--engine")
         .arg("hashline_edit")
         .arg("--scenario-dir")
@@ -112,6 +143,65 @@ async fn openai_hashline_write_handler(
         tool_call_sse("hashline_edit", &state.tool_arguments)
     } else {
         text_sse("write path complete")
+    };
+
+    ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
+}
+
+async fn openai_harness_scenarios_handler(body: Bytes) -> Response {
+    let payload: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let prompt = payload
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|items| items.last())
+        .and_then(|item| item.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let body = if prompt.contains("Do not call any tools.") {
+        text_sse("provider returned plain text instead of a tool call")
+    } else if prompt.contains("stale anchor") {
+        tool_call_sse(
+            "hashline_edit",
+            &serde_json::json!({
+                "path": "src/sample.txt",
+                "edits": [{
+                    "kind": "replace",
+                    "start": "2#deadbeef",
+                    "end": "2#deadbeef",
+                    "replacement": "BETA\n"
+                }]
+            })
+            .to_string(),
+        )
+    } else if prompt.contains("replace the line `beta` with `WRONG`") {
+        tool_call_sse(
+            "hashline_edit",
+            &serde_json::json!({
+                "path": "src/sample.txt",
+                "edits": [{
+                    "kind": "replace",
+                    "start": "2#f44e64e7",
+                    "end": "2#f44e64e7",
+                    "replacement": "WRONG\n"
+                }]
+            })
+            .to_string(),
+        )
+    } else {
+        tool_call_sse(
+            "hashline_edit",
+            &serde_json::json!({
+                "path": "src/sample.txt",
+                "edits": [{
+                    "kind": "replace",
+                    "start": "2#f44e64e7",
+                    "end": "2#f44e64e7",
+                    "replacement": "BETA\n"
+                }]
+            })
+            .to_string(),
+        )
     };
 
     ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
@@ -148,7 +238,14 @@ fn text_sse(text: &str) -> String {
 
 #[test]
 fn harness_subprocess_writes_runs_jsonl_and_status_coverage() {
+    let _lock = env_lock().lock().unwrap();
     let output_root = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime.block_on(spawn_app(
+        Router::new().route("/responses", post(openai_harness_scenarios_handler)),
+    ));
+    let _api_key = EnvVarGuard::set("OPENAI_API_KEY", "test-key");
+    let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", &format!("http://{}", server.addr));
     let output = run_hashline_harness(output_root.path(), &hashline_harness_fixture_dir());
     assert!(output.status.success(), "{}", debug_command_output(&output));
 
@@ -188,8 +285,8 @@ fn harness_subprocess_writes_runs_jsonl_and_status_coverage() {
 
     for record in &records {
         assert_eq!(json_string(record, "engine"), "hashline_edit");
-        assert_eq!(json_string(record, "provider"), "test");
-        assert_eq!(json_string(record, "model"), "test-model");
+        assert_eq!(json_string(record, "provider"), "openai");
+        assert_eq!(json_string(record, "model"), "gpt-5.3-codex-spark");
         assert!(record.get("duration_ms").and_then(Value::as_u64).is_some());
 
         for key in [
@@ -361,7 +458,7 @@ async fn bounded_process_output_is_artifact_backed() {
                 .arg("--tool-approval")
                 .arg("auto")
                 .arg("--model")
-                .arg("test-model")
+                .arg("gpt-5.3-codex-spark")
                 .arg("--prompt")
                 .arg("Use hashline_edit exactly once to update src/sample.txt.")
                 .output()

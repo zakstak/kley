@@ -69,7 +69,7 @@ async fn concurrent_store_run_sessions() {
                     s,
                     NewSession {
                         model: format!("model-{i}"),
-                        provider: "test".into(),
+                        provider: "openai".into(),
                     },
                 )?;
                 Ok(())
@@ -164,8 +164,8 @@ async fn task_rows_persist_policy_and_recovery_metadata() {
         let session = Session::create(
             s,
             NewSession {
-                model: "test-model".into(),
-                provider: "test".into(),
+                model: "gpt-5.3-codex-spark".into(),
+                provider: "openai".into(),
             },
         )?;
         Ok(session.id)
@@ -607,8 +607,8 @@ async fn autonomous_spawn_max_concurrency_is_atomic_across_store_connections() {
                     "max_depth": 3,
                     "max_concurrency": 1,
                     "budget": 10,
-                    "allowed_providers": ["test"],
-                    "allowed_models": ["test-model"],
+                    "allowed_providers": ["openai"],
+                    "allowed_models": ["gpt-5.3-codex-spark"],
                     "approved_tools": ["read_file"],
                     "tool_approval_mode": "ask",
                     "parent_close_policy": "request_cancel_descendants"
