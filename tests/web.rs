@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, StatusCode, header},
+    http::{HeaderValue, Request, StatusCode, header},
 };
 use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -19,6 +19,7 @@ use kley::web::state::{MockWebAuthService, WebAppState, WebAuthService};
 use kley::web::ws::runtime_event_to_ui_event;
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::util::ServiceExt;
 
@@ -246,9 +247,31 @@ mod web {
         path: &str,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
+        connect_ws_path_with_origin(addr, path, None)
+            .await
+            .expect("websocket should connect")
+    }
+
+    async fn connect_ws_path_with_origin(
+        addr: std::net::SocketAddr,
+        path: &str,
+        origin: Option<&str>,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::Error,
+    > {
         let url = format!("ws://{addr}{path}");
-        let (socket, _) = connect_async(url).await.unwrap();
-        socket
+        let mut request = url.into_client_request().expect("request should build");
+        if let Some(origin) = origin {
+            request.headers_mut().insert(
+                header::ORIGIN,
+                HeaderValue::from_str(origin).expect("origin header should be valid"),
+            );
+        }
+        let (socket, _) = connect_async(request).await?;
+        Ok(socket)
     }
 
     async fn connect_mock_ws(
@@ -280,6 +303,27 @@ mod web {
                 return frame;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn ws_rejects_cross_origin_browser_requests() {
+        let server = spawn_server().await;
+        let error = connect_ws_path_with_origin(server.addr, "/ws", Some("http://evil.example"))
+            .await
+            .expect_err("cross-origin websocket should be rejected");
+
+        assert!(error.to_string().contains("403"));
+    }
+
+    #[tokio::test]
+    async fn mock_ws_rejects_cross_origin_browser_requests() {
+        let server = spawn_server().await;
+        let error =
+            connect_ws_path_with_origin(server.addr, "/ws/mock", Some("http://evil.example"))
+                .await
+                .expect_err("cross-origin mock websocket should be rejected");
+
+        assert!(error.to_string().contains("403"));
     }
 
     #[tokio::test]

@@ -152,7 +152,7 @@ impl DelegationPolicyRequest {
 }
 
 impl DelegationPolicySnapshot {
-    fn from_task(task: &TaskRecord, registry: &ToolRegistry) -> Result<Self> {
+    pub(crate) fn from_task(task: &TaskRecord, registry: &ToolRegistry) -> Result<Self> {
         let parsed: Value = serde_json::from_str(&task.policy_snapshot)
             .context("failed to parse persisted task policy snapshot")?;
 
@@ -371,6 +371,19 @@ impl DelegationPolicySnapshot {
             parent_close_policy: child_parent_close_policy,
         }
         .normalized(registry)
+    }
+
+    pub(crate) fn allows_tool_call(&self, tool_name: &str) -> bool {
+        match self.tool_approval_mode {
+            DelegationToolApprovalMode::Never | DelegationToolApprovalMode::Ask => false,
+            DelegationToolApprovalMode::Auto => {
+                self.approved_tools.is_empty()
+                    || self
+                        .approved_tools
+                        .iter()
+                        .any(|approved| approved == tool_name)
+            }
+        }
     }
 }
 

@@ -1,7 +1,6 @@
-use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::Path;
 
 use uuid::Uuid;
 
@@ -10,55 +9,8 @@ compile_error!(
     "Kley only supports Unix write paths today; do not add Windows or other non-Unix compatibility work unless repo policy changes."
 );
 
-const MAX_SYMLINK_CHAIN_HOPS: usize = 64;
-
-fn resolve_final_target(path: &Path) -> io::Result<PathBuf> {
-    let mut current = path.to_path_buf();
-    let mut seen = HashSet::new();
-    let mut hops = 0;
-
-    loop {
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {}
-            Ok(_) => return Ok(current),
-            Err(err) => {
-                if err.kind() == io::ErrorKind::NotFound {
-                    return Ok(current);
-                }
-                return Err(err);
-            }
-        }
-
-        if !seen.insert(current.clone()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("symlink loop detected for {}", current.display()),
-            ));
-        }
-
-        if hops >= MAX_SYMLINK_CHAIN_HOPS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "symlink chain exceeded maximum depth",
-            ));
-        }
-        hops += 1;
-
-        let link_target = fs::read_link(&current)?;
-        let parent = current
-            .parent()
-            .filter(|value| !value.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        current = if link_target.is_absolute() {
-            link_target
-        } else {
-            parent.join(link_target)
-        };
-    }
-}
-
 pub fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let target_path = resolve_final_target(path)?;
+    let target_path = path.to_path_buf();
 
     let parent = target_path
         .parent()
@@ -122,7 +74,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn atomic_replace_updates_symlink_target_without_replacing_link() {
+    fn atomic_replace_replaces_symlink_without_touching_target() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("target.txt");
         let mut file = fs::File::create(&target).unwrap();
@@ -134,41 +86,8 @@ mod tests {
         atomic_replace(&link_path, b"updated").unwrap();
 
         let metadata = fs::symlink_metadata(&link_path).unwrap();
-        assert!(metadata.file_type().is_symlink());
-        assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original");
         assert_eq!(fs::read_to_string(&link_path).unwrap(), "updated");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_replace_updates_multi_hop_symlink_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("final.txt");
-        let mut file = fs::File::create(&target).unwrap();
-        file.write_all(b"original").unwrap();
-
-        let mid_link = temp.path().join("mid.txt");
-        symlink(&target, &mid_link).unwrap();
-
-        let entry_point = temp.path().join("entry-point.txt");
-        symlink(&mid_link, &entry_point).unwrap();
-
-        atomic_replace(&entry_point, b"updated").unwrap();
-
-        assert!(
-            fs::symlink_metadata(&entry_point)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert!(
-            fs::symlink_metadata(&mid_link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
-        assert_eq!(fs::read_to_string(&mid_link).unwrap(), "updated");
-        assert_eq!(fs::read_to_string(&entry_point).unwrap(), "updated");
     }
 }

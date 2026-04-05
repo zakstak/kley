@@ -29,6 +29,7 @@ pub async fn openai_callback(Query(query): Query<OpenAiCallbackQuery>) -> Html<S
     let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| {
         r#"{"type":"kley.openai.callback","error":"serialization_failed"}"#.to_string()
     });
+    let payload_json = escape_inline_script_json(&payload_json);
 
     Html(format!(
         r#"<!doctype html>
@@ -74,6 +75,14 @@ pub async fn openai_callback(Query(query): Query<OpenAiCallbackQuery>) -> Html<S
     ))
 }
 
+fn escape_inline_script_json(json: &str) -> String {
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +115,14 @@ mod tests {
         .0;
 
         assert!(html.contains("window.location.href"));
+    }
+
+    #[test]
+    fn callback_page_escapes_script_breakout_sequences() {
+        let escaped =
+            escape_inline_script_json(r#"{"error":"</script><script>alert(1)</script>"}"#);
+
+        assert!(escaped.contains("\\u003c/script\\u003e"));
+        assert!(!escaped.contains("</script>"));
     }
 }
