@@ -38,7 +38,13 @@
     "ses_2a4f9ebbcffeFy2bAzJ8tEu4zZ",
     "ses_2a4f9eb42ffeHoCRHlNdlpEYmU",
     "ses_2a4f9eb8effeEmBcFcfvarM6ar",
-    "ses_2a4f9eb40ffeDUtsO9VAhNH094"
+    "ses_2a4f9eb40ffeDUtsO9VAhNH094",
+    "ses_29c3a8e68ffeklX141ejmx4B5q",
+    "ses_29c39ea03ffew1umgVzEj5m3lk",
+    "ses_29c39e9b7ffeMah0ir4CRY9WvQ",
+    "ses_29c39e8f7ffeTnerkUioU0cJOh",
+    "ses_29c39e95effeviJxZNcm8D9Wm6",
+    "ses_29c34d4baffew281pIIq8tN2OL"
   ],
   "plan_name": "initial-lsp-language-support",
   "task_sessions": {
@@ -105,5 +111,6 @@
       "category": "unspecified-high",
       "updated_at": "2026-04-04T05:35:43.732Z"
     }
-  }
+  },
+  "agent": "atlas"
 }
