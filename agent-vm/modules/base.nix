@@ -1,6 +1,24 @@
 { config, lib, promotionContract, ... }:
 let
   hostName = config.networking.hostName or "unknown";
+  operatorAuthorizedKeyPath = ../.generated/operator-authorized-key.pub;
+  operatorAuthorizedKeys =
+    if builtins.pathExists operatorAuthorizedKeyPath then
+      let
+        key = lib.strings.removeSuffix "\n" (builtins.readFile operatorAuthorizedKeyPath);
+      in
+      lib.optional (key != "") key
+    else
+      [ ];
+  vaultEnvironment = lib.filterAttrs
+    (name: value:
+      builtins.elem name [ "VAULT_ADDR" "VAULT_TOKEN" ]
+      && builtins.isString value
+      && value != "")
+    {
+      VAULT_ADDR = builtins.getEnv "VAULT_ADDR";
+      VAULT_TOKEN = builtins.getEnv "VAULT_TOKEN";
+    };
   expectedLane =
     if hostName == promotionContract.canaryHost then "canary"
     else if hostName == promotionContract.baselineHost then "baseline"
@@ -49,8 +67,10 @@ in {
       isNormalUser = true;
       description = "Agent VM machine user";
       extraGroups = [ "wheel" ];
-      openssh.authorizedKeys.keys = lib.mkDefault [ ];
+      openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
     };
+
+    users.users.root.openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
 
     services.openssh.enable = lib.mkDefault true;
     services.openssh.settings = {
@@ -70,6 +90,7 @@ in {
 
     kley.agentVm.buildMetadata = buildMetadata;
     system.configurationRevision = promotionContract.source.exactRevision;
+    environment.variables = vaultEnvironment;
     environment.etc."kley-agent-vm-build.json".text = builtins.toJSON buildMetadata;
   };
 }

@@ -7,9 +7,38 @@ CANARY_HOST="${CANARY_HOST:-saga-dev2}"
 AGENT_USER="${AGENT_USER:-agent}"
 REMOTE_TARGET="${AGENT_USER}@${CANARY_HOST}"
 FLAKE_ATTR="nixosConfigurations.${CANARY_HOST}.config.system.build.toplevel"
+VAULT_ENV_FILE="${ROOT_DIR}/agent-vm/.generated/vault-environment.json"
+
+load_generated_vault_env() {
+  if [[ ! -f "${VAULT_ENV_FILE}" ]]; then
+    return
+  fi
+
+  eval "$({
+    VAULT_ENV_FILE="${VAULT_ENV_FILE}" python3 - <<'PY'
+import json
+import os
+import pathlib
+import shlex
+
+path = pathlib.Path(os.environ["VAULT_ENV_FILE"])
+data = json.loads(path.read_text())
+for key in ("VAULT_ADDR", "VAULT_TOKEN"):
+    value = data.get(key)
+    if isinstance(value, str) and value:
+        print(f'export {key}={shlex.quote(value)}')
+PY
+  })"
+}
+
+NIX_BUILD_ARGS=()
+if [[ -f "${VAULT_ENV_FILE}" ]]; then
+  load_generated_vault_env
+  NIX_BUILD_ARGS+=(--impure)
+fi
 
 echo "[1/5] Building ${FLAKE_ATTR} from ${ROOT_DIR}"
-nix build "${ROOT_DIR}#${FLAKE_ATTR}"
+nix build "${NIX_BUILD_ARGS[@]}" "${ROOT_DIR}#${FLAKE_ATTR}"
 
 STORE_PATH="$(readlink -f "${ROOT_DIR}/result")"
 

@@ -7,6 +7,7 @@ CANARY_HOST="${CANARY_HOST:-saga-dev2}"
 FLAKE_HOST="${FLAKE_HOST:-${CANARY_HOST}}"
 AGENT_USER="${AGENT_USER:-agent}"
 REMOTE_TARGET="${AGENT_USER}@${CANARY_HOST}"
+VAULT_ENV_FILE="${ROOT_DIR}/agent-vm/.generated/vault-environment.json"
 REMOTE_KLEY_REPO_ROOT="${REMOTE_KLEY_REPO_ROOT:-}"
 REMOTE_KLEY_STAGE_ROOT="${REMOTE_KLEY_STAGE_ROOT:-/tmp/kley-canary-${CANARY_HOST}-$$}"
 KLEY_WEB_BIND="${KLEY_WEB_BIND:-127.0.0.1:3210}"
@@ -14,6 +15,34 @@ KLEY_WEB_HEALTH_URL="http://${KLEY_WEB_BIND}/healthz"
 KLEY_WEB_ROOT_URL="http://${KLEY_WEB_BIND}/"
 KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH:-/tmp/kley-canary-web.log}"
 STAGED_REMOTE_CHECKOUT=0
+
+load_generated_vault_env() {
+  if [[ ! -f "${VAULT_ENV_FILE}" ]]; then
+    return
+  fi
+
+  eval "$({
+    VAULT_ENV_FILE="${VAULT_ENV_FILE}" python3 - <<'PY'
+import json
+import os
+import pathlib
+import shlex
+
+path = pathlib.Path(os.environ["VAULT_ENV_FILE"])
+data = json.loads(path.read_text())
+for key in ("VAULT_ADDR", "VAULT_TOKEN"):
+    value = data.get(key)
+    if isinstance(value, str) and value:
+        print(f'export {key}={shlex.quote(value)}')
+PY
+  })"
+}
+
+NIX_EVAL_ARGS=()
+if [[ -f "${VAULT_ENV_FILE}" ]]; then
+  load_generated_vault_env
+  NIX_EVAL_ARGS+=(--impure)
+fi
 
 cleanup() {
   if [[ "${STAGED_REMOTE_CHECKOUT}" == "1" ]]; then
@@ -26,7 +55,7 @@ EOF
 
 trap cleanup EXIT
 
-LOCAL_BUILD_REVISION="$(nix eval --raw "${ROOT_DIR}#nixosConfigurations.${FLAKE_HOST}.config.environment.etc.\"kley-agent-vm-build.json\".text" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source"]["exactRevision"])')"
+LOCAL_BUILD_REVISION="$(nix eval "${NIX_EVAL_ARGS[@]}" --raw "${ROOT_DIR}#nixosConfigurations.${FLAKE_HOST}.config.environment.etc.\"kley-agent-vm-build.json\".text" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source"]["exactRevision"])')"
 REMOTE_BUILD_REVISION="$(ssh "${REMOTE_TARGET}" "cat /etc/kley-agent-vm-build.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source"]["exactRevision"])')"
 
 if [[ "${1:-}" == "--help" ]]; then

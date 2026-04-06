@@ -8,10 +8,14 @@
 - `modules/disko.nix` is the shared storage-contract slot.
 - `modules/impermanence.nix` is the shared persistence-policy slot.
 - `hosts/` stays thin and should only describe machine facts.
+- `scripts/write-generated-vault-env.sh` writes a gitignored Vault env file for
+  local-only VM builds when you want the web UI to use Vault-backed credentials.
 
 ## Rolling update lane
 
-Routine VM updates are lockfile-driven and canary-first:
+Routine VM updates are lockfile-driven and canary-first. The normal deploy
+target is `saga-dev`; `saga-dev2` is reserved for explicit canary-only runs. Do
+not treat an ambiguous deploy request as `saga-dev2`.
 
 1. Update the repo checkout by changing `flake.lock` and/or shared `agent-vm/**`
    baseline files.
@@ -49,6 +53,35 @@ The `configurationRevision` values for `saga-dev2` and `saga-dev` should match
 for a promotion run; only the host name and `promotionLane` fields should differ
 inside `kley-agent-vm-build.json`.
 
+## Deploy target selection
+
+Use the deploy wrapper with an explicit target every time:
+
+```bash
+agent-vm/scripts/deploy-agent-vm.sh saga-dev
+```
+
+- `saga-dev` is the normal rollout target. The wrapper still applies and
+  validates `saga-dev2` first, then promotes `saga-dev` from the same checkout.
+- `saga-dev2` is only for an explicitly requested canary-only run.
+- If no target is provided, the wrapper fails fast instead of defaulting to
+  `saga-dev2`.
+
+## Vault-backed web auth on agent VMs
+
+If your operator environment already has `VAULT_ADDR` and `VAULT_TOKEN`, write
+them into the gitignored generated file before deploying:
+
+```bash
+agent-vm/scripts/write-generated-vault-env.sh
+```
+
+That creates `agent-vm/.generated/vault-environment.json`, and the shared VM
+deploy/build scripts load that file into `VAULT_ADDR` and `VAULT_TOKEN`, then
+build the VM configuration with `--impure` so the shared base module exports
+those values into the built VM environment. This keeps Vault values out of
+tracked Nix while making them available to `kley web` on the VM.
+
 ## Local-checkout canary apply workflow (`saga-dev2`)
 
 Task 6 deploys directly from the local kley checkout; do not edit files on the
@@ -70,7 +103,13 @@ ssh agent@saga-dev2 "sudo nix-env --list-generations -p /nix/var/nix/profiles/sy
 `readlink /nix/var/nix/profiles/system` and `--list-generations` are the source
 for confirming which generation is active after switch.
 
-For a non-interactive wrapper around the same primitives, run:
+For a non-interactive wrapper around the normal full rollout, run:
+
+```bash
+agent-vm/scripts/deploy-agent-vm.sh saga-dev
+```
+
+For lower-level debugging or surgical canary work, run:
 
 ```bash
 agent-vm/scripts/apply-local-checkout-canary.sh

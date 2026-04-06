@@ -7,6 +7,11 @@
     address = "10.0.0.50";
     prefixLength = 24;
   } ];
+  networking.interfaces.eth0.ipv4.routes = [ {
+    address = "10.0.1.0";
+    prefixLength = 24;
+    via = "10.0.0.254";
+  } ];
   networking.defaultGateway = "10.0.0.1";
   networking.nameservers = [ "1.1.1.1" "8.8.8.8" ];
   networking.firewall.allowedTCPPorts = [ 3000 ];

@@ -1,0 +1,9 @@
+Total messages: 0 (Errors: 0, Warnings: 0)
+Returning 6 messages for level "error"
+
+[ERROR] WebSocket connection to 'ws://192.168.4.111:8801/ws?session_id=a15011f0-2c99-4966-8c2b-d0b9f58f939c' failed: Connection closed before receiving a handshake response @ http://192.168.4.111:8801/:2985
+[ERROR] WebSocket connection to 'ws://192.168.4.111:8801/ws?session_id=a15011f0-2c99-4966-8c2b-d0b9f58f939c' failed: Connection closed before receiving a handshake response @ http://192.168.4.111:8801/:2985
+[ERROR] WebSocket connection to 'ws://192.168.4.111:8801/ws?session_id=a15011f0-2c99-4966-8c2b-d0b9f58f939c' failed: Connection closed before receiving a handshake response @ http://192.168.4.111:8801/:2985
+[ERROR] WebSocket connection to 'ws://192.168.4.111:8801/ws?session_id=a15011f0-2c99-4966-8c2b-d0b9f58f939c' failed: Connection closed before receiving a handshake response @ http://192.168.4.111:8801/:2985
+[ERROR] WebSocket connection to 'ws://192.168.4.111:8801/ws?session_id=a15011f0-2c99-4966-8c2b-d0b9f58f939c' failed: Connection closed before receiving a handshake response @ http://192.168.4.111:8801/:2985
+[ERROR] WebSocket connection to 'ws://192.168.4.111:8801/ws?session_id=a15011f0-2c99-4966-8c2b-d0b9f58f939c' failed: Connection closed before receiving a handshake response @ http://192.168.4.111:8801/:2985

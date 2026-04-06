@@ -3,10 +3,11 @@
 set -euo pipefail
 
 ROOT_DIR="${KLEY_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd -P)}"
-TARGET_HOST="${1:-${TARGET_HOST:-saga-dev2}}"
+TARGET_HOST="${1:-${TARGET_HOST:-}}"
 CANARY_HOST="${CANARY_HOST:-saga-dev2}"
 BASELINE_HOST="${BASELINE_HOST:-saga-dev}"
 AGENT_USER="${AGENT_USER:-agent}"
+VAULT_ENV_FILE="${ROOT_DIR}/agent-vm/.generated/vault-environment.json"
 KLEY_WEB_BIND="${KLEY_WEB_BIND:-127.0.0.1:3210}"
 KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH:-/tmp/kley-canary-web.log}"
 REMOTE_STAGE_ROOT="${REMOTE_STAGE_ROOT:-/tmp/kley-canary-${CANARY_HOST}-prestaged}"
@@ -18,17 +19,17 @@ BASELINE_SSH_JUMP="${BASELINE_SSH_JUMP:-saga-proxmox}"
 
 usage() {
   cat <<EOF
-Usage: agent-vm/scripts/deploy-agent-vm.sh [saga-dev2|saga-dev]
+Usage: agent-vm/scripts/deploy-agent-vm.sh [saga-dev|saga-dev2]
 
-Default target: saga-dev2
+Explicit target required. Use saga-dev for the normal rollout target.
 
 Behavior:
-  saga-dev2  Apply canary, validate canary, verify canary, leave saga-dev cold
   saga-dev   Apply canary, validate canary, promote baseline, verify both hosts
+  saga-dev2  Apply canary, validate canary, verify canary, leave saga-dev cold
 
 Environment overrides:
   KLEY_REPO_ROOT       Local checkout root (default: repo root)
-  TARGET_HOST          Deploy target if positional arg omitted
+  TARGET_HOST          Explicit deploy target if positional arg omitted
   CANARY_HOST          Canary host identity (default: saga-dev2)
   BASELINE_HOST        Baseline flake host identity (default: saga-dev)
   AGENT_USER           Agent SSH user for repo-native scripts (default: agent)
@@ -48,6 +49,12 @@ if [[ "${TARGET_HOST}" == "--help" || "${TARGET_HOST}" == "-h" ]]; then
   exit 0
 fi
 
+if [[ -z "${TARGET_HOST}" ]]; then
+  printf 'Missing deploy target. Choose saga-dev for a full rollout or saga-dev2 for an explicit canary-only run.\n' >&2
+  usage >&2
+  exit 1
+fi
+
 case "${TARGET_HOST}" in
   saga-dev2 | saga-dev) ;;
   *)
@@ -60,6 +67,34 @@ esac
 log() {
   printf '[deploy-agent-vm] %s\n' "$*"
 }
+
+load_generated_vault_env() {
+  if [[ ! -f "${VAULT_ENV_FILE}" ]]; then
+    return
+  fi
+
+  eval "$({
+    VAULT_ENV_FILE="${VAULT_ENV_FILE}" python3 - <<'PY'
+import json
+import os
+import pathlib
+import shlex
+
+path = pathlib.Path(os.environ["VAULT_ENV_FILE"])
+data = json.loads(path.read_text())
+for key in ("VAULT_ADDR", "VAULT_TOKEN"):
+    value = data.get(key)
+    if isinstance(value, str) and value:
+        print(f'export {key}={shlex.quote(value)}')
+PY
+  })"
+}
+
+NIX_BUILD_ARGS=()
+if [[ -f "${VAULT_ENV_FILE}" ]]; then
+  load_generated_vault_env
+  NIX_BUILD_ARGS+=(--impure)
+fi
 
 require_command() {
   local command_name="$1"
@@ -125,7 +160,7 @@ EOF
 
 build_baseline() {
   log "Building baseline flake output for ${BASELINE_HOST}" >&2
-  nix build "${ROOT_DIR}#nixosConfigurations.${BASELINE_HOST}.config.system.build.toplevel"
+  nix build "${NIX_BUILD_ARGS[@]}" "${ROOT_DIR}#nixosConfigurations.${BASELINE_HOST}.config.system.build.toplevel"
   readlink -f "${ROOT_DIR}/result"
 }
 

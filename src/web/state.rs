@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::auth::{
-    self, CredentialStore, Credentials, ZaiCredentials, save_openai_oauth_credentials,
+    self, save_openai_oauth_credentials, CredentialStore, Credentials, ZaiCredentials,
 };
 use crate::runtime::RuntimeManager;
 use crate::store::{SharedStore, Store};
@@ -26,6 +26,7 @@ const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(120);
 #[cfg(feature = "testing")]
 const OPENAI_AUTH_MODE_ENV: &str = "KLEY_WEB_OPENAI_AUTH_MODE";
 const WEB_AUTH_AUTO_RESET_ENV: &str = "KLEY_WEB_AUTH_AUTO_RESET";
+const LOCAL_WEB_DEFAULT_PASSPHRASE: &str = "kley-dev-passphrase";
 #[cfg(feature = "testing")]
 const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -172,6 +173,20 @@ fn should_auto_reset_auth_storage() -> bool {
                 "1" | "true" | "yes" | "on"
             )
     )
+}
+
+fn ensure_local_web_auth_defaults() {
+    if std::env::var_os("KLEY_PASSPHRASE").is_some() {
+        return;
+    }
+
+    if std::env::var_os("VAULT_ADDR").is_some() && std::env::var_os("VAULT_TOKEN").is_some() {
+        return;
+    }
+
+    unsafe {
+        std::env::set_var("KLEY_PASSPHRASE", LOCAL_WEB_DEFAULT_PASSPHRASE);
+    }
 }
 
 fn looks_like_passphrase_mismatch_error(error: &anyhow::Error) -> bool {
@@ -547,6 +562,7 @@ impl WebAppState {
     }
 
     pub fn for_web_mode() -> Result<Self> {
+        ensure_local_web_auth_defaults();
         Ok(Self::from_store(Store::open()?))
     }
 
@@ -749,5 +765,51 @@ mod tests {
         remove_env("KLEY_AGE_MAX_WORK_FACTOR");
         remove_env("KLEY_PASSPHRASE");
         remove_env("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn local_web_auth_defaults_seed_dev_passphrase_without_vault() {
+        let _guard = env_lock().lock().unwrap();
+
+        remove_env("KLEY_PASSPHRASE");
+        remove_env("VAULT_ADDR");
+        remove_env("VAULT_TOKEN");
+
+        ensure_local_web_auth_defaults();
+
+        assert_eq!(
+            std::env::var("KLEY_PASSPHRASE").unwrap(),
+            LOCAL_WEB_DEFAULT_PASSPHRASE
+        );
+
+        remove_env("KLEY_PASSPHRASE");
+    }
+
+    #[test]
+    fn local_web_auth_defaults_do_not_override_explicit_auth_env() {
+        let _guard = env_lock().lock().unwrap();
+
+        set_env("KLEY_PASSPHRASE", "custom-passphrase");
+        remove_env("VAULT_ADDR");
+        remove_env("VAULT_TOKEN");
+
+        ensure_local_web_auth_defaults();
+
+        assert_eq!(
+            std::env::var("KLEY_PASSPHRASE").unwrap(),
+            "custom-passphrase"
+        );
+
+        remove_env("KLEY_PASSPHRASE");
+
+        set_env("VAULT_ADDR", "http://vault.example");
+        set_env("VAULT_TOKEN", "vault-token");
+
+        ensure_local_web_auth_defaults();
+
+        assert!(std::env::var("KLEY_PASSPHRASE").is_err());
+
+        remove_env("VAULT_ADDR");
+        remove_env("VAULT_TOKEN");
     }
 }

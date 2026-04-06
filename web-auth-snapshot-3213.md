@@ -1,0 +1,98 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - img "Kley icon" [ref=e5]
+    - generic [ref=e6]: Kley
+    - generic [ref=e8]: Bindery shell port
+    - generic [ref=e9]: idle
+    - generic [ref=e11]:
+      - generic [ref=e12]: workspace controls live
+      - button "Fork (UI-only)" [disabled] [ref=e13]
+      - button "Inspector drawer (UI-only)" [disabled] [ref=e14]
+  - generic [ref=e15]:
+    - generic [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: protocol
+        - generic [ref=e19]: v1
+      - generic [ref=e20]:
+        - generic [ref=e21]: version
+        - generic [ref=e22]: 0.1.0
+      - generic [ref=e23]:
+        - generic [ref=e24]: context
+        - generic [ref=e26]: 0% · 0/800,000 chars · no token sample
+        - generic [ref=e27]: "types: estimate unavailable"
+      - generic [ref=e28]:
+        - generic [ref=e29]: ram
+        - generic [ref=e30]: 24% · 14.7 GiB/60.4 GiB
+      - generic [ref=e31]:
+        - generic [ref=e32]: cpu
+        - generic [ref=e33]: 14% active
+      - generic [ref=e34]:
+        - generic [ref=e35]: disk
+        - generic [ref=e36]: 38% · 699 GiB/1.82 TiB
+      - generic [ref=e37]:
+        - generic [ref=e38]: timeline
+        - generic [ref=e39]: bindery visual shell
+    - generic [ref=e40]:
+      - generic [ref=e41]:
+        - generic [ref=e42]: Provider
+        - combobox "Provider" [ref=e43]:
+          - option "openai" [selected]
+          - option "zai"
+        - generic [ref=e44]: Model
+        - combobox "Model" [ref=e45]:
+          - option "gpt-5.3-codex-spark" [selected]
+          - option "gpt-5"
+          - option "gpt-4.1"
+        - button "Apply" [ref=e46]
+        - generic [ref=e47]: synced openai/gpt-5.3-codex-spark
+      - generic [ref=e48]:
+        - generic [ref=e49]: Login provider
+        - combobox "Login provider" [ref=e50]:
+          - option "openai" [selected]
+          - option "zai"
+        - button "Open browser login" [ref=e52]
+        - generic [ref=e53]: openai browser login required
+  - region "Timeline visual strip" [ref=e54]
+  - generic [ref=e60]:
+    - complementary [ref=e61]:
+      - generic [ref=e63]: Sessions
+      - button "Untitled session updated 4/5/2026, 11:52:47 PM" [ref=e107]:
+        - generic [ref=e108]: Untitled session
+        - generic [ref=e109]: updated 4/5/2026, 11:52:47 PM
+      - article [ref=e66]:
+        - generic [ref=e67]: Selected Session
+        - paragraph [ref=e68]: "status: active"
+        - paragraph [ref=e69]: "provider/model: openai/gpt-5.3-codex-spark"
+        - paragraph [ref=e70]: "created: 4/5/2026, 11:52:47 PM"
+        - paragraph [ref=e71]: "updated: 4/5/2026, 11:52:47 PM"
+    - main [ref=e72]:
+      - generic [ref=e73]:
+        - generic [ref=e74]:
+          - button "All" [pressed] [ref=e75] [cursor=pointer]
+          - button "Messages" [ref=e76] [cursor=pointer]
+          - button "Tools" [ref=e77] [cursor=pointer]
+          - generic [ref=e78]: UI
+        - generic [ref=e79]: "filters: backend feed + UI placeholder"
+      - generic [ref=e80]:
+        - generic [ref=e81]:
+          - generic [ref=e82]: Timeline feed
+          - generic [ref=e83]: message stream + grouped events
+        - article [ref=e110]:
+          - generic [ref=e111]: Transcript
+          - paragraph [ref=e112]: No messages yet.
+      - generic [ref=e89]:
+        - generic [ref=e90]: Prompt
+        - textbox "Prompt" [ref=e91]:
+          - /placeholder: Write a prompt...
+        - generic [ref=e92]:
+          - button "Send" [ref=e93]
+          - button "Abort" [disabled] [ref=e94]
+    - complementary [ref=e95]:
+      - generic [ref=e96]:
+        - generic [ref=e97]: Inspector
+        - generic [ref=e98]: live details
+      - article [ref=e113]:
+        - generic [ref=e114]: Tool Activity
+        - paragraph [ref=e115]: No tool events yet.
+      - generic [ref=e103]: Events
+      - paragraph [ref=e116]: hydrated 525c7374-f0c0-417c-915f-42aae5f6a5bc
