@@ -208,6 +208,18 @@ mod web {
         WebAppState::with_auth_service(store, auth_service)
     }
 
+    fn test_state_with_auth_service_and_public_origin(
+        auth_service: Arc<dyn WebAuthService>,
+        public_origin: Option<&str>,
+    ) -> WebAppState {
+        let store: SharedStore = Arc::new(StdMutex::new(Store::open_memory().unwrap()));
+        WebAppState::with_auth_service_and_public_origin(
+            store,
+            auth_service,
+            public_origin.map(str::to_string),
+        )
+    }
+
     fn test_state_with_mock_openai() -> WebAppState {
         test_state_with_auth_service(Arc::new(MockWebAuthService::default()))
     }
@@ -808,6 +820,62 @@ mod web {
         assert_eq!(logged_in_snapshot["auth"]["pending_openai_login"], false);
         assert_eq!(logged_in_snapshot["auth"]["openai_logged_in"], true);
         assert_eq!(logged_in_snapshot["auth"]["active_provider"], "openai");
+    }
+
+    #[tokio::test]
+    async fn openai_browser_login_start_rejects_non_loopback_ip_without_public_origin() {
+        let server = spawn_server_with_state(test_state_with_mock_openai())
+            .await
+            .unwrap();
+        let mut socket = connect_ws(server.addr).await;
+
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"auth.openai.start","request_id":"req-openai-start-bad-origin","redirect_origin":"http://192.168.4.111:8801"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let rejection = recv_json(&mut socket).await;
+        assert_eq!(rejection["type"], "response.error");
+        assert_eq!(rejection["request_id"], "req-openai-start-bad-origin");
+        assert_eq!(rejection["error"]["code"], "unsupported_auth_origin");
+        assert!(
+            rejection["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("KLEY_WEB_PUBLIC_ORIGIN")
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_browser_login_start_uses_configured_public_origin_for_remote_deployments() {
+        let server = spawn_server_with_state(test_state_with_auth_service_and_public_origin(
+            Arc::new(MockWebAuthService::default()),
+            Some("https://kley.example.com/app"),
+        ))
+        .await
+        .unwrap();
+        let mut socket = connect_ws(server.addr).await;
+
+        let _bootstrap = recv_json(&mut socket).await;
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"auth.openai.start","request_id":"req-openai-start-remote","redirect_origin":"http://192.168.4.111:8801"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = recv_json(&mut socket).await;
+        assert_eq!(ack["type"], "response.ok");
+        assert_eq!(ack["request_id"], "req-openai-start-remote");
+        assert_eq!(
+            ack["data"]["redirect_uri"],
+            "https://kley.example.com/auth/callback"
+        );
     }
 
     #[tokio::test]

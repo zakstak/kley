@@ -13,6 +13,7 @@ pub mod read_skill;
 pub mod report_status;
 pub mod shell;
 pub mod tool_call_telemetry;
+pub mod web_search;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -260,6 +261,7 @@ pub fn registry_with_lsp_service(
         lsp_service,
     )));
     reg.register(Box::new(read_skill::ReadSkillTool::new(project_dir)));
+    reg.register(Box::new(web_search::WebSearchTool));
     reg.register(Box::new(DelegateTaskTool));
     reg.register(Box::new(report_status::ReportStatusTool));
     reg
@@ -315,8 +317,7 @@ mod tests {
         assert_eq!(tools[0]["strict"], true);
     }
 
-    #[test]
-    fn default_registry_tool_schemas_match_strict_mode_requirements() {
+    pub(super) fn default_registry_tool_schemas_match_strict_mode_requirements_impl() {
         let reg = default_registry(std::env::temp_dir());
 
         for tool in reg.to_api_tools() {
@@ -348,8 +349,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn default_registry_has_builtins() {
+    pub(super) fn default_registry_has_builtins_impl() {
         let reg = default_registry(std::env::temp_dir());
         assert!(reg.get("shell").is_some());
         assert!(reg.get("read_file").is_some());
@@ -364,6 +364,41 @@ mod tests {
         assert!(reg.get("read_skill").is_some());
         assert!(reg.get("delegate_task").is_some());
         assert!(reg.get("report_status").is_some());
+        assert!(reg.get("web_search").is_some());
+    }
+
+    pub(super) fn default_registry_to_api_tools_contains_web_search_schema_impl() {
+        let reg = default_registry(std::env::temp_dir());
+        let api_tools = reg.to_api_tools();
+
+        let web_search_tool = api_tools
+            .iter()
+            .find(|tool| tool["name"] == "web_search")
+            .expect("web_search should be serialized to API tools");
+
+        assert_eq!(web_search_tool["strict"], true);
+
+        let parameters = web_search_tool["parameters"].as_object().unwrap();
+        assert_eq!(parameters["additionalProperties"], serde_json::json!(false));
+
+        let properties = parameters["properties"].as_object().unwrap();
+        assert_eq!(properties["query"]["type"], serde_json::json!("string"));
+        assert_eq!(
+            properties["max_results"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
+
+        let required = parameters["required"].as_array().unwrap();
+        assert!(
+            required
+                .iter()
+                .any(|value| value == &serde_json::json!("query"))
+        );
+        assert!(
+            required
+                .iter()
+                .any(|value| value == &serde_json::json!("max_results"))
+        );
     }
 
     #[test]
@@ -398,4 +433,22 @@ mod tests {
         assert_eq!(result.diagnostics[0].code, "tool.edit.stale_reference");
         assert!(!result.is_success());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn default_registry_tool_schemas_match_strict_mode_requirements() {
+    tests::default_registry_tool_schemas_match_strict_mode_requirements_impl();
+}
+
+#[cfg(test)]
+#[test]
+fn default_registry_has_builtins() {
+    tests::default_registry_has_builtins_impl();
+}
+
+#[cfg(test)]
+#[test]
+fn default_registry_to_api_tools_contains_web_search_schema() {
+    tests::default_registry_to_api_tools_contains_web_search_schema_impl();
 }

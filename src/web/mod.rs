@@ -34,7 +34,8 @@ pub async fn serve(config: WebConfig) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind web server on {}", config.bind_addr))?;
 
-    let state = WebAppState::for_web_mode().context("failed to initialize web state")?;
+    let state = WebAppState::for_web_mode(config.public_origin.clone())
+        .context("failed to initialize web state")?;
     state
         .runtime_manager
         .recover_bound_store_on_startup()

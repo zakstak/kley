@@ -26,6 +26,7 @@ const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(120);
 #[cfg(feature = "testing")]
 const OPENAI_AUTH_MODE_ENV: &str = "KLEY_WEB_OPENAI_AUTH_MODE";
 const WEB_AUTH_AUTO_RESET_ENV: &str = "KLEY_WEB_AUTH_AUTO_RESET";
+const LOCAL_WEB_DEFAULT_PASSPHRASE: &str = "kley-dev-passphrase";
 #[cfg(feature = "testing")]
 const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -172,6 +173,20 @@ fn should_auto_reset_auth_storage() -> bool {
                 "1" | "true" | "yes" | "on"
             )
     )
+}
+
+fn ensure_local_web_auth_defaults() {
+    if std::env::var_os("KLEY_PASSPHRASE").is_some() {
+        return;
+    }
+
+    if std::env::var_os("VAULT_ADDR").is_some() && std::env::var_os("VAULT_TOKEN").is_some() {
+        return;
+    }
+
+    unsafe {
+        std::env::set_var("KLEY_PASSPHRASE", LOCAL_WEB_DEFAULT_PASSPHRASE);
+    }
 }
 
 fn looks_like_passphrase_mismatch_error(error: &anyhow::Error) -> bool {
@@ -508,6 +523,7 @@ fn default_resource_usage_service() -> Arc<dyn WebResourceUsageService> {
 pub struct WebAppState {
     pub store: SharedStore,
     pub runtime_manager: Arc<RuntimeManager>,
+    openai_public_origin: Option<String>,
     auth_service: Arc<dyn WebAuthService>,
     resource_usage_service: Arc<dyn WebResourceUsageService>,
     pending_openai_logins: Arc<Mutex<HashMap<String, PendingOpenAiLogin>>>,
@@ -517,17 +533,32 @@ impl WebAppState {
     pub fn new(store: SharedStore) -> Self {
         Self::with_services(
             store,
+            None,
             default_auth_service(),
             default_resource_usage_service(),
         )
     }
 
     pub fn with_auth_service(store: SharedStore, auth_service: Arc<dyn WebAuthService>) -> Self {
-        Self::with_services(store, auth_service, default_resource_usage_service())
+        Self::with_services(store, None, auth_service, default_resource_usage_service())
+    }
+
+    pub fn with_auth_service_and_public_origin(
+        store: SharedStore,
+        auth_service: Arc<dyn WebAuthService>,
+        openai_public_origin: Option<String>,
+    ) -> Self {
+        Self::with_services(
+            store,
+            openai_public_origin,
+            auth_service,
+            default_resource_usage_service(),
+        )
     }
 
     pub fn with_services(
         store: SharedStore,
+        openai_public_origin: Option<String>,
         auth_service: Arc<dyn WebAuthService>,
         resource_usage_service: Arc<dyn WebResourceUsageService>,
     ) -> Self {
@@ -536,6 +567,7 @@ impl WebAppState {
         Self {
             store,
             runtime_manager,
+            openai_public_origin,
             auth_service,
             resource_usage_service,
             pending_openai_logins: Arc::new(Mutex::new(HashMap::new())),
@@ -546,8 +578,18 @@ impl WebAppState {
         Self::new(Arc::new(Mutex::new(store)))
     }
 
-    pub fn for_web_mode() -> Result<Self> {
-        Ok(Self::from_store(Store::open()?))
+    pub fn for_web_mode(openai_public_origin: Option<String>) -> Result<Self> {
+        ensure_local_web_auth_defaults();
+        Ok(Self::with_services(
+            Arc::new(Mutex::new(Store::open()?)),
+            openai_public_origin,
+            default_auth_service(),
+            default_resource_usage_service(),
+        ))
+    }
+
+    pub fn openai_public_origin(&self) -> Option<&str> {
+        self.openai_public_origin.as_deref()
     }
 
     pub fn auth_summary(&self, controller_id: &str) -> AuthStateSnapshot {
@@ -749,5 +791,51 @@ mod tests {
         remove_env("KLEY_AGE_MAX_WORK_FACTOR");
         remove_env("KLEY_PASSPHRASE");
         remove_env("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn local_web_auth_defaults_seed_dev_passphrase_without_vault() {
+        let _guard = env_lock().lock().unwrap();
+
+        remove_env("KLEY_PASSPHRASE");
+        remove_env("VAULT_ADDR");
+        remove_env("VAULT_TOKEN");
+
+        ensure_local_web_auth_defaults();
+
+        assert_eq!(
+            std::env::var("KLEY_PASSPHRASE").unwrap(),
+            LOCAL_WEB_DEFAULT_PASSPHRASE
+        );
+
+        remove_env("KLEY_PASSPHRASE");
+    }
+
+    #[test]
+    fn local_web_auth_defaults_do_not_override_explicit_auth_env() {
+        let _guard = env_lock().lock().unwrap();
+
+        set_env("KLEY_PASSPHRASE", "custom-passphrase");
+        remove_env("VAULT_ADDR");
+        remove_env("VAULT_TOKEN");
+
+        ensure_local_web_auth_defaults();
+
+        assert_eq!(
+            std::env::var("KLEY_PASSPHRASE").unwrap(),
+            "custom-passphrase"
+        );
+
+        remove_env("KLEY_PASSPHRASE");
+
+        set_env("VAULT_ADDR", "http://vault.example");
+        set_env("VAULT_TOKEN", "vault-token");
+
+        ensure_local_web_auth_defaults();
+
+        assert!(std::env::var("KLEY_PASSPHRASE").is_err());
+
+        remove_env("VAULT_ADDR");
+        remove_env("VAULT_TOKEN");
     }
 }

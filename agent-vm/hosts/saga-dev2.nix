@@ -7,9 +7,14 @@
     address = "10.0.0.51";
     prefixLength = 24;
   } ];
+  networking.interfaces.eth0.ipv4.routes = [ {
+    address = "10.0.1.0";
+    prefixLength = 24;
+    via = "10.0.0.254";
+  } ];
   networking.defaultGateway = "10.0.0.1";
   networking.nameservers = [ "1.1.1.1" "8.8.8.8" ];
-  networking.firewall.allowedTCPPorts = [ 3000 ];
+  networking.firewall.allowedTCPPorts = [ 3000 3210 ];
 
   services.qemuGuest.enable = true;
 
@@ -34,5 +39,6 @@
   };
 
   kley.agentVm.promotionLane = "canary";
+  kley.agentVm.webPublicOrigin = "http://10.0.0.51:3210";
   system.stateVersion = "24.11";
 }

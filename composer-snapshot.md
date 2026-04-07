@@ -1,0 +1,100 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - img "Kley icon" [ref=e5]
+    - generic [ref=e6]: Kley
+    - generic [ref=e8]: Bindery shell port
+    - generic [ref=e9]: idle
+    - generic [ref=e11]:
+      - generic [ref=e12]: workspace controls live
+      - button "Fork (UI-only)" [disabled] [ref=e13]
+      - button "Inspector drawer (UI-only)" [disabled] [ref=e14]
+  - generic [ref=e15]:
+    - generic [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: protocol
+        - generic [ref=e19]: v1
+      - generic [ref=e20]:
+        - generic [ref=e21]: version
+        - generic [ref=e22]: 0.1.0
+      - generic [ref=e23]:
+        - generic [ref=e24]: context
+        - generic [ref=e26]: 0% · 0/800,000 chars · no token sample
+        - generic [ref=e27]: "types: estimate unavailable"
+      - generic [ref=e28]:
+        - generic [ref=e29]: ram
+        - generic [ref=e30]: 18% · 10.9 GiB/60.4 GiB
+      - generic [ref=e31]:
+        - generic [ref=e32]: cpu
+        - generic [ref=e33]: 15% active
+      - generic [ref=e34]:
+        - generic [ref=e35]: disk
+        - generic [ref=e36]: 38% · 699 GiB/1.82 TiB
+      - generic [ref=e37]:
+        - generic [ref=e38]: timeline
+        - generic [ref=e39]: bindery visual shell
+    - generic [ref=e40]:
+      - generic [ref=e41]:
+        - generic [ref=e42]: Provider
+        - combobox "Provider" [ref=e43]:
+          - option "openai" [selected]
+          - option "zai"
+        - generic [ref=e44]: Model
+        - combobox "Model" [ref=e45]:
+          - option "gpt-5.3-codex-spark" [selected]
+          - option "gpt-5"
+          - option "gpt-4.1"
+        - button "Apply" [ref=e46]
+        - generic [ref=e47]: synced openai/gpt-5.3-codex-spark
+      - generic [ref=e48]:
+        - generic [ref=e49]: Login provider
+        - combobox "Login provider" [ref=e50]:
+          - option "openai" [selected]
+          - option "zai"
+        - button "Open browser login" [disabled] [ref=e52]
+        - generic [ref=e53]: "auth storage unavailable: web auth requires
+          KLEY_PASSPHRASE to access the credential store, or
+          VAULT_ADDR/VAULT_TOKEN for Vault-backed credentials"
+  - region "Timeline visual strip" [ref=e54]
+  - generic [ref=e60]:
+    - complementary [ref=e61]:
+      - generic [ref=e63]: Sessions
+      - button "Untitled session updated 4/5/2026, 11:48:21 PM" [ref=e65]:
+        - generic [ref=e66]: Untitled session
+        - generic [ref=e67]: updated 4/5/2026, 11:48:21 PM
+      - article [ref=e68]:
+        - generic [ref=e69]: Selected Session
+        - paragraph [ref=e70]: "status: active"
+        - paragraph [ref=e71]: "provider/model: openai/gpt-5.3-codex-spark"
+        - paragraph [ref=e72]: "created: 4/5/2026, 11:48:21 PM"
+        - paragraph [ref=e73]: "updated: 4/5/2026, 11:48:21 PM"
+    - main [ref=e74]:
+      - generic [ref=e75]:
+        - generic [ref=e76]:
+          - button "All" [pressed] [ref=e77] [cursor=pointer]
+          - button "Messages" [ref=e78] [cursor=pointer]
+          - button "Tools" [ref=e79] [cursor=pointer]
+          - generic [ref=e80]: UI
+        - generic [ref=e81]: "filters: backend feed + UI placeholder"
+      - generic [ref=e82]:
+        - generic [ref=e83]:
+          - generic [ref=e84]: Timeline feed
+          - generic [ref=e85]: message stream + grouped events
+        - article [ref=e87]:
+          - generic [ref=e88]: Transcript
+          - paragraph [ref=e89]: No messages yet.
+      - generic [ref=e91]:
+        - generic [ref=e92]: Prompt
+        - textbox "Prompt" [ref=e93]:
+          - /placeholder: Write a prompt...
+        - generic [ref=e94]:
+          - button "Send" [ref=e95]
+          - button "Abort" [disabled] [ref=e96]
+    - complementary [ref=e97]:
+      - generic [ref=e98]:
+        - generic [ref=e99]: Inspector
+        - generic [ref=e100]: live details
+      - article [ref=e102]:
+        - generic [ref=e103]: Tool Activity
+        - paragraph [ref=e104]: No tool events yet.
+      - generic [ref=e105]: Events
+      - paragraph [ref=e107]: hydrated dc0e4d20-8998-4cd1-96ea-73492aeceea9

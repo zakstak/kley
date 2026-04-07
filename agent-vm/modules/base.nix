@@ -1,6 +1,24 @@
 { config, lib, promotionContract, ... }:
 let
   hostName = config.networking.hostName or "unknown";
+  operatorAuthorizedKeyPath = ../.generated/operator-authorized-key.pub;
+  operatorAuthorizedKeys =
+    if builtins.pathExists operatorAuthorizedKeyPath then
+      let
+        key = lib.strings.removeSuffix "\n" (builtins.readFile operatorAuthorizedKeyPath);
+      in
+      lib.optional (key != "") key
+    else
+      [ ];
+  vaultEnvironment = lib.filterAttrs
+    (name: value:
+      builtins.elem name [ "VAULT_ADDR" "VAULT_TOKEN" ]
+      && builtins.isString value
+      && value != "")
+    {
+      VAULT_ADDR = builtins.getEnv "VAULT_ADDR";
+      VAULT_TOKEN = builtins.getEnv "VAULT_TOKEN";
+    };
   expectedLane =
     if hostName == promotionContract.canaryHost then "canary"
     else if hostName == promotionContract.baselineHost then "baseline"
@@ -8,6 +26,7 @@ let
   buildMetadata = {
     hostName = hostName;
     promotionLane = config.kley.agentVm.promotionLane;
+    webPublicOrigin = config.kley.agentVm.webPublicOrigin;
     promotion = {
       canaryHost = promotionContract.canaryHost;
       baselineHost = promotionContract.baselineHost;
@@ -24,6 +43,15 @@ in {
       type = lib.types.enum [ "baseline" "canary" ];
       default = "baseline";
       description = "Promotion lane for this host (baseline or canary).";
+    };
+
+    webPublicOrigin = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Public origin that Kley web should use when constructing OpenAI browser
+        login redirect URIs on this host.
+      '';
     };
 
     buildMetadata = lib.mkOption {
@@ -49,8 +77,10 @@ in {
       isNormalUser = true;
       description = "Agent VM machine user";
       extraGroups = [ "wheel" ];
-      openssh.authorizedKeys.keys = lib.mkDefault [ ];
+      openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
     };
+
+    users.users.root.openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
 
     services.openssh.enable = lib.mkDefault true;
     services.openssh.settings = {
@@ -70,6 +100,9 @@ in {
 
     kley.agentVm.buildMetadata = buildMetadata;
     system.configurationRevision = promotionContract.source.exactRevision;
+    environment.variables = vaultEnvironment // lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
+      KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
+    };
     environment.etc."kley-agent-vm-build.json".text = builtins.toJSON buildMetadata;
   };
 }

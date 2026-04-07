@@ -70,6 +70,19 @@ To launch the web UI instead:
 
 Then open `http://127.0.0.1:3210` in a browser.
 
+For remote web deployments, configure a stable public callback origin for OpenAI
+browser login and open Kley through that same origin:
+
+```bash
+KLEY_WEB_PUBLIC_ORIGIN="https://kley.example.com" ./kley-run.sh web --bind 0.0.0.0:3210
+# or
+cargo run --bin kley -- web --bind 0.0.0.0:3210 --public-origin https://kley.example.com
+```
+
+The public origin must match the browser URL you use for Kley and the redirect
+URI registered with OpenAI (`https://kley.example.com/auth/callback`). Raw LAN
+or private IP browser origins are not reliable for OAuth.
+
 ## What you can do with it
 
 - Start interactive coding-agent sessions in the terminal.
@@ -100,6 +113,7 @@ cargo run --bin kley -- chat --autonomous --prompt "Improve repo ergonomics"
 # Run the web server
 cargo run --bin kley -- web
 cargo run --bin kley -- web --bind 127.0.0.1:3000
+cargo run --bin kley -- web --bind 0.0.0.0:3210 --public-origin https://kley.example.com
 
 # Run environment checks
 cargo run --bin kley -- preflight
@@ -118,6 +132,16 @@ you use `cargo run` locally.
 
 In interactive mode, the default is `ask`. In autonomous mode, the default is
 `auto`, and `ask` is not allowed.
+
+## Web search tool
+
+`web_search` is always included in the runtime tool list and the provider tool
+payload. To enable live search results, set `TAVILY_API_KEY` before starting
+`chat` or `web`.
+
+V1 is search-only. The tool returns a normalized JSON string with `status`,
+`query`, `summary`, `citations`, and `message`; without `TAVILY_API_KEY`, it
+returns a structured `unavailable` result instead of failing the turn.
 
 ## Architecture
 
@@ -158,14 +182,16 @@ binary, depending on what is available.
 ## Agent VM rolling update lane
 
 The repo-owned agent VM baseline lives under `agent-vm/` and uses a single
-canary-first promotion flow: build/apply `saga-dev2` first, validate that same
-checkout, then promote `saga-dev` from the same revision and `flake.lock`.
+canary-first promotion flow: a normal deploy targets `saga-dev`, stages and
+validates the same checkout on `saga-dev2` first, then promotes `saga-dev` from
+the same revision and `flake.lock`.
 
 Every VM build records the exact resolved checkout revision in
 `system.configurationRevision` and `/etc/kley-agent-vm-build.json`, so a default
 `HEAD` workflow becomes an exact build record instead of a floating label. See
 [`agent-vm/README.md`](./agent-vm/README.md) for the promotion contract checks,
-the local-checkout `saga-dev2` apply sequence (`agent@saga-dev2`), and the
+the explicit deploy wrapper target selection, the local-checkout `saga-dev2`
+apply sequence (`agent@saga-dev2`) used during canary validation, and the
 post-apply kley smoke lane that must pass on canary before `saga-dev` promotion.
 The same doc also defines the failed-update recovery path:
 `agent-vm/scripts/recover-canary-after-failed-update.sh` for runtime generation

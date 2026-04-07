@@ -234,7 +234,7 @@ const LSP_REQUIREMENTS: [LspRequirement; 6] = [
     },
     LspRequirement {
         id: "pyright",
-        program: "pyright",
+        program: "pyright-langserver",
         args: &["--version"],
     },
 ];
@@ -596,11 +596,11 @@ pub mod preflight_test_support {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
 
-    pub use super::{CommandOutput, CommandRunner, CommandSpec};
     pub use super::{
-        LspCheckResult, LspRequirement, command_for_lsp_requirement, lsp_requirements,
-        run_required_lsp_checks_with_runner,
+        command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
+        LspCheckResult, LspRequirement,
     };
+    pub use super::{CommandOutput, CommandRunner, CommandSpec};
 
     pub struct FakeRunner {
         responses: RefCell<HashMap<String, VecDeque<CommandOutput>>>,
@@ -833,7 +833,7 @@ mod tests {
                 CommandOutput::success(),
             ),
             (
-                command("pyright").arg("--version"),
+                command("pyright-langserver").arg("--version"),
                 CommandOutput::success(),
             ),
             (

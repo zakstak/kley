@@ -25,3 +25,4 @@ playwright-report/
 test-results/
 .playwright/
 .playwright-mcp/
+agent-vm/.generated/

@@ -79,6 +79,9 @@ enum Command {
     Web {
         #[arg(long)]
         bind: Option<String>,
+
+        #[arg(long)]
+        public_origin: Option<String>,
     },
     Task {
         #[command(subcommand)]
@@ -250,8 +253,12 @@ async fn run() -> Result<()> {
 
             let _ = event_thread.join();
         }
-        Command::Web { bind } => {
-            let config = kley::web::config::WebConfig::from_bind_arg(bind.as_deref())?;
+        Command::Web {
+            bind,
+            public_origin,
+        } => {
+            let config =
+                kley::web::config::WebConfig::from_args(bind.as_deref(), public_origin.as_deref())?;
             kley::web::serve(config).await?;
         }
         Command::Task { command } => run_task_command(command).await?,

@@ -406,3 +406,17 @@
   `terminate_child_process` with `matches!` and bundled the request/session
   identifiers so `RuntimeManager::execute_reserved_prompt` now needs one fewer
   argument. Both fixes kept behavior intact while making the lint tree clean.
+
+## 2026-04-06 Task 9 enforcement repair
+
+- Shifted the preflight LSP requirement for Python to
+  `pyright-langserver --version` so the strict runtime command surface matches
+  the v1 catalog and the VM baseline's `command -v pyright-langserver`
+  expectation; the helper still reports `id: "pyright"` while pointing at the
+  actual server binary and the fake-runner tests now mimic the updated command.
+- Baseline parity already listed `pyright-langserver`, so no manifest edits were
+  needed beyond ensuring the preflight check no longer invokes the `pyright` CLI
+  binary.
+- Verification: `cargo test preflight_requires_all_v1_lsp_servers -- --exact`,
+  `cargo test preflight_reports_each_missing_lsp_binary_by_name -- --exact`,
+  `bash tests/vm-baseline-check.sh`.
