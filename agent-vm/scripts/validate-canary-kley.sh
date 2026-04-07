@@ -13,8 +13,21 @@ REMOTE_KLEY_STAGE_ROOT="${REMOTE_KLEY_STAGE_ROOT:-/tmp/kley-canary-${CANARY_HOST
 KLEY_WEB_BIND="${KLEY_WEB_BIND:-127.0.0.1:3210}"
 KLEY_WEB_HEALTH_URL="http://${KLEY_WEB_BIND}/healthz"
 KLEY_WEB_ROOT_URL="http://${KLEY_WEB_BIND}/"
+KLEY_WEB_PUBLIC_ORIGIN="${KLEY_WEB_PUBLIC_ORIGIN:-}"
 KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH:-/tmp/kley-canary-web.log}"
 STAGED_REMOTE_CHECKOUT=0
+
+remote_env=(
+  KLEY_REPO_ROOT="${REMOTE_KLEY_REPO_ROOT}"
+  KLEY_WEB_BIND="${KLEY_WEB_BIND}"
+  KLEY_WEB_HEALTH_URL="${KLEY_WEB_HEALTH_URL}"
+  KLEY_WEB_ROOT_URL="${KLEY_WEB_ROOT_URL}"
+  KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH}"
+)
+
+if [[ -n "${KLEY_WEB_PUBLIC_ORIGIN}" ]]; then
+  remote_env+=(KLEY_WEB_PUBLIC_ORIGIN="${KLEY_WEB_PUBLIC_ORIGIN}")
+fi
 
 load_generated_vault_env() {
   if [[ ! -f "${VAULT_ENV_FILE}" ]]; then
@@ -72,6 +85,7 @@ Environment overrides:
   REMOTE_KLEY_REPO_ROOT  Existing remote checkout path (default: stage local checkout to a temp dir)
   REMOTE_KLEY_STAGE_ROOT Temp dir used when staging the local checkout remotely
   KLEY_WEB_BIND          Web bind address for the smoke run (default: 127.0.0.1:3210)
+  KLEY_WEB_PUBLIC_ORIGIN Public origin used for OpenAI web auth redirects
   KLEY_WEB_LOG_PATH      Remote log path for the temporary web process
 EOF
   exit 0
@@ -118,11 +132,7 @@ EOF
 
 echo "[3/4] Running web smoke via ./kley-run.sh web --bind ${KLEY_WEB_BIND}"
 ssh "${REMOTE_TARGET}" -- env \
-  KLEY_REPO_ROOT="${REMOTE_KLEY_REPO_ROOT}" \
-  KLEY_WEB_BIND="${KLEY_WEB_BIND}" \
-  KLEY_WEB_HEALTH_URL="${KLEY_WEB_HEALTH_URL}" \
-  KLEY_WEB_ROOT_URL="${KLEY_WEB_ROOT_URL}" \
-  KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH}" \
+  "${remote_env[@]}" \
   bash -s <<'EOF'
 set -euo pipefail
 

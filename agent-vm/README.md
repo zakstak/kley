@@ -175,6 +175,7 @@ Optional overrides for the same canary lane:
 - `REMOTE_KLEY_REPO_ROOT=/path/to/existing/remote/kley`
 - `REMOTE_KLEY_STAGE_ROOT=/tmp/kley-canary-saga-dev2-12345`
 - `KLEY_WEB_BIND=127.0.0.1:3210`
+- `KLEY_WEB_PUBLIC_ORIGIN=http://10.0.0.51:3210`
 
 ## Rollback and recovery flow for failed canary updates (`saga-dev2`)
 

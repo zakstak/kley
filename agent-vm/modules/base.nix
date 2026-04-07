@@ -26,6 +26,7 @@ let
   buildMetadata = {
     hostName = hostName;
     promotionLane = config.kley.agentVm.promotionLane;
+    webPublicOrigin = config.kley.agentVm.webPublicOrigin;
     promotion = {
       canaryHost = promotionContract.canaryHost;
       baselineHost = promotionContract.baselineHost;
@@ -42,6 +43,15 @@ in {
       type = lib.types.enum [ "baseline" "canary" ];
       default = "baseline";
       description = "Promotion lane for this host (baseline or canary).";
+    };
+
+    webPublicOrigin = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Public origin that Kley web should use when constructing OpenAI browser
+        login redirect URIs on this host.
+      '';
     };
 
     buildMetadata = lib.mkOption {
@@ -90,7 +100,9 @@ in {
 
     kley.agentVm.buildMetadata = buildMetadata;
     system.configurationRevision = promotionContract.source.exactRevision;
-    environment.variables = vaultEnvironment;
+    environment.variables = vaultEnvironment // lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
+      KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
+    };
     environment.etc."kley-agent-vm-build.json".text = builtins.toJSON buildMetadata;
   };
 }

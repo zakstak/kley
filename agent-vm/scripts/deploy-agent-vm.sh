@@ -9,6 +9,7 @@ BASELINE_HOST="${BASELINE_HOST:-saga-dev}"
 AGENT_USER="${AGENT_USER:-agent}"
 VAULT_ENV_FILE="${ROOT_DIR}/agent-vm/.generated/vault-environment.json"
 KLEY_WEB_BIND="${KLEY_WEB_BIND:-127.0.0.1:3210}"
+KLEY_WEB_PUBLIC_ORIGIN="${KLEY_WEB_PUBLIC_ORIGIN:-}"
 KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH:-/tmp/kley-canary-web.log}"
 REMOTE_STAGE_ROOT="${REMOTE_STAGE_ROOT:-/tmp/kley-canary-${CANARY_HOST}-prestaged}"
 PROXMOX_HOST="${PROXMOX_HOST:-saga-proxmox}"
@@ -34,6 +35,7 @@ Environment overrides:
   BASELINE_HOST        Baseline flake host identity (default: saga-dev)
   AGENT_USER           Agent SSH user for repo-native scripts (default: agent)
   KLEY_WEB_BIND        Web smoke bind address (default: 127.0.0.1:3210)
+  KLEY_WEB_PUBLIC_ORIGIN Public origin used for OpenAI web auth redirects
   KLEY_WEB_LOG_PATH    Remote log path for web smoke
   REMOTE_STAGE_ROOT    Remote path used for explicit canary prestaging
   PROXMOX_HOST         Proxmox SSH target used for Periscope verification
@@ -128,6 +130,20 @@ EOF
 
 trap prestaged_cleanup EXIT
 
+validate_env=(
+  REMOTE_KLEY_REPO_ROOT="${REMOTE_STAGE_ROOT}"
+  KLEY_REPO_ROOT="${ROOT_DIR}"
+  CANARY_HOST="${CANARY_HOST}"
+  FLAKE_HOST="${CANARY_HOST}"
+  AGENT_USER="${AGENT_USER}"
+  KLEY_WEB_BIND="${KLEY_WEB_BIND}"
+  KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH}"
+)
+
+if [[ -n "${KLEY_WEB_PUBLIC_ORIGIN}" ]]; then
+  validate_env+=(KLEY_WEB_PUBLIC_ORIGIN="${KLEY_WEB_PUBLIC_ORIGIN}")
+fi
+
 prestaged_validate_canary() {
   local canary_host="${CANARY_HOST}"
 
@@ -148,13 +164,8 @@ EOF
     "${ROOT_DIR}/" "${canary_host}:${REMOTE_STAGE_ROOT}/"
 
   log "Running canary validator against explicit remote checkout"
-  REMOTE_KLEY_REPO_ROOT="${REMOTE_STAGE_ROOT}" \
-    KLEY_REPO_ROOT="${ROOT_DIR}" \
-    CANARY_HOST="${canary_host}" \
-    FLAKE_HOST="${canary_host}" \
-    AGENT_USER="${AGENT_USER}" \
-    KLEY_WEB_BIND="${KLEY_WEB_BIND}" \
-    KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH}" \
+  env \
+    "${validate_env[@]}" \
     "${ROOT_DIR}/agent-vm/scripts/validate-canary-kley.sh"
 }
 
