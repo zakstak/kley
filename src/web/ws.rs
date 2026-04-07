@@ -655,12 +655,63 @@ async fn handle_socket(
                         request_id,
                         redirect_origin,
                     } => {
-                        let redirect_uri = redirect_origin
-                            .as_deref()
-                            .and_then(build_web_openai_redirect_uri)
-                            .unwrap_or_else(|| {
-                                "http://localhost:1455/auth/callback".to_string()
-                            });
+                        let redirect_uri = match state.openai_public_origin() {
+                            Some(origin) => match build_configured_web_openai_redirect_uri(origin) {
+                                Ok(redirect_uri) => redirect_uri,
+                                Err(message) => {
+                                    if send_response(
+                                        &mut socket,
+                                        WebResponse::Error {
+                                            request_id,
+                                            error: ResponseError {
+                                                code: web_error_code::UNSUPPORTED_AUTH_ORIGIN
+                                                    .to_string(),
+                                                message,
+                                                details: Some(json!({
+                                                    "provider": "openai",
+                                                    "configured_origin": origin,
+                                                })),
+                                            },
+                                        },
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            },
+                            None => match redirect_origin.as_deref() {
+                                Some(origin) => match build_client_web_openai_redirect_uri(origin) {
+                                    Ok(redirect_uri) => redirect_uri,
+                                    Err(message) => {
+                                        if send_response(
+                                            &mut socket,
+                                            WebResponse::Error {
+                                                request_id,
+                                                error: ResponseError {
+                                                    code: web_error_code::UNSUPPORTED_AUTH_ORIGIN
+                                                        .to_string(),
+                                                    message,
+                                                    details: Some(json!({
+                                                        "provider": "openai",
+                                                        "origin": origin,
+                                                    })),
+                                                },
+                                            },
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                },
+                                None => "http://localhost:1455/auth/callback".to_string(),
+                            },
+                        };
 
                         match state.start_openai_login(&controller_id, &redirect_uri) {
                             Ok(authorize_url) => {
@@ -1388,16 +1439,114 @@ async fn handle_socket(
         .release_controller(&active_session.id, &controller_id);
 }
 
-fn build_web_openai_redirect_uri(origin: &str) -> Option<String> {
-    let mut url = reqwest::Url::parse(origin).ok()?;
+fn parse_web_openai_origin(origin: &str) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(origin).map_err(|_| {
+        "OpenAI browser login requires a valid web origin (for example https://kley.example.com or http://127.0.0.1:3210)."
+            .to_string()
+    })?;
     match url.scheme() {
         "http" | "https" => {}
-        _ => return None,
+        _ => {
+            return Err(
+                "OpenAI browser login requires an http:// or https:// web origin.".to_string(),
+            );
+        }
     }
-    url.set_path("/auth/callback");
+
+    if url.host_str().is_none() {
+        return Err("OpenAI browser login requires a web origin with a hostname.".to_string());
+    }
+    url.set_path("");
     url.set_query(None);
     url.set_fragment(None);
-    Some(url.to_string())
+    Ok(url)
+}
+
+fn build_configured_web_openai_redirect_uri(origin: &str) -> Result<String, String> {
+    let mut url = parse_web_openai_origin(origin)?;
+    url.set_path("/auth/callback");
+    Ok(url.to_string())
+}
+
+fn build_client_web_openai_redirect_uri(origin: &str) -> Result<String, String> {
+    let mut url = parse_web_openai_origin(origin)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "OpenAI browser login requires a web origin with a hostname.".to_string())?;
+
+    if matches!(host, "0.0.0.0" | "::") {
+        return Err(format!(
+            "OpenAI browser login requires opening Kley through a real callback origin. Use http://127.0.0.1:{}/ or http://localhost:{}/ locally, or configure KLEY_WEB_PUBLIC_ORIGIN (or pass --public-origin) for a remote deployment.",
+            url.port_or_known_default().unwrap_or(3210),
+            url.port_or_known_default().unwrap_or(3210)
+        ));
+    }
+
+    if host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| !ip.is_loopback())
+    {
+        return Err(format!(
+            "OpenAI browser login from a raw IP origin is not reliable. Configure KLEY_WEB_PUBLIC_ORIGIN (or pass --public-origin) to the public HTTPS origin registered for OpenAI, then open Kley through that origin instead of {origin}."
+        ));
+    }
+
+    url.set_path("/auth/callback");
+    Ok(url.to_string())
+}
+
+#[allow(clippy::items_after_test_module)]
+#[cfg(test)]
+mod tests {
+    use super::{build_client_web_openai_redirect_uri, build_configured_web_openai_redirect_uri};
+
+    #[test]
+    fn client_web_openai_redirect_uri_accepts_loopback_hosts() {
+        assert_eq!(
+            build_client_web_openai_redirect_uri("http://127.0.0.1:3210")
+                .expect("loopback origin should be accepted"),
+            "http://127.0.0.1:3210/auth/callback"
+        );
+        assert_eq!(
+            build_client_web_openai_redirect_uri("http://localhost:3210")
+                .expect("localhost origin should be accepted"),
+            "http://localhost:3210/auth/callback"
+        );
+    }
+
+    #[test]
+    fn client_web_openai_redirect_uri_accepts_ipv6_loopback_hosts() {
+        assert_eq!(
+            build_client_web_openai_redirect_uri("http://[::1]:3210")
+                .expect("ipv6 loopback origin should be accepted"),
+            "http://[::1]:3210/auth/callback"
+        );
+    }
+
+    #[test]
+    fn client_web_openai_redirect_uri_rejects_raw_non_loopback_ips() {
+        let error = build_client_web_openai_redirect_uri("http://192.168.4.111:8801")
+            .expect_err("LAN host should be rejected");
+        assert!(error.contains("KLEY_WEB_PUBLIC_ORIGIN"));
+        assert!(error.contains("8801"));
+    }
+
+    #[test]
+    fn client_web_openai_redirect_uri_rejects_wildcard_bind_hosts() {
+        let error = build_client_web_openai_redirect_uri("http://0.0.0.0:3210")
+            .expect_err("wildcard bind origin should be rejected");
+        assert!(error.contains("127.0.0.1:3210"));
+        assert!(error.contains("KLEY_WEB_PUBLIC_ORIGIN"));
+    }
+
+    #[test]
+    fn configured_web_openai_redirect_uri_accepts_remote_public_origin() {
+        assert_eq!(
+            build_configured_web_openai_redirect_uri("https://kley.example.com/app")
+                .expect("configured public origin should be accepted"),
+            "https://kley.example.com/auth/callback"
+        );
+    }
 }
 
 async fn next_runtime_event(

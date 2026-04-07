@@ -6,7 +6,7 @@ use axum::{
 use super::{callback, mock, state::WebAppState, ui, ws};
 
 pub fn app() -> Router {
-    let state = WebAppState::for_web_mode().expect("web state should initialize");
+    let state = WebAppState::for_web_mode(None).expect("web state should initialize");
     app_with_state(state)
 }
 

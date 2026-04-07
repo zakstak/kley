@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::auth::{
-    self, save_openai_oauth_credentials, CredentialStore, Credentials, ZaiCredentials,
+    self, CredentialStore, Credentials, ZaiCredentials, save_openai_oauth_credentials,
 };
 use crate::runtime::RuntimeManager;
 use crate::store::{SharedStore, Store};
@@ -523,6 +523,7 @@ fn default_resource_usage_service() -> Arc<dyn WebResourceUsageService> {
 pub struct WebAppState {
     pub store: SharedStore,
     pub runtime_manager: Arc<RuntimeManager>,
+    openai_public_origin: Option<String>,
     auth_service: Arc<dyn WebAuthService>,
     resource_usage_service: Arc<dyn WebResourceUsageService>,
     pending_openai_logins: Arc<Mutex<HashMap<String, PendingOpenAiLogin>>>,
@@ -532,17 +533,32 @@ impl WebAppState {
     pub fn new(store: SharedStore) -> Self {
         Self::with_services(
             store,
+            None,
             default_auth_service(),
             default_resource_usage_service(),
         )
     }
 
     pub fn with_auth_service(store: SharedStore, auth_service: Arc<dyn WebAuthService>) -> Self {
-        Self::with_services(store, auth_service, default_resource_usage_service())
+        Self::with_services(store, None, auth_service, default_resource_usage_service())
+    }
+
+    pub fn with_auth_service_and_public_origin(
+        store: SharedStore,
+        auth_service: Arc<dyn WebAuthService>,
+        openai_public_origin: Option<String>,
+    ) -> Self {
+        Self::with_services(
+            store,
+            openai_public_origin,
+            auth_service,
+            default_resource_usage_service(),
+        )
     }
 
     pub fn with_services(
         store: SharedStore,
+        openai_public_origin: Option<String>,
         auth_service: Arc<dyn WebAuthService>,
         resource_usage_service: Arc<dyn WebResourceUsageService>,
     ) -> Self {
@@ -551,6 +567,7 @@ impl WebAppState {
         Self {
             store,
             runtime_manager,
+            openai_public_origin,
             auth_service,
             resource_usage_service,
             pending_openai_logins: Arc::new(Mutex::new(HashMap::new())),
@@ -561,9 +578,18 @@ impl WebAppState {
         Self::new(Arc::new(Mutex::new(store)))
     }
 
-    pub fn for_web_mode() -> Result<Self> {
+    pub fn for_web_mode(openai_public_origin: Option<String>) -> Result<Self> {
         ensure_local_web_auth_defaults();
-        Ok(Self::from_store(Store::open()?))
+        Ok(Self::with_services(
+            Arc::new(Mutex::new(Store::open()?)),
+            openai_public_origin,
+            default_auth_service(),
+            default_resource_usage_service(),
+        ))
+    }
+
+    pub fn openai_public_origin(&self) -> Option<&str> {
+        self.openai_public_origin.as_deref()
     }
 
     pub fn auth_summary(&self, controller_id: &str) -> AuthStateSnapshot {
