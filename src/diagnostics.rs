@@ -35,6 +35,7 @@ pub mod web_error_code {
     pub const TURN_IN_PROGRESS: &str = "turn_in_progress";
     pub const TURN_NOT_FOUND: &str = "turn_not_found";
     pub const TURN_STATE_ERROR: &str = "turn_state_error";
+    pub const UNSUPPORTED_AUTH_ORIGIN: &str = "unsupported_auth_origin";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
