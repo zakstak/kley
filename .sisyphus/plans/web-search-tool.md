@@ -154,7 +154,7 @@ Wave 2: real backend + integration
 > Implementation + Test = ONE task. Never separate. EVERY task MUST have: Agent
 > Profile + Parallelization + QA Scenarios.
 
-- [ ] 1. Lock the public contract with deterministic tests
+- [x] 1. Lock the public contract with deterministic tests
 
   **What to do**: Create the contract-first test surface for `web_search`. Add
   exact tests for strict schema shape, required nullable fields, accepted
@@ -215,7 +215,7 @@ Wave 2: real backend + integration
   **Commit**: YES | Message: `test(tools): lock web search v1 contract` | Files:
   `["src/tools/web_search.rs", "src/tools/mod.rs"]`
 
-- [ ] 2. Add normalized result model and validation helpers
+- [x] 2. Add normalized result model and validation helpers
 
   **What to do**: In `src/tools/web_search.rs`, define the repo-owned result
   model and helper functions before any network code. Use a serialized JSON
@@ -274,7 +274,7 @@ Wave 2: real backend + integration
   **Commit**: YES | Message: `refactor(tools): add web search result contract` |
   Files: `["src/tools/web_search.rs"]`
 
-- [ ] 3. Implement the `WebSearchTool` skeleton and synchronous execution
+- [x] 3. Implement the `WebSearchTool` skeleton and synchronous execution
      contract
 
   **What to do**: Implement `WebSearchTool` in `src/tools/web_search.rs` using
@@ -331,7 +331,7 @@ Wave 2: real backend + integration
   **Commit**: YES | Message: `feat(tools): add web search tool skeleton` |
   Files: `["src/tools/web_search.rs"]`
 
-- [ ] 4. Add backend resolver and config semantics
+- [x] 4. Add backend resolver and config semantics
 
   **What to do**: Keep backend resolution internal to `src/tools/web_search.rs`.
   Define a small internal trait/interface, but implement only one real backend
@@ -384,7 +384,7 @@ Wave 2: real backend + integration
   **Commit**: YES | Message: `feat(tools): add web search backend resolver` |
   Files: `["src/tools/web_search.rs"]`
 
-- [ ] 5. Wire the tool into the built-in registry and provider payloads
+- [x] 5. Wire the tool into the built-in registry and provider payloads
 
   **What to do**: Export the module from `src/tools/mod.rs`, register
   `WebSearchTool` in `registry_with_lsp_service(...)`, and extend built-in tests
@@ -439,7 +439,7 @@ Wave 2: real backend + integration
   **Commit**: YES | Message: `feat(tools): register web search builtin` | Files:
   `["src/tools/mod.rs", "src/tools/web_search.rs"]`
 
-- [ ] 6. Implement the Tavily backend and normalization path
+- [x] 6. Implement the Tavily backend and normalization path
 
   **What to do**: Implement the only real v1 backend against Tavily Search. Use
   blocking `reqwest` with the existing `blocking` feature, a 15s timeout, and
@@ -513,7 +513,7 @@ Wave 2: real backend + integration
   **Commit**: YES | Message: `feat(tools): add tavily web search backend` |
   Files: `["src/tools/web_search.rs"]`
 
-- [ ] 7. Add runtime integration coverage and minimal operator docs
+- [x] 7. Add runtime integration coverage and minimal operator docs
 
   **What to do**: Add a new integration file `tests/runtime_web_search.rs`. In
   that file, add runtime integration tests proving `web_search` executes through
