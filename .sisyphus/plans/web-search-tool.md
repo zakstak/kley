@@ -582,7 +582,7 @@ Wave 2: real backend + integration
 > okay.** Rejection or user feedback -> fix -> re-run -> present again -> wait
 > for okay.
 
-- [ ] F1. Plan Compliance Audit — oracle
+- [x] F1. Plan Compliance Audit — oracle
 
   **Tool**: `task(subagent_type="oracle")` **Acceptance Criteria**:
   - [ ] Oracle reviews `.sisyphus/plans/web-search-tool.md` and the branch diff
@@ -599,7 +599,7 @@ Wave 2: real backend + integration
     Evidence: .sisyphus/evidence/f1-plan-compliance.md
   ```
 
-- [ ] F2. Code Quality Review — unspecified-high
+- [x] F2. Code Quality Review — unspecified-high
 
   **Tool**: `task(category="unspecified-high")` **Acceptance Criteria**:
   - [ ] Reviewer inspects all files touched for `web_search`.
@@ -616,7 +616,7 @@ Wave 2: real backend + integration
     Evidence: .sisyphus/evidence/f2-code-quality.md
   ```
 
-- [ ] F3. Real Manual QA — unspecified-high
+- [x] F3. Real Manual QA — unspecified-high
 
   **Tool**: `task(category="unspecified-high")` + Bash **Acceptance Criteria**:
   - [ ] `cargo test web_search_ -- --nocapture` passes.
@@ -635,7 +635,7 @@ Wave 2: real backend + integration
     Evidence: .sisyphus/evidence/f3-manual-qa.txt
   ```
 
-- [ ] F4. Scope Fidelity Check — deep
+- [x] F4. Scope Fidelity Check — deep
 
   **Tool**: `task(category="deep")` **Acceptance Criteria**:
   - [ ] Reviewer compares the final diff against the Must NOT Have list.

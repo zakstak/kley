@@ -2,18 +2,18 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use kley::tools::Tool;
+use axum::Router;
 use kley::tools::web_search::{
-    WebSearchCitationInput, WebSearchResult, WebSearchTool, resolve_max_results,
-    test_support::override_tavily_timeout_for_test,
+    resolve_max_results, test_support::override_tavily_timeout_for_test, WebSearchCitationInput,
+    WebSearchResult, WebSearchTool,
 };
-use serde_json::{Value, json};
+use kley::tools::Tool;
+use serde_json::{json, Value};
 
 struct TestServer {
     addr: std::net::SocketAddr,
@@ -153,6 +153,7 @@ fn web_search_schema_is_strict() {
                     "type": ["integer", "null"],
                     "minimum": 1,
                     "maximum": 5,
+                    "default": null,
                     "description": "Maximum number of citations to return. Pass null to use the default of 5."
                 }
             },
@@ -196,6 +197,96 @@ fn web_search_returns_unavailable_without_tavily_api_key() {
             "message": "Set TAVILY_API_KEY to enable web_search.",
         })
     );
+}
+
+#[test]
+fn web_search_uses_tavily_backend_when_api_key_present() {
+    let _env_lock = env_lock().lock().unwrap();
+    run_async_test(async {
+        let recorded_request = Arc::new(Mutex::new(None));
+        let server = spawn_fake_tavily_server(FakeTavilyState {
+            response_status: StatusCode::OK,
+            response_body: json!({
+                "answer": "Rust testing summary",
+                "results": [
+                    {
+                        "title": "Rust Book",
+                        "url": "https://doc.rust-lang.org/book/",
+                        "content": "Learn Rust with the official book.",
+                        "score": 0.98,
+                        "raw_content": "ignore me"
+                    },
+                    {
+                        "title": "Cargo Book",
+                        "url": "https://doc.rust-lang.org/cargo/",
+                        "content": "Cargo is Rust's package manager.",
+                        "favicon": "https://example.com/favicon.ico"
+                    },
+                    {
+                        "title": "Rust By Example",
+                        "url": "https://doc.rust-lang.org/rust-by-example/",
+                        "content": "Hands-on Rust examples."
+                    }
+                ],
+                "request_id": "req_123",
+                "project_id": "proj_123",
+                "usage": { "credits_used": 1 }
+            })
+            .to_string(),
+            response_delay: Duration::ZERO,
+            recorded_request: recorded_request.clone(),
+        })
+        .await;
+        let _api_key = EnvVarGuard::set("TAVILY_API_KEY", "test-key");
+        let _base_url = EnvVarGuard::set("TAVILY_API_BASE_URL", &format!("http://{}", server.addr));
+
+        let output = tokio::task::spawn_blocking(|| {
+            run_web_search(json!({
+                "query": "rust testing",
+                "max_results": 2,
+            }))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            output,
+            json!({
+                "status": "ok",
+                "query": "rust testing",
+                "summary": "Rust testing summary",
+                "citations": [
+                    {
+                        "index": 1,
+                        "title": "Rust Book",
+                        "url": "https://doc.rust-lang.org/book/",
+                        "snippet": "Learn Rust with the official book.",
+                    },
+                    {
+                        "index": 2,
+                        "title": "Cargo Book",
+                        "url": "https://doc.rust-lang.org/cargo/",
+                        "snippet": "Cargo is Rust's package manager.",
+                    }
+                ],
+                "message": null,
+            })
+        );
+
+        assert_eq!(
+            recorded_request.lock().unwrap().clone().unwrap(),
+            RecordedSearchRequest {
+                authorization: Some("Bearer test-key".to_string()),
+                body: json!({
+                    "query": "rust testing",
+                    "search_depth": "basic",
+                    "max_results": 2,
+                    "include_answer": "basic",
+                    "include_raw_content": false,
+                }),
+            }
+        );
+    });
 }
 
 #[test]
@@ -284,6 +375,58 @@ fn web_search_tavily_maps_answer_and_results_to_summary_and_citations() {
                     "include_raw_content": false,
                 }),
             }
+        );
+    });
+}
+
+#[test]
+fn web_search_returns_no_results_shape() {
+    let _env_lock = env_lock().lock().unwrap();
+    run_async_test(async {
+        let recorded_request = Arc::new(Mutex::new(None));
+        let server = spawn_fake_tavily_server(FakeTavilyState {
+            response_status: StatusCode::OK,
+            response_body: json!({
+                "answer": "",
+                "results": []
+            })
+            .to_string(),
+            response_delay: Duration::ZERO,
+            recorded_request: recorded_request.clone(),
+        })
+        .await;
+        let _api_key = EnvVarGuard::set("TAVILY_API_KEY", "test-key");
+        let _base_url = EnvVarGuard::set("TAVILY_API_BASE_URL", &format!("http://{}", server.addr));
+
+        let output = tokio::task::spawn_blocking(|| {
+            run_web_search(json!({
+                "query": "no deterministic hits",
+                "max_results": 3,
+            }))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            output,
+            json!({
+                "status": "no_results",
+                "query": "no deterministic hits",
+                "summary": null,
+                "citations": [],
+                "message": "Tavily returned no results.",
+            })
+        );
+
+        assert_eq!(
+            recorded_request.lock().unwrap().clone().unwrap().body,
+            json!({
+                "query": "no deterministic hits",
+                "search_depth": "basic",
+                "max_results": 3,
+                "include_answer": "basic",
+                "include_raw_content": false,
+            })
         );
     });
 }

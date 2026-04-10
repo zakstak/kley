@@ -175,7 +175,19 @@ Optional overrides for the same canary lane:
 - `REMOTE_KLEY_REPO_ROOT=/path/to/existing/remote/kley`
 - `REMOTE_KLEY_STAGE_ROOT=/tmp/kley-canary-saga-dev2-12345`
 - `KLEY_WEB_BIND=127.0.0.1:3210`
-- `KLEY_WEB_PUBLIC_ORIGIN=http://10.0.0.51:3210`
+- `KLEY_WEB_PUBLIC_ORIGIN=http://saga-dev2`
+
+## Reverse-proxied Kley web on agent VMs
+
+The shared VM base now runs a persistent `kley-web` systemd service bound to
+`127.0.0.1:3210` and fronts it with nginx on port `80`.
+
+- browser URL: `http://saga-dev/` or `http://saga-dev2/`
+- websocket URL: `ws://saga-dev/ws`
+- callback URL: `http://saga-dev/auth/callback`
+
+When using this shape, users should access Kley only through the proxy hostname.
+Do not send browsers directly to `:3210` on the VM.
 
 ## Rollback and recovery flow for failed canary updates (`saga-dev2`)
 

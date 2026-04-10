@@ -1,8 +1,8 @@
 use anyhow::Result;
-use reqwest::StatusCode;
 use reqwest::blocking::Client;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 #[cfg(any(test, feature = "testing"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -193,6 +193,7 @@ impl Tool for WebSearchTool {
                     "type": ["integer", "null"],
                     "minimum": 1,
                     "maximum": MAX_RESULTS_CAP,
+                    "default": Value::Null,
                     "description": "Maximum number of citations to return. Pass null to use the default of 5."
                 }
             },

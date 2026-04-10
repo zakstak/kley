@@ -29,3 +29,35 @@ Task 6 keeps Tavily production behavior fixed at a private 15s blocking
 override and test-only `TAVILY_API_BASE_URL` path, which makes local axum
 `/search` integration tests deterministic without broadening the runtime config
 surface.
+
+2026-04-07: Tavily's `POST https://api.tavily.com/search` endpoint requires
+`Authorization: Bearer <tvly-...>` and exposes `include_answer` (bool or
+`basic`/`advanced`, default `false`) plus `include_raw_content` (bool or
+`markdown`/`text`, default `false`). `max_results` defaults to 5 and caps at 20,
+so the repo cap of 5 matches the provider limit; `answer` only appears when
+`include_answer` is truthy, and `results[].content` provides the short snippet
+while `results[].raw_content` comes back only if raw content is explicitly
+requested. The documented `results` payload also includes `title`, `url`,
+`score`, `favicon`, and `images`, which give the fields that normalization must
+convert into the repo-owned citations with summary, snippet, and URL data.
+
+2026-04-07: The public `web_search` schema must serialize `max_results` with
+`"default": null` anywhere the full schema object is asserted, and acceptance
+commands using `--exact` must be backed by flat top-level test names such as
+`web_search_returns_no_results_shape` and
+`web_search_uses_tavily_backend_when_api_key_present` in
+`tests/web_search_exact.rs`.
+
+2026-04-07: Final QA for this plan is backend-only and deterministic:
+`cargo test web_search_ -- --nocapture` already exercises the
+`tests/runtime_web_search.rs` lane, while the three exact runtime commands
+re-confirm that `SessionRuntime` executes `web_search`, persists the normalized
+JSON string as `function_call_output`, and includes `web_search` in the provider
+`tools` payload.
+
+2026-04-07: Final F1 compliance audit re-verified the live implementation slice
+(`src/tools/web_search.rs`, `src/tools/mod.rs`, `tests/web_search_exact.rs`,
+`tests/runtime_web_search.rs`, `tests/default_registry.rs`, `README.md`) against
+the plan and fresh targeted `cargo test` runs; unrelated dirty files under
+`agent-vm/*`, `result`, and `.sisyphus` state are audit noise, not blockers for
+approving `web_search` scope.

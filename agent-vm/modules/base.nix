@@ -1,4 +1,4 @@
-{ config, lib, promotionContract, ... }:
+{ config, lib, pkgs, promotionContract, kleyPackage, ... }:
 let
   hostName = config.networking.hostName or "unknown";
   operatorAuthorizedKeyPath = ../.generated/operator-authorized-key.pub;
@@ -26,6 +26,7 @@ let
   buildMetadata = {
     hostName = hostName;
     promotionLane = config.kley.agentVm.promotionLane;
+    webBindAddr = config.kley.agentVm.webBindAddr;
     webPublicOrigin = config.kley.agentVm.webPublicOrigin;
     promotion = {
       canaryHost = promotionContract.canaryHost;
@@ -51,6 +52,14 @@ in {
       description = ''
         Public origin that Kley web should use when constructing OpenAI browser
         login redirect URIs on this host.
+      '';
+    };
+
+    webBindAddr = lib.mkOption {
+      type = lib.types.str;
+      default = "127.0.0.1:3210";
+      description = ''
+        Internal bind address for the persistent Kley web service.
       '';
     };
 
@@ -96,6 +105,38 @@ in {
         Host `${hostName}` must stay on promotion lane `${expectedLane}` so the
         canary-to-baseline contract cannot drift via host-local edits.
       '';
+    };
+
+    services.nginx.enable = true;
+    services.nginx.recommendedProxySettings = true;
+    services.nginx.virtualHosts.${hostName} = {
+      locations."/".proxyPass = "http://${config.kley.agentVm.webBindAddr}";
+      locations."/ws" = {
+        proxyPass = "http://${config.kley.agentVm.webBindAddr}";
+        proxyWebsockets = true;
+      };
+    };
+
+    systemd.services.kley-web = {
+      description = "Kley web UI";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        Type = "simple";
+        ExecStartPre = "${pkgs.writeShellScript "kley-web-pre-start" ''
+          ${pkgs.procps}/bin/pkill -f -- ${lib.escapeShellArg "kley web --bind"} || true
+        ''}";
+        ExecStart = "${kleyPackage}/bin/kley web --bind ${lib.escapeShellArg config.kley.agentVm.webBindAddr}";
+        Restart = "on-failure";
+        RestartSec = "2s";
+        User = "agent";
+        Group = "users";
+        WorkingDirectory = "/home/agent";
+      };
+      environment = lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
+        KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
+      } // vaultEnvironment;
     };
 
     kley.agentVm.buildMetadata = buildMetadata;
