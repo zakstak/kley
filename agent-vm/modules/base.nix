@@ -83,77 +83,80 @@ in {
     };
   };
 
-  config = {
-    # Shared OS/runtime contract for every agent VM. Host files stay limited to
-    # machine facts like hostname, boot targets, filesystems, and network values.
-    nix.settings.experimental-features = [ "nix-command" "flakes" ];
-    nix.settings.auto-optimise-store = lib.mkDefault true;
+  config = lib.mkMerge [
+    {
+      # Shared OS/runtime contract for every agent VM. Host files stay limited to
+      # machine facts like hostname, boot targets, filesystems, and network values.
+      nix.settings.experimental-features = [ "nix-command" "flakes" ];
+      nix.settings.auto-optimise-store = lib.mkDefault true;
 
-    time.timeZone = lib.mkDefault "UTC";
-    i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
+      time.timeZone = lib.mkDefault "UTC";
+      i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
 
-    users.users.agent = {
-      isNormalUser = true;
-      description = "Agent VM machine user";
-      extraGroups = [ "wheel" ];
-      openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
-    };
-
-    users.users.root.openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
-
-    services.openssh.enable = lib.mkDefault true;
-    services.openssh.settings = {
-      PasswordAuthentication = false;
-      KbdInteractiveAuthentication = false;
-    };
-
-    security.sudo.wheelNeedsPassword = lib.mkDefault false;
-
-    assertions = lib.optional (expectedLane != null) {
-      assertion = config.kley.agentVm.promotionLane == expectedLane;
-      message = ''
-        Host `${hostName}` must stay on promotion lane `${expectedLane}` so the
-        canary-to-baseline contract cannot drift via host-local edits.
-      '';
-    };
-
-    kley.agentVm.buildMetadata = buildMetadata;
-    system.configurationRevision = promotionContract.source.exactRevision;
-    environment.variables = vaultEnvironment // lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
-      KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
-    };
-    environment.etc."kley-agent-vm-build.json".text = builtins.toJSON buildMetadata;
-  } // lib.mkIf config.kley.agentVm.enableKleyRuntime {
-    services.nginx.enable = true;
-    services.nginx.recommendedProxySettings = true;
-    services.nginx.virtualHosts.${hostName} = {
-      locations."/".proxyPass = "http://${config.kley.agentVm.webBindAddr}";
-      locations."/ws" = {
-        proxyPass = "http://${config.kley.agentVm.webBindAddr}";
-        proxyWebsockets = true;
+      users.users.agent = {
+        isNormalUser = true;
+        description = "Agent VM machine user";
+        extraGroups = [ "wheel" ];
+        openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
       };
-    };
 
-    systemd.services.kley-web = {
-      description = "Kley web UI";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      wantedBy = [ "multi-user.target" ];
-      serviceConfig = {
-        Type = "simple";
-        ExecStartPre = "${pkgs.writeShellScript "kley-web-pre-start" ''
-          ${pkgs.procps}/bin/pkill -f -- ${lib.escapeShellArg "kley web --bind"} || true
-        ''}";
-        ExecStart = "${kleyPackage}/bin/kley web --bind ${lib.escapeShellArg config.kley.agentVm.webBindAddr}";
-        Restart = "on-failure";
-        RestartSec = "2s";
-        User = "agent";
-        Group = "users";
-        WorkingDirectory = "/home/agent";
+      users.users.root.openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
+
+      services.openssh.enable = true;
+      services.openssh.settings = {
+        PasswordAuthentication = false;
+        KbdInteractiveAuthentication = false;
       };
-      environment = lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
+
+      security.sudo.wheelNeedsPassword = lib.mkDefault false;
+
+      assertions = lib.optional (expectedLane != null) {
+        assertion = config.kley.agentVm.promotionLane == expectedLane;
+        message = ''
+          Host `${hostName}` must stay on promotion lane `${expectedLane}` so the
+          canary-to-baseline contract cannot drift via host-local edits.
+        '';
+      };
+
+      kley.agentVm.buildMetadata = buildMetadata;
+      system.configurationRevision = promotionContract.source.exactRevision;
+      environment.variables = vaultEnvironment // lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
         KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
-      } // vaultEnvironment;
-    };
-  };
+      };
+      environment.etc."kley-agent-vm-build.json".text = builtins.toJSON buildMetadata;
+    }
+    (lib.mkIf config.kley.agentVm.enableKleyRuntime {
+      services.nginx.enable = true;
+      services.nginx.recommendedProxySettings = true;
+      services.nginx.virtualHosts.${hostName} = {
+        locations."/".proxyPass = "http://${config.kley.agentVm.webBindAddr}";
+        locations."/ws" = {
+          proxyPass = "http://${config.kley.agentVm.webBindAddr}";
+          proxyWebsockets = true;
+        };
+      };
+
+      systemd.services.kley-web = {
+        description = "Kley web UI";
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          Type = "simple";
+          ExecStartPre = "${pkgs.writeShellScript "kley-web-pre-start" ''
+            ${pkgs.procps}/bin/pkill -f -- ${lib.escapeShellArg "kley web --bind"} || true
+          ''}";
+          ExecStart = "${kleyPackage}/bin/kley web --bind ${lib.escapeShellArg config.kley.agentVm.webBindAddr}";
+          Restart = "on-failure";
+          RestartSec = "2s";
+          User = "agent";
+          Group = "users";
+          WorkingDirectory = "/home/agent";
+        };
+        environment = lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
+          KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
+        } // vaultEnvironment;
+      };
+    })
+  ];
 }

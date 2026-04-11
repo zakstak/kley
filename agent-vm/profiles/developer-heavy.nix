@@ -20,6 +20,7 @@ let
     pkgs.jq
     pkgs.fd
     pkgs.bat
+    pkgs.zellij
     pkgs.rust-analyzer
     pkgs.gopls
     pkgs.golangci-lint
