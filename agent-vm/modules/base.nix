@@ -26,6 +26,7 @@ let
   buildMetadata = {
     hostName = hostName;
     promotionLane = config.kley.agentVm.promotionLane;
+    enableKleyRuntime = config.kley.agentVm.enableKleyRuntime;
     webBindAddr = config.kley.agentVm.webBindAddr;
     webPublicOrigin = config.kley.agentVm.webPublicOrigin;
     promotion = {
@@ -41,9 +42,18 @@ let
 in {
   options.kley.agentVm = {
     promotionLane = lib.mkOption {
-      type = lib.types.enum [ "baseline" "canary" ];
-      default = "baseline";
-      description = "Promotion lane for this host (baseline or canary).";
+      type = lib.types.enum [ "baseline" "canary" "standalone" ];
+      default = "standalone";
+      description = "Promotion lane for this host (baseline, canary, or standalone).";
+    };
+
+    enableKleyRuntime = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether this VM should run the repo-managed Kley web/runtime stack.
+        Disable this for SSH-only personal boxes that should stay minimal.
+      '';
     };
 
     webPublicOrigin = lib.mkOption {
@@ -107,6 +117,13 @@ in {
       '';
     };
 
+    kley.agentVm.buildMetadata = buildMetadata;
+    system.configurationRevision = promotionContract.source.exactRevision;
+    environment.variables = vaultEnvironment // lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
+      KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
+    };
+    environment.etc."kley-agent-vm-build.json".text = builtins.toJSON buildMetadata;
+  } // lib.mkIf config.kley.agentVm.enableKleyRuntime {
     services.nginx.enable = true;
     services.nginx.recommendedProxySettings = true;
     services.nginx.virtualHosts.${hostName} = {
@@ -138,12 +155,5 @@ in {
         KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
       } // vaultEnvironment;
     };
-
-    kley.agentVm.buildMetadata = buildMetadata;
-    system.configurationRevision = promotionContract.source.exactRevision;
-    environment.variables = vaultEnvironment // lib.optionalAttrs (config.kley.agentVm.webPublicOrigin != null) {
-      KLEY_WEB_PUBLIC_ORIGIN = config.kley.agentVm.webPublicOrigin;
-    };
-    environment.etc."kley-agent-vm-build.json".text = builtins.toJSON buildMetadata;
   };
 }
