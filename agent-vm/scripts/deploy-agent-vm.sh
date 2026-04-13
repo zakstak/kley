@@ -8,6 +8,7 @@ CANARY_HOST="${CANARY_HOST:-saga-dev2}"
 BASELINE_HOST="${BASELINE_HOST:-saga-dev}"
 AGENT_USER="${AGENT_USER:-agent}"
 VAULT_ENV_FILE="${ROOT_DIR}/agent-vm/.generated/vault-environment.json"
+OPERATOR_KEY_FILE="${ROOT_DIR}/agent-vm/.generated/operator-authorized-key.pub"
 KLEY_WEB_BIND="${KLEY_WEB_BIND:-127.0.0.1:3210}"
 KLEY_WEB_PUBLIC_ORIGIN="${KLEY_WEB_PUBLIC_ORIGIN:-}"
 KLEY_WEB_LOG_PATH="${KLEY_WEB_LOG_PATH:-/tmp/kley-canary-web.log}"
@@ -93,9 +94,24 @@ PY
 }
 
 NIX_BUILD_ARGS=()
+ensure_impure() {
+  local arg
+  for arg in "${NIX_BUILD_ARGS[@]:-}"; do
+    if [[ "${arg}" == "--impure" ]]; then
+      return
+    fi
+  done
+  NIX_BUILD_ARGS+=(--impure)
+}
+
 if [[ -f "${VAULT_ENV_FILE}" ]]; then
   load_generated_vault_env
-  NIX_BUILD_ARGS+=(--impure)
+  ensure_impure
+fi
+
+if [[ ! -f "${OPERATOR_KEY_FILE}" ]]; then
+  printf 'Missing operator key file: %s\n' "${OPERATOR_KEY_FILE}" >&2
+  exit 1
 fi
 
 require_command() {
@@ -116,6 +132,11 @@ set -euo pipefail
 pct exec "$PERISCOPE_CT_ID" -- systemctl is-active periscope >/dev/null
 pct exec "$PERISCOPE_CT_ID" -- curl -fsS "$PERISCOPE_API_URL" >/dev/null
 EOF
+}
+
+stage_baseline_operator_key() {
+  log "Staging operator SSH key on ${BASELINE_SSH_TARGET}"
+  cat "${OPERATOR_KEY_FILE}" | ssh -J "${BASELINE_SSH_JUMP}" "${BASELINE_SSH_TARGET}" "sudo install -d -m 0700 /var/lib/kley && sudo tee /var/lib/kley/operator-authorized-key.pub >/dev/null && sudo chmod 600 /var/lib/kley/operator-authorized-key.pub"
 }
 
 prestaged_cleanup() {
@@ -177,6 +198,8 @@ build_baseline() {
 
 promote_baseline() {
   local store_path="$1"
+
+  stage_baseline_operator_key
 
   log "Importing baseline closure on ${BASELINE_SSH_TARGET} via ${BASELINE_SSH_JUMP}"
   nix-store -qR "${store_path}" | xargs nix-store --export | ssh -J "${BASELINE_SSH_JUMP}" "${BASELINE_SSH_TARGET}" "sudo nix-store --import"

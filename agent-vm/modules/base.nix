@@ -1,15 +1,7 @@
 { config, lib, pkgs, promotionContract, kleyPackage, ... }:
 let
   hostName = config.networking.hostName or "unknown";
-  operatorAuthorizedKeyPath = ../.generated/operator-authorized-key.pub;
-  operatorAuthorizedKeys =
-    if builtins.pathExists operatorAuthorizedKeyPath then
-      let
-        key = lib.strings.removeSuffix "\n" (builtins.readFile operatorAuthorizedKeyPath);
-      in
-      lib.optional (key != "") key
-    else
-      [ ];
+  operatorAuthorizedKeyRuntimePath = "/var/lib/kley/operator-authorized-key.pub";
   vaultEnvironment = lib.filterAttrs
     (name: value:
       builtins.elem name [ "VAULT_ADDR" "VAULT_TOKEN" ]
@@ -97,16 +89,37 @@ in {
         isNormalUser = true;
         description = "Agent VM machine user";
         extraGroups = [ "wheel" ];
-        openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
       };
-
-      users.users.root.openssh.authorizedKeys.keys = lib.mkDefault operatorAuthorizedKeys;
 
       services.openssh.enable = true;
       services.openssh.settings = {
         PasswordAuthentication = false;
         KbdInteractiveAuthentication = false;
       };
+
+      system.activationScripts.kleyOperatorAuthorizedKeys.text = ''
+        install -d -m 0700 /var/lib/kley
+        install -d -m 0755 /etc/ssh/authorized_keys.d
+
+        maybe_seed_runtime_key() {
+          local source_path="$1"
+          if [ ! -s "${operatorAuthorizedKeyRuntimePath}" ] && [ -s "$source_path" ]; then
+            install -m 0644 "$source_path" "${operatorAuthorizedKeyRuntimePath}"
+          fi
+        }
+
+        maybe_seed_runtime_key /etc/ssh/authorized_keys.d/root
+        maybe_seed_runtime_key /etc/ssh/authorized_keys.d/agent
+        maybe_seed_runtime_key /root/.ssh/authorized_keys
+        maybe_seed_runtime_key /home/agent/.ssh/authorized_keys
+
+        if [ -s "${operatorAuthorizedKeyRuntimePath}" ]; then
+          install -m 0644 "${operatorAuthorizedKeyRuntimePath}" /etc/ssh/authorized_keys.d/root
+          install -m 0644 "${operatorAuthorizedKeyRuntimePath}" /etc/ssh/authorized_keys.d/agent
+        else
+          echo "[kley] operator SSH key missing at ${operatorAuthorizedKeyRuntimePath}; preserving existing SSH access only" >&2
+        fi
+      '';
 
       security.sudo.wheelNeedsPassword = lib.mkDefault false;
 

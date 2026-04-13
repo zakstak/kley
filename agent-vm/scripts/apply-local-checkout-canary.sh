@@ -8,6 +8,7 @@ AGENT_USER="${AGENT_USER:-agent}"
 REMOTE_TARGET="${AGENT_USER}@${CANARY_HOST}"
 FLAKE_ATTR="nixosConfigurations.${CANARY_HOST}.config.system.build.toplevel"
 VAULT_ENV_FILE="${ROOT_DIR}/agent-vm/.generated/vault-environment.json"
+OPERATOR_KEY_FILE="${ROOT_DIR}/agent-vm/.generated/operator-authorized-key.pub"
 
 load_generated_vault_env() {
   if [[ ! -f "${VAULT_ENV_FILE}" ]]; then
@@ -32,10 +33,32 @@ PY
 }
 
 NIX_BUILD_ARGS=()
+ensure_impure() {
+  local arg
+  for arg in "${NIX_BUILD_ARGS[@]:-}"; do
+    if [[ "${arg}" == "--impure" ]]; then
+      return
+    fi
+  done
+  NIX_BUILD_ARGS+=(--impure)
+}
+
 if [[ -f "${VAULT_ENV_FILE}" ]]; then
   load_generated_vault_env
-  NIX_BUILD_ARGS+=(--impure)
+  ensure_impure
 fi
+
+if [[ ! -f "${OPERATOR_KEY_FILE}" ]]; then
+  printf 'Missing operator key file: %s\n' "${OPERATOR_KEY_FILE}" >&2
+  exit 1
+fi
+
+stage_operator_key() {
+  cat "${OPERATOR_KEY_FILE}" | ssh "${REMOTE_TARGET}" "sudo install -d -m 0700 /var/lib/kley && sudo tee /var/lib/kley/operator-authorized-key.pub >/dev/null && sudo chmod 600 /var/lib/kley/operator-authorized-key.pub"
+}
+
+echo "[0/5] Staging operator SSH key on ${REMOTE_TARGET}"
+stage_operator_key
 
 echo "[1/5] Building ${FLAKE_ATTR} from ${ROOT_DIR}"
 nix build "${NIX_BUILD_ARGS[@]}" "${ROOT_DIR}#${FLAKE_ATTR}"
