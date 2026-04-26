@@ -8,9 +8,10 @@ usage() {
   cat <<'EOF'
 Usage: agent-vm/scripts/write-generated-vault-env.sh
 
-Reads VAULT_ADDR and VAULT_TOKEN from the current shell environment and writes
-them to agent-vm/.generated/vault-environment.json for local-only agent VM
-builds. The generated file is gitignored.
+Reads VAULT_ADDR from the current shell environment and writes it to
+agent-vm/.generated/vault-environment.json for local-only agent VM builds. The
+generated file is gitignored. VAULT_TOKEN is intentionally not propagated to
+deployed hosts.
 EOF
 }
 
@@ -20,7 +21,6 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 : "${VAULT_ADDR:?VAULT_ADDR must be set in the current shell}"
-: "${VAULT_TOKEN:?VAULT_TOKEN must be set in the current shell}"
 
 mkdir -p "$(dirname "${OUTPUT_PATH}")"
 
@@ -30,7 +30,6 @@ import os
 
 print(json.dumps({
     "VAULT_ADDR": os.environ["VAULT_ADDR"],
-    "VAULT_TOKEN": os.environ["VAULT_TOKEN"],
 }, indent=2, sort_keys=True))
 PY
 
