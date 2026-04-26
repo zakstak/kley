@@ -1,7 +1,7 @@
 { pkgs, lib }:
 
 let
-  developerHeavyPackages = lib.unique ([
+  developerHeavyPackages = lib.unique [
     pkgs.git
     pkgs.gh
     pkgs.rustc
@@ -12,9 +12,11 @@ let
     pkgs.gnumake
     pkgs.cmake
     pkgs.nodejs_22
+    pkgs.codex
     pkgs.go
     pkgs.python3
     pkgs.sqlite
+    pkgs."pi-coding-agent"
     pkgs.shellcheck
     pkgs.tree
     pkgs.jq
@@ -31,7 +33,7 @@ let
     pkgs.yaml-language-server
     pkgs.nixd
     pkgs.pyright
-  ]);
+  ];
 in {
   packages = developerHeavyPackages;
 }

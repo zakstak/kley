@@ -1,7 +1,6 @@
 { nixpkgs, sourceResolution, kleyPackage }:
 let
   moduleGraph = import ./modules/default.nix;
-  promotionContract = import ./promotion-contract.nix { inherit sourceResolution; };
   mkHost = {
     hostModule,
     extraModules ? [ ],
@@ -9,7 +8,7 @@ let
     nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       specialArgs = {
-        inherit promotionContract kleyPackage;
+        inherit sourceResolution kleyPackage;
       };
       modules = moduleGraph.baseModuleImports ++ extraModules ++ [ hostModule ];
     };
@@ -20,12 +19,17 @@ in
   nixosConfigurations = {
     saga-dev = mkHost {
       hostModule = ./hosts/saga-dev.nix;
-      extraModules = [ moduleGraph.nixosModules."opencode-harness" ];
+      extraModules = [
+        moduleGraph.nixosModules."opencode-harness"
+        moduleGraph.nixosModules."hermes-harness"
+      ];
     };
-    saga-dev2 = mkHost {
-      hostModule = ./hosts/saga-dev2.nix;
-      extraModules = [ moduleGraph.nixosModules."opencode-harness" ];
+
+    saga-runtime = mkHost {
+      hostModule = ./hosts/saga-runtime.nix;
+      extraModules = [
+        moduleGraph.nixosModules."runtime-cli-tools"
+      ];
     };
-    agent-pi = mkHost { hostModule = ./hosts/agent-pi.nix; };
   };
 }

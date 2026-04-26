@@ -1,6 +1,7 @@
 bat
 cargo
 cmake
+codex
 fd
 gitleaks
 git
