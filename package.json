@@ -8,6 +8,6 @@
     "test:browser:core": "playwright test playwright/core-workspace.spec.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2"
+    "@playwright/test": "^1.61.0"
   }
 }
