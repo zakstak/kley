@@ -9,6 +9,7 @@ pub mod compact;
 pub mod diagnostics;
 pub mod events;
 pub mod harness;
+pub mod http_client;
 pub mod lsp;
 pub mod preflight;
 pub use preflight::preflight_test_support;

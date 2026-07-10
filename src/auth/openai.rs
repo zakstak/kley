@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use super::{CredentialStore, OpenAiCredentials, save_openai_oauth_credentials};
+use crate::http_client;
 
 // ── Constants (verbatim from the JS) ────────────────────────────────────────
 
@@ -102,7 +103,7 @@ async fn exchange_code(
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<OpenAiCredentials> {
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let resp = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -212,7 +213,7 @@ pub async fn finish_login_flow_with_redirect_uri(
 
 /// Refresh an OpenAI token using the refresh_token grant.
 pub async fn refresh_token(refresh_tok: &str) -> Result<OpenAiCredentials> {
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let resp = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -280,7 +281,7 @@ async fn exchange_for_api_key(id_token: &str) -> Result<String> {
         access_token: String,
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let resp = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")

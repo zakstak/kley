@@ -1535,6 +1535,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "vaultrs",
+ "webpki-root-certs",
 ]
 
 [[package]]

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use anyhow::{Context, Result, bail};
-use reqwest::blocking::Client;
 use serde::Deserialize;
+
+use crate::http_client;
 
 #[derive(Debug)]
 pub struct ModelsDevCatalog {
@@ -27,7 +28,7 @@ const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 
 /// Download the live models.dev catalog using blocking reqwest.
 pub fn fetch_catalog() -> Result<ModelsDevCatalog> {
-    let client = Client::new();
+    let client = http_client::blocking_client();
     let resp = client
         .get(MODELS_DEV_API_URL)
         .send()

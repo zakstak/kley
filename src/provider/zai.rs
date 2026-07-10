@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::ResolvedAuth;
+use crate::http_client;
 use crate::provider::{SendContext, TokenUsage, TurnResult, UsagePayload, wait_for_abort_signal};
 
 /// A message in the Chat Completions format.
@@ -113,7 +114,7 @@ async fn send_sse(
 
     let resp = tokio::select! {
         _ = wait_for_abort_signal(abort_signal) => return Ok(TurnResult::Aborted),
-        result = reqwest::Client::new()
+        result = http_client::client()
             .post(&url)
             .header("Authorization", format!("Bearer {}", auth.api_key))
             .header("Content-Type", "application/json")
