@@ -18,6 +18,7 @@
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "--bin" "kley" ];
+          nativeBuildInputs = [ pkgs.cmake ];
           doCheck = false;
           meta.mainProgram = "kley";
         };
@@ -56,6 +57,7 @@
             packages = with pkgs; [
               rustc
               cargo
+              cmake
               rustfmt
               clippy
               git

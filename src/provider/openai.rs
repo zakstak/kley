@@ -9,6 +9,7 @@ use tokio_tungstenite::tungstenite;
 
 use crate::auth::ResolvedAuth;
 use crate::events::{AgentEvent, Transport};
+use crate::http_client;
 use crate::provider::{
     SendContext, TokenUsage, ToolCall, TurnResult, build_input_items, parse_token_usage,
     wait_for_abort_signal,
@@ -269,7 +270,7 @@ async fn send_ws(
             let _ = ws.close(None).await;
             return Ok(TurnResult::Aborted);
         }
-        result = ws.send(tungstenite::Message::Text(create_payload.to_string())) => {
+        result = ws.send(tungstenite::Message::text(create_payload.to_string())) => {
             result.context("failed to send response.create")?;
         }
     }
@@ -349,7 +350,7 @@ async fn send_sse(
         body["reasoning"] = serde_json::json!({ "effort": effort });
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let mut req = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", auth.api_key))

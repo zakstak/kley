@@ -181,7 +181,7 @@ mod runtime {
         for chunk in ["slow ", "provider ", "stream"] {
             tokio::time::sleep(Duration::from_millis(60)).await;
             if socket
-                .send(WsMessage::Text(
+                .send(WsMessage::text(
                     serde_json::json!({
                         "type": "response.output_text.delta",
                         "delta": chunk,
@@ -197,7 +197,7 @@ mod runtime {
 
         tokio::time::sleep(Duration::from_millis(60)).await;
         let _ = socket
-            .send(WsMessage::Text(
+            .send(WsMessage::text(
                 serde_json::json!({ "type": "response.completed" }).to_string(),
             ))
             .await;

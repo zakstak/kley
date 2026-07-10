@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::auth::ResolvedAuth;
 use crate::events::{AgentEvent, EventEmitter};
+use crate::http_client;
 
 /// Compaction configuration.
 #[derive(Debug, Clone)]
@@ -229,7 +230,7 @@ async fn summarize_history(
     });
 
     let url = format!("{}/responses", auth.base_url);
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let mut req = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", auth.api_key))

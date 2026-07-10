@@ -1,13 +1,14 @@
 use anyhow::Result;
-use reqwest::blocking::Client;
 use reqwest::StatusCode;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 #[cfg(any(test, feature = "testing"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use super::Tool;
+use crate::http_client;
 use crate::text::truncate_with_ascii_ellipsis;
 
 pub type WebSearchValidationResult<T> = std::result::Result<T, String>;
@@ -298,7 +299,7 @@ fn tavily_client_timeout() -> Duration {
 }
 
 fn build_tavily_client() -> Client {
-    Client::builder()
+    http_client::blocking_client_builder()
         .timeout(tavily_client_timeout())
         .build()
         .expect("Tavily client should build")

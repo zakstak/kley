@@ -707,7 +707,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(format!(
+            .send(Message::text(format!(
                 r#"{{"type":"session.settings.update","request_id":"req-settings-1","session_id":"{}","provider":"openai","model":"gpt-4.1"}}"#,
                 seeded_session.id
             )))
@@ -754,7 +754,7 @@ mod web {
         let _bootstrap = recv_json(&mut socket).await;
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"auth.login","request_id":"req-openai-api-key","provider":"openai","api_key":"sk-not-allowed"}"#
                     .to_string(),
             ))
@@ -780,7 +780,7 @@ mod web {
         assert_eq!(bootstrap["auth"]["pending_openai_login"], false);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"auth.openai.start","request_id":"req-openai-start","redirect_origin":"http://127.0.0.1:3210"}"#.to_string(),
             ))
             .await
@@ -803,7 +803,7 @@ mod web {
         assert_eq!(pending_snapshot["auth"]["openai_logged_in"], false);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"auth.openai.complete","request_id":"req-openai-complete","callback_input":"mock-openai-code"}"#.to_string(),
             ))
             .await
@@ -832,7 +832,7 @@ mod web {
         let _bootstrap = recv_json(&mut socket).await;
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"auth.openai.start","request_id":"req-openai-start-bad-origin","redirect_origin":"http://192.168.4.111:8801"}"#.to_string(),
             ))
             .await
@@ -863,7 +863,7 @@ mod web {
         let _bootstrap = recv_json(&mut socket).await;
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"auth.openai.start","request_id":"req-openai-start-remote","redirect_origin":"http://192.168.4.111:8801"}"#.to_string(),
             ))
             .await
@@ -888,7 +888,7 @@ mod web {
         let _bootstrap = recv_json(&mut socket).await;
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"auth.openai.complete","request_id":"req-openai-complete-no-start","callback_input":"mock-openai-code","verifier":"client-supplied-verifier","state":"client-supplied-state"}"#.to_string(),
             ))
             .await
@@ -915,7 +915,7 @@ mod web {
         let _bootstrap = recv_json(&mut socket).await;
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"auth.login","request_id":"req-zai-login","provider":"zai","api_key":"zai-test-key"}"#
                     .to_string(),
             ))
@@ -1260,7 +1260,7 @@ mod web {
         assert_eq!(bootstrap["session_id"], second_session.id);
 
         socket
-            .send(Message::Text(format!(
+            .send(Message::text(format!(
                 r#"{{"type":"session.load","request_id":"req-load-1","session_id":"{}"}}"#,
                 first_session.id
             )))
@@ -1342,7 +1342,7 @@ mod web {
         assert_eq!(bootstrap["session_id"], first_session.id);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-load-busy-prompt","session_id":"{}","prompt":"abortable response please stop"}}"#,
                     first_session.id
@@ -1361,7 +1361,7 @@ mod web {
         assert_eq!(recv_json(&mut socket).await["type"], "message.delta");
 
         socket
-            .send(Message::Text(format!(
+            .send(Message::text(format!(
                 r#"{{"type":"session.load","request_id":"req-load-busy","session_id":"{}"}}"#,
                 second_session.id
             )))
@@ -1379,7 +1379,7 @@ mod web {
         assert_eq!(load_error["error"]["details"]["turn_id"], turn_id);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"turn.abort","request_id":"req-load-busy-abort","session_id":"{}","turn_id":"{}"}}"#,
                     first_session.id, turn_id
@@ -1406,7 +1406,7 @@ mod web {
         let _bootstrap = recv_json(&mut socket).await;
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"mock.invalid","request_id":"req-bad-1"}"#.to_string(),
             ))
             .await
@@ -1418,7 +1418,7 @@ mod web {
         assert_eq!(error["error"]["code"], "invalid_command");
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"state.get","request_id":"req-ok-1"}"#.to_string(),
             ))
             .await
@@ -1440,7 +1440,7 @@ mod web {
         let session_id = bootstrap["session_id"].as_str().unwrap().to_string();
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-prompt-1","session_id":"{session_id}","prompt":"hello"}}"#
                 )
@@ -1490,7 +1490,7 @@ mod web {
         assert_eq!(bootstrap["resource_usage"]["disk"]["percent_used"], 25);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"prompt.submit","request_id":"req-mock-prompt-1","session_id":"sess-mock-001","prompt":"mock prompt"}"#.to_string(),
             ))
             .await
@@ -1536,7 +1536,7 @@ mod web {
         assert_eq!(bootstrap["type"], "state.snapshot");
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"prompt.submit","request_id":"req-mock-edit-observation","session_id":"sess-mock-001","prompt":"please run tool with edit observation"}"#.to_string(),
             ))
             .await
@@ -1579,7 +1579,7 @@ mod web {
         let session_id = bootstrap["session_id"].as_str().unwrap().to_string();
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-tool-1","session_id":"{session_id}","prompt":"please use a tool"}}"#
                 )
@@ -1636,7 +1636,7 @@ mod web {
         let session_id = bootstrap["session_id"].as_str().unwrap().to_string();
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-ui-prompt-1","session_id":"{session_id}","prompt":"please use a tool"}}"#
                 )
@@ -1682,7 +1682,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"state.get","request_id":"req-ui-state-1"}"#.to_string(),
             ))
             .await
@@ -1782,7 +1782,7 @@ mod web {
         assert_eq!(bootstrap["session_id"], second_session.id);
 
         socket
-            .send(Message::Text(format!(
+            .send(Message::text(format!(
                 r#"{{"type":"session.load","request_id":"req-ui-load-1","session_id":"{}"}}"#,
                 first_session.id
             )))
@@ -1824,7 +1824,7 @@ mod web {
         let session_id = bootstrap["session_id"].as_str().unwrap().to_string();
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-ui-abort-prompt","session_id":"{session_id}","prompt":"abortable response please stop"}}"#
                 )
@@ -1845,7 +1845,7 @@ mod web {
         assert_eq!(delta["turn_id"], first_turn_id);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"turn.abort","request_id":"req-ui-abort-turn","session_id":"{session_id}","turn_id":"{first_turn_id}"}}"#
                 )
@@ -1863,7 +1863,7 @@ mod web {
         assert_eq!(failed["error"], "aborted");
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-ui-after-abort","session_id":"{session_id}","prompt":"hello after abort"}}"#
                 )
@@ -1880,7 +1880,7 @@ mod web {
         assert_eq!(completed["request_id"], "req-ui-after-abort");
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"state.get","request_id":"req-ui-post-abort-state"}"#.to_string(),
             ))
             .await
@@ -1915,7 +1915,7 @@ mod web {
         assert!(rejection["error"]["details"]["active_controller_id"].is_string());
 
         socket1
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"state.get","request_id":"req-still-active"}"#.to_string(),
             ))
             .await
@@ -1970,7 +1970,7 @@ mod web {
         assert_eq!(bootstrap1["session_id"], seeded_session.id);
 
         socket1
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-reconnect-1","session_id":"{}","prompt":"abortable response please stop"}}"#,
                     seeded_session.id
@@ -2049,7 +2049,7 @@ mod web {
         let session_id = bootstrap["session_id"].as_str().unwrap().to_string();
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-abort-prompt","session_id":"{session_id}","prompt":"abortable response please stop"}}"#
                 )
@@ -2070,7 +2070,7 @@ mod web {
         assert_eq!(delta["turn_id"], turn_id);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"turn.abort","request_id":"req-abort-turn","session_id":"{session_id}","turn_id":"{turn_id}"}}"#
                 )
@@ -2090,7 +2090,7 @@ mod web {
         assert_eq!(failed["error"], "aborted");
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 r#"{"type":"state.get","request_id":"req-post-abort-state"}"#.to_string(),
             ))
             .await
@@ -2101,7 +2101,7 @@ mod web {
         assert!(state_after_abort["data"]["active_turn"].is_null());
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-after-abort","session_id":"{session_id}","prompt":"hello after abort"}}"#
                 )
@@ -2497,7 +2497,7 @@ mod web {
         assert_eq!(bootstrap["session_id"], parent_session_id);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.watch","request_id":"req-task-snapshot","session_id":"{}","task_id":"task-root"}}"#,
                     parent_session_id
@@ -2726,7 +2726,7 @@ mod web {
         assert_eq!(bootstrap1["session_id"], parent_session_id);
 
         socket1
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.watch","request_id":"req-task-watch-1","session_id":"{}","task_id":"task-watch"}}"#,
                     parent_session_id
@@ -2803,7 +2803,7 @@ mod web {
         assert_eq!(bootstrap2["session_id"], parent_session_id);
 
         socket2
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.watch","request_id":"req-task-watch-2","session_id":"{}","task_id":"task-watch","after_sequence":{}}}"#,
                     parent_session_id,
@@ -2878,7 +2878,7 @@ mod web {
         assert_eq!(bootstrap3["session_id"], parent_session_id);
 
         socket3
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.watch","request_id":"req-task-watch-3","session_id":"{}","task_id":"task-watch","after_sequence":{}}}"#,
                     parent_session_id,
@@ -2952,7 +2952,7 @@ mod web {
         assert_eq!(bootstrap["session_id"], session_id);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.watch","request_id":"req-watch-live","session_id":"{}","task_id":"task-watch-live"}}"#,
                     session_id
@@ -2967,7 +2967,7 @@ mod web {
         let _ = recv_until_type(&mut socket, "task.detail.snapshot").await;
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"prompt.submit","request_id":"req-watch-prompt","session_id":"{}","prompt":"hello while watching"}}"#,
                     session_id
@@ -3221,7 +3221,7 @@ mod web {
         assert_eq!(bootstrap["type"], "state.snapshot");
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.watch","request_id":"req-watch-foreign","session_id":"{}","task_id":"watch-foreign"}}"#,
                     attached_session_id
@@ -3271,7 +3271,7 @@ mod web {
                 "reprioritize",
             ),
         ] {
-            socket.send(Message::Text(command)).await.unwrap();
+            socket.send(Message::text(command)).await.unwrap();
             let error = recv_until_type(&mut socket, "response.error").await;
             assert_eq!(error["request_id"], request_id);
             assert_eq!(error["error"]["code"], "task_not_found");
@@ -3503,7 +3503,7 @@ mod web {
         assert_eq!(bootstrap["session_id"], session_id);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.cancel","request_id":"req-task-cancel","session_id":"{}","task_id":"cancel-root"}}"#,
                     session_id
@@ -3540,7 +3540,7 @@ mod web {
         assert_eq!(cancel_child_state, TaskLifecycleState::Cancelled);
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.retry","request_id":"req-task-retry","session_id":"{}","task_id":"retry-task"}}"#,
                     session_id
@@ -3579,7 +3579,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.resume","request_id":"req-task-resume","session_id":"{}","task_id":"resume-task"}}"#,
                     session_id
@@ -3622,7 +3622,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.reprioritize","request_id":"req-task-reprioritize","session_id":"{}","task_id":"reprio-task","priority":33}}"#,
                     session_id
@@ -3836,7 +3836,7 @@ mod web {
         assert_eq!(bootstrap["type"], "state.snapshot");
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.cancel","request_id":"req-invalid-cancel","session_id":"{}","task_id":"cancel-completed"}}"#,
                     session_id
@@ -3860,7 +3860,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.retry","request_id":"req-invalid-retry","session_id":"{}","task_id":"retry-ready"}}"#,
                     session_id
@@ -3881,7 +3881,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.resume","request_id":"req-invalid-resume","session_id":"{}","task_id":"resume-completed"}}"#,
                     session_id
@@ -3905,7 +3905,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 format!(
                     r#"{{"type":"task.reprioritize","request_id":"req-invalid-reprioritize","session_id":"{}","task_id":"reprio-running","priority":55}}"#,
                     session_id
@@ -3976,7 +3976,7 @@ mod web {
             }),
         );
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 serde_json::json!({
                     "type": "prompt.submit",
                     "request_id": "req-lsp-ready",
@@ -4013,7 +4013,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 serde_json::json!({
                     "type": "state.get",
                     "request_id": "req-lsp-snapshot",
@@ -4081,7 +4081,7 @@ mod web {
 
         for request_id in ["req-lsp-fail-1", "req-lsp-fail-2"] {
             socket
-                .send(Message::Text(
+                .send(Message::text(
                     serde_json::json!({
                         "type": "prompt.submit",
                         "request_id": request_id,
@@ -4118,7 +4118,7 @@ mod web {
         );
 
         socket
-            .send(Message::Text(
+            .send(Message::text(
                 serde_json::json!({
                     "type": "state.get",
                     "request_id": "req-lsp-fail-snapshot",

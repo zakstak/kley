@@ -5,11 +5,12 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use super::{CredentialStore, OpenAiCredentials, save_openai_oauth_credentials};
+use crate::http_client;
 
 // ── Constants (verbatim from the JS) ────────────────────────────────────────
 
@@ -25,7 +26,7 @@ const CALLBACK_PORT: u16 = 1455;
 
 /// Generate PKCE verifier (43-char base64url) and S256 challenge.
 fn generate_pkce() -> (String, String) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut verifier_bytes = [0u8; 32];
     rng.fill(&mut verifier_bytes);
     let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
@@ -38,7 +39,7 @@ fn generate_pkce() -> (String, String) {
 
 /// Generate random hex state string.
 fn generate_state() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut buf = [0u8; 16];
     rng.fill(&mut buf);
     hex::encode(buf)
@@ -102,7 +103,7 @@ async fn exchange_code(
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<OpenAiCredentials> {
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let resp = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -212,7 +213,7 @@ pub async fn finish_login_flow_with_redirect_uri(
 
 /// Refresh an OpenAI token using the refresh_token grant.
 pub async fn refresh_token(refresh_tok: &str) -> Result<OpenAiCredentials> {
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let resp = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -280,7 +281,7 @@ async fn exchange_for_api_key(id_token: &str) -> Result<String> {
         access_token: String,
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client::client();
     let resp = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")

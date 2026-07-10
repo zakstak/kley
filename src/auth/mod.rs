@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::events::{AgentEvent, EventEmitter};
+use crate::http_client;
 
 /// Stored credentials for all providers.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -85,7 +86,7 @@ impl SecretBackend for VaultBackend {
     fn load(&self) -> Result<Option<Credentials>> {
         // Use blocking reqwest since the trait is sync
         let url = format!("{}/v1/{}/data/{}", self.addr, self.mount, self.path);
-        let client = reqwest::blocking::Client::new();
+        let client = http_client::blocking_client();
         let resp = client
             .get(&url)
             .header("X-Vault-Token", &self.token)
@@ -118,7 +119,7 @@ impl SecretBackend for VaultBackend {
         let mut payload = HashMap::new();
         payload.insert("data", serde_json::to_value(creds)?);
 
-        let client = reqwest::blocking::Client::new();
+        let client = http_client::blocking_client();
         let resp = client
             .post(&url)
             .header("X-Vault-Token", &self.token)

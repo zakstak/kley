@@ -566,10 +566,10 @@ fn mock_context_usage(percent_used: u8) -> ContextUsage {
 
 async fn send_response(socket: &mut WebSocket, response: WebResponse) -> Result<(), ()> {
     let text = serde_json::to_string(&response).map_err(|_| ())?;
-    socket.send(Message::Text(text)).await.map_err(|_| ())
+    socket.send(Message::text(text)).await.map_err(|_| ())
 }
 
 async fn send_event(socket: &mut WebSocket, event: UiEvent) -> Result<(), ()> {
     let text = serde_json::to_string(&event).map_err(|_| ())?;
-    socket.send(Message::Text(text)).await.map_err(|_| ())
+    socket.send(Message::text(text)).await.map_err(|_| ())
 }

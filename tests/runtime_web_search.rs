@@ -1,9 +1,9 @@
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use axum::Router;
 use kley::compact::CompactConfig;
 use kley::events::event_channel;
 use kley::runtime::{RuntimeHooks, SessionRuntime, SubmitResult};
@@ -11,7 +11,7 @@ use kley::store::{SharedStore, Store, Turn};
 use kley::test_openai::{self, ControlledResponse, TEST_MODEL};
 use kley::tools::default_registry;
 use kley::tools::web_search::{WebSearchCitationInput, WebSearchResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Mutex as AsyncMutex;
@@ -375,11 +375,13 @@ fn runtime_persists_web_search_function_call_output() {
             .and_then(Value::as_str)
             .expect("stored tool output string expected");
 
-        assert!(!payload
-            .get("call_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .is_empty());
+        assert!(
+            !payload
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .is_empty()
+        );
         assert_eq!(output, expected_web_search_output());
         assert_eq!(
             serde_json::from_str::<Value>(output).unwrap(),

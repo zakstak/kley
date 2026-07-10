@@ -32,7 +32,7 @@ pub(super) async fn send_response(
     let text = serde_json::to_string(&response)
         .map_err(|error| WsIoError::new(WsIoErrorKind::SerializeResponse, error.to_string()))?;
     socket
-        .send(Message::Text(text))
+        .send(Message::text(text))
         .await
         .map_err(|error| WsIoError::new(WsIoErrorKind::SendResponse, error.to_string()))
 }
@@ -41,7 +41,7 @@ pub(super) async fn send_event(socket: &mut WebSocket, event: UiEvent) -> Result
     let text = serde_json::to_string(&event)
         .map_err(|error| WsIoError::new(WsIoErrorKind::SerializeEvent, error.to_string()))?;
     socket
-        .send(Message::Text(text))
+        .send(Message::text(text))
         .await
         .map_err(|error| WsIoError::new(WsIoErrorKind::SendEvent, error.to_string()))
 }
