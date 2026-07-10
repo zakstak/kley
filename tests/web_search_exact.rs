@@ -2,18 +2,18 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use axum::Router;
-use kley::tools::web_search::{
-    resolve_max_results, test_support::override_tavily_timeout_for_test, WebSearchCitationInput,
-    WebSearchResult, WebSearchTool,
-};
 use kley::tools::Tool;
-use serde_json::{json, Value};
+use kley::tools::web_search::{
+    WebSearchCitationInput, WebSearchResult, WebSearchTool, resolve_max_results,
+    test_support::override_tavily_timeout_for_test,
+};
+use serde_json::{Value, json};
 
 struct TestServer {
     addr: std::net::SocketAddr,

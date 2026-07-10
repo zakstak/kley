@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
@@ -25,7 +25,7 @@ const CALLBACK_PORT: u16 = 1455;
 
 /// Generate PKCE verifier (43-char base64url) and S256 challenge.
 fn generate_pkce() -> (String, String) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut verifier_bytes = [0u8; 32];
     rng.fill(&mut verifier_bytes);
     let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
@@ -38,7 +38,7 @@ fn generate_pkce() -> (String, String) {
 
 /// Generate random hex state string.
 fn generate_state() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut buf = [0u8; 16];
     rng.fill(&mut buf);
     hex::encode(buf)

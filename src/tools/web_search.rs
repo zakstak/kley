@@ -1,8 +1,8 @@
 use anyhow::Result;
-use reqwest::blocking::Client;
 use reqwest::StatusCode;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 #[cfg(any(test, feature = "testing"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;

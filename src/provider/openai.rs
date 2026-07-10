@@ -269,7 +269,7 @@ async fn send_ws(
             let _ = ws.close(None).await;
             return Ok(TurnResult::Aborted);
         }
-        result = ws.send(tungstenite::Message::Text(create_payload.to_string())) => {
+        result = ws.send(tungstenite::Message::text(create_payload.to_string())) => {
             result.context("failed to send response.create")?;
         }
     }
