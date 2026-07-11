@@ -1,9 +1,0 @@
-   Compiling kley v0.1.0 (/home/zack/git/kley)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
-     Running tests/store_session_usage.rs (target/debug/deps/store_session_usage-f0e5559364b4d1d5)
-
-running 1 test
-test session_usage_totals_can_run_inside_store_run ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
-
