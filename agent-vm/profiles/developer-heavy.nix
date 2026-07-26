@@ -1,9 +1,15 @@
 { pkgs, lib }:
 
 let
-  developerHeavyPackages = lib.unique ([
+  developerHeavyPackages = lib.unique [
     pkgs.git
     pkgs.gh
+    pkgs.zsh
+    pkgs.starship
+    pkgs.fzf
+    pkgs.oh-my-zsh
+    pkgs.zsh-autosuggestions
+    pkgs.zsh-syntax-highlighting
     pkgs.rustc
     pkgs.cargo
     pkgs.rustfmt
@@ -31,7 +37,7 @@ let
     pkgs.yaml-language-server
     pkgs.nixd
     pkgs.pyright
-  ]);
+  ];
 in {
   packages = developerHeavyPackages;
 }

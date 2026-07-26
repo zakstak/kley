@@ -179,24 +179,16 @@ cargo run --bin kley -- <subcommand>
 `./preflight.sh` will run `kley preflight` through Cargo or an installed `kley`
 binary, depending on what is available.
 
-## Agent VM rolling update lane
+## Agent VM host layout
 
-The repo-owned agent VM baseline lives under `agent-vm/` and uses a single
-canary-first promotion flow: a normal deploy targets `saga-dev`, stages and
-validates the same checkout on `saga-dev2` first, then promotes `saga-dev` from
-the same revision and `flake.lock`.
+The repo-owned agent VM baseline lives under `agent-vm/` and currently targets
+the shared `saga-runtime` host:
 
-Every VM build records the exact resolved checkout revision in
-`system.configurationRevision` and `/etc/kley-agent-vm-build.json`, so a default
-`HEAD` workflow becomes an exact build record instead of a floating label. See
-[`agent-vm/README.md`](./agent-vm/README.md) for the promotion contract checks,
-the explicit deploy wrapper target selection, the local-checkout `saga-dev2`
-apply sequence (`agent@saga-dev2`) used during canary validation, and the
-post-apply kley smoke lane that must pass on canary before `saga-dev` promotion.
-The same doc also defines the failed-update recovery path:
-`agent-vm/scripts/recover-canary-after-failed-update.sh` for runtime generation
-rollback on `saga-dev2`, followed by repo source-of-truth (`flake.lock` /
-`agent-vm/**`) reversion before retrying canary apply/validation.
+- `saga-runtime` — the default Saga login target, with the shared
+  non-Nix-managed `pi`, `codex`, and `opencode` CLIs on PATH.
+
+Deploy, validate, and rollback guidance now lives in
+[`agent-vm/README.md`](./agent-vm/README.md).
 
 ## Development notes
 

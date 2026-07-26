@@ -1,8 +1,15 @@
 { ... }:
-{
-  # Machine facts + lane toggle only.
-  networking.hostName = "saga-dev2";
+let
+  rootFsLabel = "saga-runtime-roo";
+in {
+  networking.hostName = "saga-runtime";
+  kley.agentVm.rootFsLabel = rootFsLabel;
+  networking.usePredictableInterfaceNames = false;
   networking.useDHCP = false;
+  systemd.network.links."10-primary-virtio" = {
+    matchConfig.Driver = "virtio_net";
+    linkConfig.Name = "eth0";
+  };
   networking.interfaces.eth0.ipv4.addresses = [ {
     address = "10.0.0.51";
     prefixLength = 24;
@@ -10,11 +17,11 @@
   networking.interfaces.eth0.ipv4.routes = [ {
     address = "10.0.1.0";
     prefixLength = 24;
-    via = "10.0.0.254";
+    via = "10.0.0.1";
   } ];
   networking.defaultGateway = "10.0.0.1";
   networking.nameservers = [ "1.1.1.1" "8.8.8.8" ];
-  networking.firewall.allowedTCPPorts = [ 80 3000 ];
+  networking.hosts."192.168.4.42" = [ "executor.home.zakstak.com" ];
 
   services.qemuGuest.enable = true;
 
@@ -27,6 +34,8 @@
     "sr_mod"
   ];
   boot.kernelParams = [
+    "net.ifnames=0"
+    "biosdevname=0"
     "console=tty0"
     "console=ttyS0,115200n8"
     "systemd.log_level=debug"
@@ -34,11 +43,9 @@
   ];
 
   fileSystems."/" = {
-    device = "/dev/disk/by-label/saga-dev2-root";
+    device = "/dev/disk/by-label/${rootFsLabel}";
     fsType = "ext4";
   };
 
-  kley.agentVm.promotionLane = "canary";
-  kley.agentVm.webPublicOrigin = "http://saga-dev2";
   system.stateVersion = "24.11";
 }

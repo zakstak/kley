@@ -2,7 +2,7 @@ let
   nixosModules = {
     base = import ./base.nix;
     "developer-tools" = import ./developer-tools.nix;
-    "opencode-harness" = import ./opencode-harness.nix;
+    "runtime-cli-tools" = import ./runtime-cli-tools.nix;
     disko = import ./disko.nix;
     impermanence = import ./impermanence.nix;
   };
@@ -12,11 +12,10 @@ let
     nixosModules.disko
     nixosModules.impermanence
   ];
-  agentModuleImports = baseModuleImports ++ [ nixosModules."opencode-harness" ];
 in {
   inherit nixosModules;
 
-  # Keep the shared module order explicit so hosts consume a stable contract.
-  inherit baseModuleImports agentModuleImports;
+  # Keep the shared module order explicit so the single host consumes a stable baseline.
+  inherit baseModuleImports;
   sharedModuleImports = baseModuleImports;
 }

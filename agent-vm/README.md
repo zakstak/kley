@@ -1,245 +1,89 @@
 # Agent VM module graph
 
-`agent-vm/` is the shared NixOS baseline for repo-owned agent VMs.
+`agent-vm/` is the shared NixOS baseline for the repo-owned `saga-runtime` agent
+VM.
 
-- `modules/base.nix` defines the shared OS/runtime contract.
-- `modules/opencode-harness.nix` defines the shared agent runtime layer and owns
-  the developer-heavy package inventory.
-- `modules/disko.nix` is the shared storage-contract slot.
-- `modules/impermanence.nix` is the shared persistence-policy slot.
+- `modules/base.nix` defines the shared host baseline.
+- `modules/runtime-cli-tools.nix` bootstraps the default non-wrapper CLI runtime
+  tools for `saga-runtime`.
 - `hosts/` stays thin and should only describe machine facts.
-- `scripts/write-generated-vault-env.sh` writes a gitignored Vault env file for
-  local-only VM builds when you want the web UI to use Vault-backed credentials.
+- `default.nix` is where the host gets wired to its additive runtime modules.
 
-## Rolling update lane
+## Host layout
 
-Routine VM updates are lockfile-driven and canary-first. The normal deploy
-target is `saga-dev`; `saga-dev2` is reserved for explicit canary-only runs. Do
-not treat an ambiguous deploy request as `saga-dev2`.
+The `saga-runtime` VM is the default non-wrapper runtime host. It ships the
+shared non-Nix-managed `pi`, `codex`, and `opencode` CLIs on PATH. It does not
+require a repo checkout inside the VM and does not provision
+`/var/lib/kley/opencode`.
 
-1. Update the repo checkout by changing `flake.lock` and/or shared `agent-vm/**`
-   baseline files.
-2. Build and apply `saga-dev2` first.
-3. Run canary validation against that same checkout revision.
-4. Promote `saga-dev` only after the canary passes, using the same checkout and
-   the same resolved inputs.
+The build metadata is written to `/etc/kley-agent-vm-build.json` and records the
+host plus any additive runtime state.
 
-`modules/base.nix` writes `/etc/kley-agent-vm-build.json` on every host and sets
-`system.configurationRevision` from the exact flake checkout revision resolved
-at build time. That keeps a default `HEAD` workflow reproducible because the
-build records the concrete revision that was actually applied.
+## Deploy and validate
 
-## Promotion contract checks
-
-Use the root flake for both hosts; do not introduce a second flake or host-local
-override path.
+Apply the current checkout to the runtime host:
 
 ```bash
-REF=$(git -C /home/zack/git/kley rev-parse HEAD)
-nix build /home/zack/git/kley#nixosConfigurations.saga-dev2.config.system.build.toplevel
-STORE_PATH=$(readlink -f /home/zack/git/kley/result)
-nix eval --raw /home/zack/git/kley#nixosConfigurations.saga-dev2.config.system.configurationRevision
-nix eval --raw /home/zack/git/kley#nixosConfigurations.saga-dev2.config.environment.etc."kley-agent-vm-build.json".text
+agent-vm/scripts/deploy-agent-vm.sh saga-runtime
 ```
 
-After the canary checks pass, promote from the same checkout:
+Lower-level helpers for the same single-host path:
 
 ```bash
-nix build /home/zack/git/kley#nixosConfigurations.saga-dev.config.system.build.toplevel
-nix eval --raw /home/zack/git/kley#nixosConfigurations.saga-dev.config.system.configurationRevision
+agent-vm/scripts/apply-local-checkout.sh
+agent-vm/scripts/validate-kley.sh
 ```
 
-The `configurationRevision` values for `saga-dev2` and `saga-dev` should match
-for a promotion run; only the host name and `promotionLane` fields should differ
-inside `kley-agent-vm-build.json`.
+`validate-kley.sh` enforces the runtime-only contract for `saga-runtime`: normal
+CLI installs on PATH, no harness wrappers, and no `/var/lib/kley` runtime roots.
 
-## Deploy target selection
-
-Use the deploy wrapper with an explicit target every time:
+`pi` is installed the standard npm way by the `pi-coding-agent-npm-install`
+startup service:
 
 ```bash
-agent-vm/scripts/deploy-agent-vm.sh saga-dev
+npm install -g @earendil-works/pi-coding-agent
 ```
 
-- `saga-dev` is the normal rollout target. The wrapper still applies and
-  validates `saga-dev2` first, then promotes `saga-dev` from the same checkout.
-- `saga-dev2` is only for an explicitly requested canary-only run.
-- If no target is provided, the wrapper fails fast instead of defaulting to
-  `saga-dev2`.
+The service uses the agent-owned global prefix `/home/agent/.npm-global`, so
+normal `ssh agent@saga-runtime` lands in an environment where `pi` is on PATH
+and `pi update --self` can update the npm-managed install.
 
-## Vault-backed web auth on agent VMs
+`codex` follows that same npm-managed path through the
+`runtime-cli-tools-install` startup service, which installs `@openai/codex` into
+the agent-owned npm prefix and keeps `/usr/local/bin/codex` pointed at that
+user-managed install.
 
-If your operator environment already has `VAULT_ADDR` and `VAULT_TOKEN`, write
-them into the gitignored generated file before deploying:
+`opencode` stays off Nix too, but it avoids both npm and the generic glibc
+installer build on NixOS. The same `runtime-cli-tools-install` service pulls the
+official musl release artifact into `/home/agent/.opencode/bin`, then keeps
+`/usr/local/bin/opencode` pointed at that managed install.
+
+## Rollback
+
+For a bad update on the single host, roll back the active system generation:
+
+```bash
+agent-vm/scripts/recover-after-failed-update.sh
+```
+
+That script runs the standard NixOS rollback path on whichever host you target
+(default `saga-runtime`):
+
+```bash
+sudo nix-env --rollback -p /nix/var/nix/profiles/system
+sudo /nix/var/nix/profiles/system/bin/switch-to-configuration switch
+```
+
+## Vault locator on the shared host
+
+If your operator environment already has `VAULT_ADDR`, write it into the
+gitignored generated file before deploying:
 
 ```bash
 agent-vm/scripts/write-generated-vault-env.sh
 ```
 
-That creates `agent-vm/.generated/vault-environment.json`, and the shared VM
-deploy/build scripts load that file into `VAULT_ADDR` and `VAULT_TOKEN`, then
-build the VM configuration with `--impure` so the shared base module exports
-those values into the built VM environment. This keeps Vault values out of
-tracked Nix while making them available to `kley web` on the VM.
-
-## Local-checkout canary apply workflow (`saga-dev2`)
-
-Task 6 deploys directly from the local kley checkout; do not edit files on the
-VM and do not use a second registry/source of truth.
-
-The operator path is fixed to the repo-root build + `agent@saga-dev2` apply:
-
-```bash
-REPO_ROOT=/home/zack/git/kley
-REF=$(git -C "$REPO_ROOT" rev-parse HEAD)
-nix build "$REPO_ROOT#nixosConfigurations.saga-dev2.config.system.build.toplevel"
-STORE_PATH=$(readlink -f "$REPO_ROOT/result")
-nix-store --export $(nix-store -qR "$STORE_PATH") | ssh agent@saga-dev2 "sudo nix-store --import"
-ssh agent@saga-dev2 "sudo nix-env -p /nix/var/nix/profiles/system --set $STORE_PATH && sudo $STORE_PATH/bin/switch-to-configuration switch"
-ssh agent@saga-dev2 "readlink /nix/var/nix/profiles/system"
-ssh agent@saga-dev2 "sudo nix-env --list-generations -p /nix/var/nix/profiles/system"
-```
-
-`readlink /nix/var/nix/profiles/system` and `--list-generations` are the source
-for confirming which generation is active after switch.
-
-For a non-interactive wrapper around the normal full rollout, run:
-
-```bash
-agent-vm/scripts/deploy-agent-vm.sh saga-dev
-```
-
-For lower-level debugging or surgical canary work, run:
-
-```bash
-agent-vm/scripts/apply-local-checkout-canary.sh
-```
-
-Optional overrides (same declarative flow):
-
-- `KLEY_REPO_ROOT=/path/to/checkout`
-- `CANARY_HOST=saga-dev2`
-- `FLAKE_HOST=saga-dev2`
-- `AGENT_USER=agent`
-
-## Push-known-changes canary validation lane (`saga-dev2`)
-
-After the canary switch completes, validate kley on `saga-dev2` before any
-promotion to `saga-dev`. The default operator path stays repo-first and reuses
-the repo-native entrypoints already documented at the root:
-
-1. Apply the local checkout to `saga-dev2`.
-2. Run the kley smoke lane from the same local checkout used for the apply; the
-   validator stages that checkout to a temporary directory on the canary by
-   default.
-3. Promote `saga-dev` only if both the terminal and web smoke checks pass.
-
-The operator sequence is:
-
-```bash
-agent-vm/scripts/apply-local-checkout-canary.sh
-agent-vm/scripts/validate-canary-kley.sh
-```
-
-`validate-canary-kley.sh` makes the required post-apply checks explicit so the
-promotion gate does not depend on memory. By default it stages the same local
-checkout used for the apply into a temporary directory on `saga-dev2`, runs the
-smoke checks there, and removes that staged checkout on exit. Before any smoke
-check runs, it verifies that the local checkout's recorded build revision
-matches the deployed host's `/etc/kley-agent-vm-build.json` revision so apply
-and validate cannot silently drift apart.
-
-- stages the local checkout or verifies an explicitly provided remote checkout,
-  then checks that the repo-local entrypoint `kley-run.sh` is present
-- runs terminal smoke with `./kley-run.sh chat --help`
-- runs web smoke with `./kley-run.sh web --bind 127.0.0.1:3210`
-- probes `http://127.0.0.1:3210/healthz` for `ok` and `/` for the `Kley web`
-  marker before allowing promotion
-
-`./preflight.sh` remains useful for a fully bootstrapped developer box, but it
-is not part of the staged canary smoke lane because it requires git remote and
-GitHub auth state that the repo-first validation path does not provision.
-
-If you already have a trusted remote checkout and want to validate that instead
-of the staged local copy, set the path explicitly instead of improvising:
-
-```bash
-REMOTE_KLEY_REPO_ROOT=/path/to/kley agent-vm/scripts/validate-canary-kley.sh
-```
-
-Optional overrides for the same canary lane:
-
-- `CANARY_HOST=saga-dev2`
-- `AGENT_USER=agent`
-- `KLEY_REPO_ROOT=/path/to/local/kley`
-- `REMOTE_KLEY_REPO_ROOT=/path/to/existing/remote/kley`
-- `REMOTE_KLEY_STAGE_ROOT=/tmp/kley-canary-saga-dev2-12345`
-- `KLEY_WEB_BIND=127.0.0.1:3210`
-- `KLEY_WEB_PUBLIC_ORIGIN=http://saga-dev2`
-
-## Reverse-proxied Kley web on agent VMs
-
-The shared VM base now runs a persistent `kley-web` systemd service bound to
-`127.0.0.1:3210` and fronts it with nginx on port `80`.
-
-- browser URL: `http://saga-dev/` or `http://saga-dev2/`
-- websocket URL: `ws://saga-dev/ws`
-- callback URL: `http://saga-dev/auth/callback`
-
-When using this shape, users should access Kley only through the proxy hostname.
-Do not send browsers directly to `:3210` on the VM.
-
-## Rollback and recovery flow for failed canary updates (`saga-dev2`)
-
-If Task 6 apply or Task 7 canary validation fails after a switch, recover
-`saga-dev2` first at runtime, then recover source-of-truth before retrying. Do
-not guess generation numbers or rebuild repeatedly.
-
-### A) Runtime rollback on `saga-dev2` (restore previous good generation)
-
-Use the explicit rollback companion script for the same canary host lane:
-
-```bash
-agent-vm/scripts/recover-canary-after-failed-update.sh
-```
-
-That script always follows this command path on `agent@saga-dev2`:
-
-```bash
-sudo nix-env --list-generations -p /nix/var/nix/profiles/system
-sudo nix-env --rollback -p /nix/var/nix/profiles/system
-sudo /nix/var/nix/profiles/system/bin/switch-to-configuration switch
-```
-
-To remove guesswork, it parses `--list-generations` output, identifies the
-`(current)` generation, then selects the highest generation lower than current
-as the rollback target before executing `--rollback`.
-
-### B) Source-of-truth reversion in repo state (before retrying canary)
-
-Runtime rollback only fixes the running VM state. If the breakage was caused by
-the promoted repo inputs (for example `flake.lock` or shared `agent-vm/**`
-baseline changes), revert that change in the checkout before retrying canary.
-
-Revert the bad committed change on a throwaway branch:
-
-```bash
-git switch -c task9-recovery-retry
-git log --oneline -n 10 -- flake.lock agent-vm
-git revert <bad-commit-sha>
-```
-
-Or if the bad change is still local/uncommitted:
-
-```bash
-git restore --staged --worktree flake.lock agent-vm
-```
-
-Then rerun the same canary-first lane (no alternate workflow):
-
-```bash
-agent-vm/scripts/apply-local-checkout-canary.sh
-agent-vm/scripts/validate-canary-kley.sh
-```
-
-Only promote to `saga-dev` after this rerun passes on `saga-dev2`.
+That creates `agent-vm/.generated/vault-environment.json`, and the deploy/apply
+scripts build the VM configuration with `--impure` so the shared baseline can
+export the non-secret Vault address into the host environment. `VAULT_TOKEN` is
+intentionally not propagated to deployed hosts.

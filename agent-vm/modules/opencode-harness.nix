@@ -1,3 +1,0 @@
-{ kleyPackage, ... }: {
-  environment.systemPackages = [ kleyPackage ];
-}

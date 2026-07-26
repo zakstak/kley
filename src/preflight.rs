@@ -122,6 +122,10 @@ fn build_report(runner: &impl CommandRunner, env: &RuntimeEnv) -> Report {
         runner.run(&command("npm").arg("--version")).success,
     );
     report.optional(
+        "codex is installed",
+        runner.run(&command("codex").arg("--version")).success,
+    );
+    report.optional(
         "go is installed",
         runner.run(&command("go").arg("version")).success,
     );
@@ -596,11 +600,11 @@ pub mod preflight_test_support {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
 
-    pub use super::{CommandOutput, CommandRunner, CommandSpec};
     pub use super::{
-        LspCheckResult, LspRequirement, command_for_lsp_requirement, lsp_requirements,
-        run_required_lsp_checks_with_runner,
+        command_for_lsp_requirement, lsp_requirements, run_required_lsp_checks_with_runner,
+        LspCheckResult, LspRequirement,
     };
+    pub use super::{CommandOutput, CommandRunner, CommandSpec};
 
     pub struct FakeRunner {
         responses: RefCell<HashMap<String, VecDeque<CommandOutput>>>,
@@ -801,6 +805,7 @@ mod tests {
             (command("cmake").arg("--version"), CommandOutput::failure()),
             (command("node").arg("--version"), CommandOutput::success()),
             (command("npm").arg("--version"), CommandOutput::success()),
+            (command("codex").arg("--version"), CommandOutput::success()),
             (command("go").arg("version"), CommandOutput::success()),
             (
                 command("python3").arg("--version"),
@@ -862,7 +867,7 @@ mod tests {
         assert!(text.contains("  ✗ can fetch from a remote"));
         assert!(text.contains("  ✗ kley binary works"));
         assert!(text.contains("  ⚠ cmake is installed (optional)"));
-        assert!(text.contains("  Passed: 31  Failed: 2  Warnings: 1"));
+        assert!(text.contains("  Passed: 32  Failed: 2  Warnings: 1"));
         assert!(text.contains("⚠ Fix the failing checks above before continuing."));
     }
 

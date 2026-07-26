@@ -6,12 +6,12 @@ pre-commit:
     format:
       glob: "*.{go,rs,ts,tsx,js,jsx,html,htm,yml,yaml,sh,md,toml,json,py}"
       run: >
-        "/home/zack/personal/pragma/lib/format.sh" {staged_files}
+        "/home/zack/.pragma/lib/format.sh" {staged_files}
 
     lint:
       glob: "*.{go,rs,ts,tsx,js,jsx,yml,yaml,sh,toml,py,dockerfile,Dockerfile}"
       run: >
-        "/home/zack/personal/pragma/lib/lint.sh" {staged_files}
+        "/home/zack/.pragma/lib/lint.sh" {staged_files}
 
     gitleaks:
       run: >
