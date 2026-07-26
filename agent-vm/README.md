@@ -1,51 +1,30 @@
 # Agent VM module graph
 
-`agent-vm/` is the shared NixOS baseline for two repo-owned agent VMs:
-`saga-runtime` and `saga-dev`.
+`agent-vm/` is the shared NixOS baseline for the repo-owned `saga-runtime` agent
+VM.
 
 - `modules/base.nix` defines the shared host baseline.
-- `modules/runtime-harness.nix` defines the shared Kley runtime package layer.
-- `modules/runtime-cli-tools.nix` installs the default non-wrapper CLI runtime
+- `modules/runtime-cli-tools.nix` bootstraps the default non-wrapper CLI runtime
   tools for `saga-runtime`.
-- `modules/opencode-harness.nix` and `modules/hermes-harness.nix` add isolated
-  harness-specific behavior on top of that baseline.
 - `hosts/` stays thin and should only describe machine facts.
-- `default.nix` is where the host gets wired to its additive harness set.
+- `default.nix` is where the host gets wired to its additive runtime modules.
 
 ## Host layout
 
-The `saga-runtime` VM is the default non-wrapper runtime host. It ships native
-`pi`, `codex`, and `opencode` on PATH plus a normal Hermes CLI install in the
-agent user's profile. It does not require a repo checkout inside the VM and it
-does not provision `/var/lib/kley/opencode` or `/var/lib/kley/hermes`.
-
-The `saga-dev` VM remains the explicit harness host. It carries two isolated
-harnesses plus a shared native `pi` binary:
-
-- `opencode` — the default public web/runtime harness
-- `hermes` — a second isolated runtime harness on the same machine
-- `pi` — a native CLI from the shared package layer, available on PATH
-
-Each harness keeps its own state and config root under `/var/lib/kley`:
-
-- `/var/lib/kley/opencode`
-- `/var/lib/kley/hermes`
+The `saga-runtime` VM is the default non-wrapper runtime host. It ships the
+shared non-Nix-managed `pi`, `codex`, and `opencode` CLIs on PATH. It does not
+require a repo checkout inside the VM and it does not provision
+`/var/lib/kley/opencode`.
 
 The build metadata is written to `/etc/kley-agent-vm-build.json` and records the
-host plus the additive harness set.
+host plus any additive runtime state.
 
 ## Deploy and validate
 
-Apply the current checkout to the default runtime host:
+Apply the current checkout to the runtime host:
 
 ```bash
 agent-vm/scripts/deploy-agent-vm.sh saga-runtime
-```
-
-The harness host stays available explicitly:
-
-```bash
-agent-vm/scripts/deploy-agent-vm.sh saga-dev
 ```
 
 Lower-level helpers for the same single-host path:
@@ -55,22 +34,29 @@ agent-vm/scripts/apply-local-checkout.sh
 agent-vm/scripts/validate-kley.sh
 ```
 
-Validation expects these harness-specific entrypoints to exist on `saga-dev`:
+`validate-kley.sh` enforces the runtime-only contract for `saga-runtime`: normal
+CLI installs on PATH, no harness wrappers, and no `/var/lib/kley` runtime roots.
 
-- `kley-opencode`
-- `kley-hermes`
+`pi` is installed the standard npm way by the `pi-coding-agent-npm-install`
+startup service:
 
-pi is installed from the shared package layer, so normal `ssh agent@saga-dev`
-lands in the shared baseline environment with the native `pi` binary already on
-PATH.
+```bash
+npm install -g @earendil-works/pi-coding-agent
+```
 
-And these runtime services:
+The service uses the agent-owned global prefix `/home/agent/.npm-global`, so
+normal `ssh agent@saga-runtime` lands in an environment where `pi` is on PATH
+and `pi update --self` can update the npm-managed install.
 
-- `kley-web-opencode`
-- `kley-web-hermes`
+`codex` follows that same npm-managed path through the
+`runtime-cli-tools-install` startup service, which installs `@openai/codex` into
+the agent-owned npm prefix and keeps `/usr/local/bin/codex` pointed at that
+user-managed install.
 
-The shared public nginx entrypoint proxies `http://saga-dev/` to the opencode
-runtime. Hermes stays isolated behind its own local bind by default.
+`opencode` stays off Nix too, but it avoids both npm and the generic glibc
+installer build on NixOS. The same `runtime-cli-tools-install` service pulls the
+official musl release artifact into `/home/agent/.opencode/bin`, then keeps
+`/usr/local/bin/opencode` pointed at that managed install.
 
 ## Rollback
 

@@ -4,6 +4,12 @@ let
   developerHeavyPackages = lib.unique [
     pkgs.git
     pkgs.gh
+    pkgs.zsh
+    pkgs.starship
+    pkgs.fzf
+    pkgs.oh-my-zsh
+    pkgs.zsh-autosuggestions
+    pkgs.zsh-syntax-highlighting
     pkgs.rustc
     pkgs.cargo
     pkgs.rustfmt
@@ -12,11 +18,9 @@ let
     pkgs.gnumake
     pkgs.cmake
     pkgs.nodejs_22
-    pkgs.codex
     pkgs.go
     pkgs.python3
     pkgs.sqlite
-    pkgs."pi-coding-agent"
     pkgs.shellcheck
     pkgs.tree
     pkgs.jq

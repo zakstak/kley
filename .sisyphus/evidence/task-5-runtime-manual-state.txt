@@ -1,0 +1,10 @@
+saga-runtime
+/home/agent/.nix-profile/bin/tmux
+enabled
+active
+set -g extended-keys on
+BackendState=Running
+Health=[]
+CurrentTailnet=True
+TailscaleIPs=['100.97.57.72', 'fd7a:115c:a1e0::703a:3948']
+key_exists=false

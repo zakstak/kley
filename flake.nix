@@ -41,7 +41,6 @@
         kleyPackage = packageFor "x86_64-linux";
       };
       # Hostname strings kept explicit for saga deploy preflight grep checks:
-      # "saga-dev"
       # "saga-runtime"
     in {
       packages = forAllSystems (system: {
@@ -93,11 +92,10 @@
           "vm-baseline-host-builds" = checkPkgs.runCommand "agent-vm-host-builds" {
             src = ./.;
             buildInputs = [
-              agentVm.nixosConfigurations.saga-dev.config.system.build.toplevel
               agentVm.nixosConfigurations.saga-runtime.config.system.build.toplevel
             ];
           } ''
-            echo "saga-dev and saga-runtime host toplevels built"
+            echo "saga-runtime host toplevel built"
             mkdir -p "$out"
             touch "$out/hosts-built"
           '';

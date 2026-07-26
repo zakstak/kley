@@ -17,14 +17,6 @@ in
   inherit (moduleGraph) nixosModules;
 
   nixosConfigurations = {
-    saga-dev = mkHost {
-      hostModule = ./hosts/saga-dev.nix;
-      extraModules = [
-        moduleGraph.nixosModules."opencode-harness"
-        moduleGraph.nixosModules."hermes-harness"
-      ];
-    };
-
     saga-runtime = mkHost {
       hostModule = ./hosts/saga-runtime.nix;
       extraModules = [

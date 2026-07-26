@@ -181,14 +181,11 @@ binary, depending on what is available.
 
 ## Agent VM host layout
 
-The repo-owned agent VM baseline lives under `agent-vm/` and now targets two
-shared hosts:
+The repo-owned agent VM baseline lives under `agent-vm/` and currently targets
+the shared `saga-runtime` host:
 
-- `saga-runtime` — the default Saga login target, with native `pi`, `codex`, and
-  `opencode` on PATH plus an official Hermes CLI install under the agent user
-  profile.
-- `saga-dev` — the explicit harness host, carrying the two isolated harnesses
-  (`opencode` and `hermes`) plus the shared native `pi` binary.
+- `saga-runtime` — the default Saga login target, with the shared
+  non-Nix-managed `pi`, `codex`, and `opencode` CLIs on PATH.
 
 Deploy, validate, and rollback guidance now lives in
 [`agent-vm/README.md`](./agent-vm/README.md).

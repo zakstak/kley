@@ -2,10 +2,7 @@ let
   nixosModules = {
     base = import ./base.nix;
     "developer-tools" = import ./developer-tools.nix;
-    "runtime-harness" = import ./runtime-harness.nix;
     "runtime-cli-tools" = import ./runtime-cli-tools.nix;
-    "opencode-harness" = import ./opencode-harness.nix;
-    "hermes-harness" = import ./hermes-harness.nix;
     disko = import ./disko.nix;
     impermanence = import ./impermanence.nix;
   };

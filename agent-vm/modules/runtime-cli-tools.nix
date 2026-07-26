@@ -1,85 +1,103 @@
 { lib, pkgs, ... }:
 let
-  agentHome = "/home/agent";
-  hermesHome = "${agentHome}/.hermes";
-  localBinDir = "${agentHome}/.local/bin";
-  hermesInstallDir = "/usr/local/lib/hermes-agent";
-  hermesInstallRef = "v2026.4.23";
-  hermesInstallerUrl = "https://raw.githubusercontent.com/NousResearch/hermes-agent/${hermesInstallRef}/scripts/install.sh";
-  hermesInstallerSha256 = "251c1b97dda5db092d152d34afa315612fe27329e821c5414130f2a7e0c011e2";
-  hermesEntrypoint = "${hermesInstallDir}/venv/bin/hermes";
-  hermesUserCommand = "${localBinDir}/hermes";
-  hermesCommand = "/usr/local/bin/hermes";
-  hermesInstaller = pkgs.writeShellScript "install-hermes-runtime" ''
-    set -euo pipefail
-
-    export HERMES_HOME=${lib.escapeShellArg hermesHome}
-    export HERMES_INSTALL_DIR=${lib.escapeShellArg hermesInstallDir}
-    export HERMES_INSTALL_REF=${lib.escapeShellArg hermesInstallRef}
-    export HERMES_INSTALLER_URL=${lib.escapeShellArg hermesInstallerUrl}
-    export HERMES_INSTALLER_SHA256=${lib.escapeShellArg hermesInstallerSha256}
-    export TMPDIR=/tmp
-    export PATH=${lib.escapeShellArg (lib.makeBinPath [
-      pkgs.bash
-      pkgs.coreutils
-      pkgs.curl
-      pkgs.ffmpeg
-      pkgs.gawk
-      pkgs.git
-      pkgs.gnugrep
-      pkgs.gnused
-      pkgs.nodejs_22
-      pkgs.openssh
-      pkgs.python311
-      pkgs.python3
-      pkgs.ripgrep
-      pkgs.uv
-    ])}:$PATH
-
-    mkdir -p ${lib.escapeShellArg hermesHome}
-    installer_script=$(mktemp)
-    trap 'rm -f "$installer_script"' EXIT
-
-    if [ ! -x ${lib.escapeShellArg hermesEntrypoint} ]; then
-      ${pkgs.curl}/bin/curl -fsSL "$HERMES_INSTALLER_URL" -o "$installer_script"
-      installer_sha="$(${pkgs.coreutils}/bin/sha256sum "$installer_script" | ${pkgs.gawk}/bin/awk '{print $1}')"
-      if [ "$installer_sha" != "$HERMES_INSTALLER_SHA256" ]; then
-        echo "[kley] Hermes installer hash mismatch for $HERMES_INSTALLER_URL" >&2
-        exit 1
-      fi
-      ${pkgs.bash}/bin/bash "$installer_script" --skip-setup --branch "$HERMES_INSTALL_REF" --dir "$HERMES_INSTALL_DIR" --hermes-home "$HERMES_HOME"
-      chown -R agent:users ${lib.escapeShellArg hermesHome}
-    fi
-
-    if [ -x ${lib.escapeShellArg hermesEntrypoint} ]; then
-      install -d -m 0755 /usr/local/bin
-      ln -sf ${lib.escapeShellArg hermesEntrypoint} ${lib.escapeShellArg hermesCommand}
-      install -d -m 0700 -o agent -g users ${lib.escapeShellArg localBinDir}
-      ln -sf ${lib.escapeShellArg hermesEntrypoint} ${lib.escapeShellArg hermesUserCommand}
-      chown -h agent:users ${lib.escapeShellArg hermesUserCommand}
-    fi
-  '';
+  runtimeCliNpmPrefix = "/home/agent/.npm-global";
+  runtimeCliNpmBin = "${runtimeCliNpmPrefix}/bin";
+  runtimeCliOpencodePrefix = "/home/agent/.opencode";
+  runtimeCliOpencodeBin = "/home/agent/.opencode/bin";
+  codexNpmPackage = "@openai/codex";
 in {
-  environment.localBinInPath = true;
-  environment.systemPackages = [ pkgs.opencode ];
-
-  systemd.tmpfiles.rules = [
-    "d ${agentHome}/.local 0700 agent users -"
-    "d ${localBinDir} 0700 agent users -"
-    "d ${hermesHome} 0700 agent users -"
-  ];
-
-  system.activationScripts.kleyHermesRuntimeInstall.text = ''
-    if [ ! -x ${lib.escapeShellArg hermesEntrypoint} ]; then
-      ${hermesInstaller}
-    fi
-
-    if [ -x ${lib.escapeShellArg hermesEntrypoint} ]; then
-      install -d -m 0755 /usr/local/bin
-      ln -sf ${lib.escapeShellArg hermesEntrypoint} ${lib.escapeShellArg hermesCommand}
-      install -d -m 0700 -o agent -g users ${lib.escapeShellArg localBinDir}
-      ln -sf ${lib.escapeShellArg hermesEntrypoint} ${lib.escapeShellArg hermesUserCommand}
-      chown -h agent:users ${lib.escapeShellArg hermesUserCommand}
-    fi
+  system.activationScripts.kleyHermesRuntimeCleanup.text = ''
+    rm -f /usr/local/bin/hermes
+    rm -f /home/agent/.local/bin/hermes
+    rm -rf /usr/local/lib/hermes-agent
   '';
+
+  systemd.services."runtime-cli-tools-install" = {
+    description = "Install or update runtime CLIs";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+    };
+    path = with pkgs; [
+      bash
+      coreutils
+      curl
+      gnutar
+      gnugrep
+      nodejs_22
+      patchelf
+      util-linux
+    ];
+    script = ''
+      set -euo pipefail
+
+      install -d -m 0755 /usr/local/bin
+      install -d -m 0755 -o agent -g users /home/agent
+      install -d -m 0755 -o agent -g users ${runtimeCliNpmPrefix}
+      install -d -m 0755 -o agent -g users ${runtimeCliNpmBin}
+      install -d -m 0755 -o agent -g users ${runtimeCliOpencodePrefix}
+      install -d -m 0755 -o agent -g users ${runtimeCliOpencodeBin}
+      install -d -m 0755 -o agent -g users /home/agent/.npm
+
+      tmp_npmrc=$(mktemp)
+      if [ -f /home/agent/.npmrc ]; then
+        grep -v -E '^prefix=' /home/agent/.npmrc > "$tmp_npmrc" || true
+      else
+        : > "$tmp_npmrc"
+      fi
+      printf '%s\n' ${lib.escapeShellArg "prefix=${runtimeCliNpmPrefix}"} >> "$tmp_npmrc"
+      install -m 0600 -o agent -g users "$tmp_npmrc" /home/agent/.npmrc
+      rm -f "$tmp_npmrc"
+
+      runuser -u agent -- env \
+        HOME=/home/agent \
+        NPM_CONFIG_PREFIX=${runtimeCliNpmPrefix} \
+        PATH=${runtimeCliNpmBin}:${pkgs.nodejs_22}/bin:/run/current-system/sw/bin:/usr/bin:/bin \
+        npm install -g ${lib.escapeShellArg codexNpmPackage}
+
+      runuser -u agent -- env \
+        HOME=/home/agent \
+        NPM_CONFIG_PREFIX=${runtimeCliNpmPrefix} \
+        PATH=${runtimeCliNpmBin}:${pkgs.nodejs_22}/bin:/run/current-system/sw/bin:/usr/bin:/bin \
+        npm uninstall -g opencode-ai >/dev/null 2>&1 || true
+
+      runuser -u agent -- env \
+        HOME=/home/agent \
+        PATH=${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnutar}/bin:${pkgs.patchelf}/bin:/run/current-system/sw/bin:/usr/bin:/bin \
+        bash -c '
+          set -euo pipefail
+          tmpdir=$(mktemp -d)
+          trap "rm -rf \"$tmpdir\"" EXIT
+          arch=$(uname -m)
+          case "$arch" in
+            x86_64) arch=x64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *)
+              echo "Unsupported OpenCode arch: $arch" >&2
+              exit 1
+              ;;
+          esac
+          target="linux-$arch"
+          if [ "$arch" = "x64" ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+            target="$target-baseline"
+          fi
+          asset="opencode-''${target}-musl.tar.gz"
+          curl -fsSL "https://github.com/anomalyco/opencode/releases/latest/download/''${asset}" -o "$tmpdir/opencode.tar.gz"
+          tar -xzf "$tmpdir/opencode.tar.gz" -C "$tmpdir"
+          install -m 0755 "$tmpdir/opencode" ${runtimeCliOpencodeBin}/opencode
+          patchelf \
+            --set-interpreter ${pkgs.musl}/lib/ld-musl-x86_64.so.1 \
+            --set-rpath ${pkgs.musl}/lib:${pkgs.pkgsMusl.stdenv.cc.cc.lib}/lib \
+            ${runtimeCliOpencodeBin}/opencode
+        '
+
+      ln -sfn ${runtimeCliNpmBin}/codex /usr/local/bin/codex
+      ln -sfn ${runtimeCliOpencodeBin}/opencode /usr/local/bin/opencode
+
+      ${runtimeCliNpmBin}/codex --version >/dev/null
+      ${runtimeCliOpencodeBin}/opencode --version >/dev/null
+    '';
+  };
 }

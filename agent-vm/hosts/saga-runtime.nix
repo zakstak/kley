@@ -17,10 +17,11 @@ in {
   networking.interfaces.eth0.ipv4.routes = [ {
     address = "10.0.1.0";
     prefixLength = 24;
-    via = "10.0.0.254";
+    via = "10.0.0.1";
   } ];
   networking.defaultGateway = "10.0.0.1";
   networking.nameservers = [ "1.1.1.1" "8.8.8.8" ];
+  networking.hosts."192.168.4.42" = [ "executor.home.zakstak.com" ];
 
   services.qemuGuest.enable = true;
 

@@ -1,0 +1,12 @@
++ set -euo pipefail
++ TARGET_HOST=saga-runtime
++ AGENT_USER=agent
++ REMOTE_TARGET=agent@10.0.0.51
++ KLEY_WEB_BIND_OPENCODE=127.0.0.1:3210
++ case "${TARGET_HOST}" in
++ ssh agent@10.0.0.51 'bash -lc '\''command -v pi >/dev/null 2>&1 && command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1 && command -v opencode >/dev/null 2>&1 && opencode --version >/dev/null 2>&1 && ! command -v hermes >/dev/null 2>&1'\'''
+Warning: Permanently added '192.168.4.111' (ED25519) to the list of known hosts.
+Warning: Permanently added '10.0.0.51' (ED25519) to the list of known hosts.
++ ssh agent@10.0.0.51 'bash -lc '\''pi --version >/dev/null 2>&1 && NPM_CONFIG_PREFIX=/home/agent/.npm-global npm list -g @mariozechner/pi-coding-agent --depth=0 >/dev/null 2>&1'\'''
+Warning: Permanently added '192.168.4.111' (ED25519) to the list of known hosts.
+Warning: Permanently added '10.0.0.51' (ED25519) to the list of known hosts.

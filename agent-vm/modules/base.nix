@@ -5,6 +5,7 @@ let
   operatorAuthorizedKeyRuntimePath = "/var/lib/kley/operator-authorized-key.pub";
   githubMachineUser = "saga-agent";
   githubTokenRuntimePath = "/var/lib/kley/github-token";
+  tailscaleAuthKeyRuntimePath = "/var/lib/kley/tailscale-auth-key";
   vaultEnvironment = lib.filterAttrs
     (name: value:
       builtins.elem name [ "VAULT_ADDR" ]
@@ -44,6 +45,119 @@ let
     chown agent:users ${lib.escapeShellArg "${target.home}/.ssh/known_hosts"}
     chmod 600 ${lib.escapeShellArg "${target.home}/.ssh/known_hosts"}
   '') githubBootstrapTargets);
+  portableZshrc = pkgs.writeText "agent-zshrc" ''
+    # Portable agent shell profile derived from Zack's desktop zsh setup.
+    export XDG_CONFIG_HOME="''${XDG_CONFIG_HOME:-$HOME/.config}"
+    export XDG_CACHE_HOME="''${XDG_CACHE_HOME:-$HOME/.cache}"
+
+    export ZSH="${pkgs.oh-my-zsh}/share/oh-my-zsh"
+    export ZSH_CACHE_DIR="$XDG_CACHE_HOME/oh-my-zsh"
+    export ZSH_THEME=""
+
+    DISABLE_MAGIC_FUNCTIONS="true"
+    ENABLE_CORRECTION="false"
+    COMPLETION_WAITING_DOTS="true"
+
+    if [[ $options[zle] = on ]]; then
+      plugins=(git extract)
+      source "$ZSH/oh-my-zsh.sh"
+    fi
+
+    HISTFILE="$HOME/.zsh_history"
+    HISTSIZE=50000
+    SAVEHIST=50000
+    setopt APPEND_HISTORY
+    setopt EXTENDED_HISTORY
+    setopt HIST_EXPIRE_DUPS_FIRST
+    setopt HIST_IGNORE_ALL_DUPS
+    setopt HIST_IGNORE_SPACE
+    setopt HIST_VERIFY
+    setopt INC_APPEND_HISTORY
+    setopt SHARE_HISTORY
+    export HISTIGNORE="&:[bf]g:c:clear:history:exit:q:pwd:* --help"
+
+    export LESS_TERMCAP_md="$(tput bold 2> /dev/null; tput setaf 2 2> /dev/null)"
+    export LESS_TERMCAP_me="$(tput sgr0 2> /dev/null)"
+
+    export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$HOME/.pragma/bin:$PATH"
+    export LS_COLORS="di=38;5;141:ln=38;5;110:so=38;5;179:pi=38;5;179:ex=38;5;108:bd=38;5;137:cd=38;5;137:su=38;5;167:sg=38;5;167:tw=38;5;141:ow=38;5;141"
+
+    if [[ $options[zle] = on ]]; then
+      [[ -r ${pkgs.fzf}/share/fzf/completion.zsh ]] && source ${pkgs.fzf}/share/fzf/completion.zsh
+      [[ -r ${pkgs.fzf}/share/fzf/key-bindings.zsh ]] && source ${pkgs.fzf}/share/fzf/key-bindings.zsh
+      [[ -r ${pkgs.zsh-autosuggestions}/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]] && source ${pkgs.zsh-autosuggestions}/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+      [[ -r ${pkgs.zsh-syntax-highlighting}/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]] && source ${pkgs.zsh-syntax-highlighting}/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    fi
+
+    if [[ $options[zle] = on ]] && command -v starship >/dev/null 2>&1; then
+      eval "$(${pkgs.starship}/bin/starship init zsh)"
+    fi
+
+    typeset -gA ZSH_HIGHLIGHT_STYLES
+    ZSH_HIGHLIGHT_STYLES[command]='none'
+    ZSH_HIGHLIGHT_STYLES[alias]='none'
+    ZSH_HIGHLIGHT_STYLES[builtin]='none'
+    ZSH_HIGHLIGHT_STYLES[function]='none'
+    ZSH_HIGHLIGHT_STYLES[precommand]='none'
+    ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red'
+  '';
+  portableStarshipToml = pkgs.writeText "agent-starship.toml" ''
+    add_newline = false
+    command_timeout = 500
+    format = "$character"
+    right_format = "$directory$git_branch''${custom.git_main_branch}$git_status"
+
+    [character]
+    error_symbol = "[❯ ](bold red)"
+    success_symbol = "[❯ ](#6e6a86)"
+
+    [directory]
+    truncation_length = 1
+    truncation_symbol = ""
+    style = "#6e6a86"
+    format = "[$path]($style)"
+
+    [git_branch]
+    style = "bold #a277ff"
+    format = " [$branch]($style)"
+    ignore_branches = ["main", "master"]
+
+    [custom.git_main_branch]
+    command = "git branch --show-current"
+    when = 'git branch --show-current | grep -qE "^(main|master)$"'
+    style = "bold #a277ff"
+    format = " [$output]($style)"
+
+    [git_status]
+    style = "#6e6a86"
+    format = ' [$all_status$ahead_behind]($style)'
+    conflicted = "⌁''${count} "
+    untracked  = "?''${count} "
+    modified   = "~''${count} "
+    stashed    = "≡''${count} "
+    staged     = "+''${count} "
+    renamed    = "»''${count} "
+    deleted    = "-''${count} "
+    ahead      = "⇡''${count} "
+    diverged   = "⇕⇡''${ahead_count}⇣''${behind_count} "
+    behind     = "⇣''${count} "
+  '';
+  portableTmuxConf = pkgs.writeText "agent-tmux.conf" ''
+    set -g extended-keys on
+  '';
+  shellBootstrapCommands = lib.concatStringsSep "\n" (builtins.map (target: ''
+    install -d -m 0700 -o agent -g users ${lib.escapeShellArg target.home}
+    install -d -m 0700 -o agent -g users ${lib.escapeShellArg target.configHome}
+    install -m 0600 -o agent -g users ${lib.escapeShellArg "${portableZshrc}"} ${lib.escapeShellArg "${target.home}/.zshrc"}
+    install -m 0600 -o agent -g users ${lib.escapeShellArg "${portableStarshipToml}"} ${lib.escapeShellArg "${target.configHome}/starship.toml"}
+    install -m 0600 -o agent -g users ${lib.escapeShellArg "${portableTmuxConf}"} ${lib.escapeShellArg "${target.home}/.tmux.conf"}
+  '') githubBootstrapTargets);
+  piNpmPackage = "@earendil-works/pi-coding-agent";
+  piNpmPrefix = "/home/agent/.npm-global";
+  piNpmBin = "${piNpmPrefix}/bin";
+  piCodingAgentWrapper = pkgs.writeShellScriptBin "pi" ''
+    exec ${piNpmBin}/pi "$@"
+  '';
   sourceMetadata = {
     exactRevision = sourceResolution.kley.exactRevision;
     shortRevision = sourceResolution.kley.shortRevision;
@@ -157,13 +271,17 @@ in {
         isNormalUser = true;
         description = "Agent VM machine user";
         extraGroups = [ "wheel" ];
+        shell = pkgs.zsh;
       };
+
+      programs.zsh.enable = true;
 
       services.openssh.enable = true;
       services.openssh.settings = {
         PasswordAuthentication = false;
         KbdInteractiveAuthentication = false;
       };
+      services.tailscale.enable = true;
 
       system.activationScripts.kleyOperatorAuthorizedKeys.text = ''
         install -d -m 0755 /var/lib/kley
@@ -198,6 +316,10 @@ in {
         ${githubKnownHostsCommands}
       '';
 
+      system.activationScripts.kleyShellExperience.text = ''
+        ${shellBootstrapCommands}
+      '';
+
       security.sudo.wheelNeedsPassword = lib.mkDefault false;
 
       assertions = [
@@ -223,7 +345,7 @@ in {
             "d ${root}/cache 0700 agent users -"
         ]) harnessRoots);
       environment.systemPackages =
-        [ pkgs.gh pkgs.git pkgs.openssh ]
+        [ pkgs.gh pkgs.git pkgs.openssh pkgs.tmux piCodingAgentWrapper ]
         ++ builtins.attrValues (lib.mapAttrs runtimeWrapper runtimeHarnesses);
     }
     (mkIf (publicRuntime != null) {
@@ -356,6 +478,92 @@ sys.exit(0 if any(entry.get("key", "").strip() == needle for entry in entries) e
               }
 
               ${githubBootstrapCommands}
+            '';
+          };
+          tailscaleBootstrap = {
+            description = "Authenticate Tailscale on first boot when a staged key is present";
+            after = [ "network-online.target" "tailscaled.service" ];
+            wants = [ "network-online.target" "tailscaled.service" ];
+            wantedBy = [ "multi-user.target" ];
+            serviceConfig = {
+              Type = "oneshot";
+              User = "root";
+              Group = "root";
+            };
+            path = with pkgs; [
+              bash
+              coreutils
+              gnugrep
+              jq
+              tailscale
+            ];
+            script = ''
+              set -euo pipefail
+
+              auth_key_file=${tailscaleAuthKeyRuntimePath}
+
+              tailscale_running() {
+                tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null
+              }
+
+              if tailscale_running; then
+                rm -f "$auth_key_file"
+                exit 0
+              fi
+
+              if [ ! -s "$auth_key_file" ]; then
+                echo "[tailscale-bootstrap] missing staged auth key at $auth_key_file" >&2
+                exit 1
+              fi
+
+              auth_key=$(tr -d '\r\n' < "$auth_key_file")
+              if [ -z "$auth_key" ] || printf %s "$auth_key" | grep -qi placeholder; then
+                echo "[tailscale-bootstrap] staged auth key is empty or placeholder" >&2
+                exit 1
+              fi
+
+              tailscale up --auth-key="$auth_key"
+
+              if ! tailscale_running; then
+                echo "[tailscale-bootstrap] tailscale did not reach BackendState=Running after bootstrap" >&2
+                exit 1
+              fi
+
+              rm -f "$auth_key_file"
+            '';
+          };
+          "pi-coding-agent-npm-install" = {
+            description = "Install or update Pi Coding Agent with npm";
+            after = [ "network-online.target" ];
+            wants = [ "network-online.target" ];
+            wantedBy = [ "multi-user.target" ];
+            serviceConfig = {
+              Type = "oneshot";
+            };
+            path = with pkgs; [
+              bash
+              coreutils
+              gnugrep
+              nodejs_22
+              util-linux
+            ];
+            script = ''
+              set -euo pipefail
+
+              install -d -m 0755 /usr/local/bin
+              install -d -m 0755 -o agent -g users /home/agent
+              install -d -m 0755 -o agent -g users ${piNpmPrefix}
+              install -d -m 0755 -o agent -g users ${piNpmBin}
+              install -d -m 0755 -o agent -g users /home/agent/.npm
+
+              runuser -u agent -- env \
+                HOME=/home/agent \
+                NPM_CONFIG_PREFIX=${piNpmPrefix} \
+                PATH=${piNpmBin}:${pkgs.nodejs_22}/bin:/run/current-system/sw/bin:/usr/bin:/bin \
+                npm install -g ${lib.escapeShellArg piNpmPackage}
+
+              ln -sfn ${piNpmBin}/pi /usr/local/bin/pi
+              ${piNpmBin}/pi --version >/dev/null
             '';
           };
         };
